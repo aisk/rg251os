@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Anbernic RG351P
+ *
+ * The RG351P shares its mainboard with the RG351M (metal shell variant),
+ * so reuse the mainline RG351M board description and only override what
+ * differs. Built out of tree, see mk/linux.mk.
+ */
+
+/dts-v1/;
+#include "rk3326-anbernic-rg351m.dtsi"
+
+/ {
+	model = "Anbernic RG351P";
+	compatible = "anbernic,rg351p", "rockchip,rk3326";
+};
+
+/* Same panel as the RG351M, mounted in portrait orientation */
+&internal_display {
+	compatible = "elida,kd35t133";
+	iovcc-supply = <&vcc_lcd>;
+	rotation = <270>;
+	vdd-supply = <&vcc_lcd>;
+};
+
+/*
+ * No SPI NOR flash on the RG351P (the vendor BSP DTS disables sfc too).
+ * The mainline node is inherited from the Odroid Go Advance; disabling it
+ * avoids a useless probe at boot.
+ */
+&sfc {
+	status = "disabled";
+};
+
+/*
+ * Let the RK817 cut power on poweroff. Without this property the kernel
+ * falls back to PSCI SYSTEM_OFF, which is not guaranteed to turn the
+ * PMIC off (mainline OGA/RG351M DTs lack it, rk3326-gameforce-chi has it).
+ */
+&rk817 {
+	system-power-controller;
+};
