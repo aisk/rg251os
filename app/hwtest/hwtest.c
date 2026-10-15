@@ -22,6 +22,7 @@
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/reboot.h>
+#include <sys/klog.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
@@ -149,6 +150,86 @@ static void on_sigchld(int sig)
 
 /* ----------------------------------------------------------- PID 1 setup */
 
+/*
+ * Debug aids for bring-up without a serial console. The status LED shows
+ * how far boot got, and the kernel log is copied to the GBA partition so
+ * it can be read on a PC even when the panel stays dark.
+ */
+static void write_file(const char *path, const char *val)
+{
+	int fd = open(path, O_WRONLY | O_CLOEXEC);
+
+	if (fd < 0)
+		return;
+	if (write(fd, val, strlen(val)) < 0)
+		logmsg("write %s: %s", path, strerror(errno));
+	close(fd);
+}
+
+static void status_led(const char *brightness)
+{
+	DIR *d = opendir("/sys/class/leds");
+	struct dirent *e;
+	char path[300];
+
+	if (!d)
+		return;
+	while ((e = readdir(d))) {
+		if (e->d_name[0] == '.')
+			continue;
+		snprintf(path, sizeof(path), "/sys/class/leds/%s/trigger", e->d_name);
+		write_file(path, "none");
+		snprintf(path, sizeof(path), "/sys/class/leds/%s/brightness", e->d_name);
+		write_file(path, brightness);
+	}
+	closedir(d);
+}
+
+static void dump_klog(const char *path)
+{
+	int size = klogctl(10 /* SYSLOG_ACTION_SIZE_BUFFER */, NULL, 0);
+	char *buf;
+	int n, fd;
+
+	if (size <= 0)
+		size = 1 << 17;
+	buf = malloc(size);
+	if (!buf)
+		return;
+	n = klogctl(3 /* SYSLOG_ACTION_READ_ALL */, buf, size);
+	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+	if (fd >= 0 && n > 0) {
+		if (write(fd, buf, n) != n)
+			logmsg("write %s: %s", path, strerror(errno));
+		fsync(fd);
+	}
+	if (fd >= 0)
+		close(fd);
+	free(buf);
+}
+
+/* Child of PID 1: save dmesg at 5s and 20s, then turn the LED green. */
+static void spawn_log_dumper(void)
+{
+	static const char *const dev = "/dev/mmcblk0p3", *const mnt = "/mnt/data";
+
+	if (fork() != 0)
+		return;
+	sleep(5);
+	if (mount(dev, mnt, "vfat", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL)) {
+		logmsg("mount %s: %s", dev, strerror(errno));
+		_exit(1);
+	}
+	mkdir("/mnt/data/log", 0755);
+	dump_klog("/mnt/data/log/dmesg-5s.txt");
+	sleep(15);
+	dump_klog("/mnt/data/log/dmesg-20s.txt");
+	umount(mnt);
+	sync();
+	status_led("0");
+	_exit(0);
+}
+
 static void early_init(void)
 {
 	struct sigaction sa = { .sa_handler = on_sigchld, .sa_flags = SA_RESTART };
@@ -178,6 +259,9 @@ static void early_init(void)
 		close(fd);
 
 	kmsg_fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+
+	status_led("1");
+	spawn_log_dumper();
 }
 
 /* -------------------------------------------------------------- drawing */

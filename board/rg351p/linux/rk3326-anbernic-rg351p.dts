@@ -40,3 +40,12 @@
 &rk817 {
 	system-power-controller;
 };
+
+/*
+ * Bring-up aid: heartbeat once the LED driver probes, steady blinking on
+ * panic. Needs the LED triggers from debug.config, ignored otherwise.
+ */
+&red_green_led {
+	linux,default-trigger = "heartbeat";
+	panic-indicator;
+};
