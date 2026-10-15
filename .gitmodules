@@ -1,0 +1,16 @@
+[submodule "external/trusted-firmware-a"]
+	path = external/trusted-firmware-a
+	url = https://git.trustedfirmware.org/TF-A/trusted-firmware-a.git
+	shallow = true
+	branch = lts-v2.14
+[submodule "external/u-boot"]
+	path = external/u-boot
+	url = https://github.com/u-boot/u-boot.git
+	shallow = true
+[submodule "external/rkbin"]
+	path = external/rkbin
+	url = https://github.com/rockchip-linux/rkbin.git
+	shallow = true
+[submodule "external/linux"]
+	path = external/linux
+	url = https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
