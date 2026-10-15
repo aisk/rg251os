@@ -1,5 +1,7 @@
 # SD card image assembled with genimage from the kernel, dtb, U-Boot and
-# rootfs. Needs genimage, mtools and dosfstools on the host.
+# rootfs. The GBA partition is filled from the genimage root path, which
+# holds the empty roms/ and saves/ directories. Needs genimage, mtools and
+# dosfstools on the host.
 
 IMAGES_DIR := $(BUILD)/images
 SDCARD_IMG := $(BUILD)/sdcard.img
@@ -27,7 +29,7 @@ $(SDCARD_IMG): $(LINUX_IMAGE) $(LINUX_DTB) $(UBOOT_BIN) $(ROOTFS_IMG) \
 		exit 1; \
 	fi
 	rm -rf $(IMAGES_DIR) $(GENIMAGE_TMP)
-	mkdir -p $(IMAGES_DIR)/extlinux $(GENIMAGE_TMP)/root
+	mkdir -p $(IMAGES_DIR)/extlinux $(GENIMAGE_TMP)/root/roms $(GENIMAGE_TMP)/root/saves
 	cp $(LINUX_IMAGE) $(IMAGES_DIR)/Image
 	cp $(LINUX_DTB) $(IMAGES_DIR)/rk3326-anbernic-rg351p.dtb
 	cp $(EXTLINUX_CONF) $(IMAGES_DIR)/extlinux/extlinux.conf
