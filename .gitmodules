@@ -14,3 +14,5 @@
 [submodule "external/linux"]
 	path = external/linux
 	url = https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+	shallow = true
+	branch = linux-6.18.y
