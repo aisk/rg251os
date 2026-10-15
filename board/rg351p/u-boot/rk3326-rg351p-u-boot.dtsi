@@ -1,0 +1,152 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * U-Boot only additions for the RG351P, applied on top of the mainline
+ * rk3326-anbernic-rg351m.dts (dts/upstream) through
+ * CONFIG_DEVICE_TREE_INCLUDES. This file never reaches Linux.
+ *
+ * Why the RG351M DT and not odroid-go2: the OGA DTs describe vcc_host as a
+ * regulator-always-on/boot-on fixed regulator gated by GPIO0_B7. On the
+ * RG351P/M that pin is pwm0, which drives the vibration motor, so U-Boot
+ * would switch the motor on while probing regulators. They also put a PWM
+ * blue LED on pwm3 and the red LED on GPIO0_B5, neither exists here. The
+ * RG351M DT has none of that.
+ *
+ * U-Boot has no rk3326-anbernic-rg351m-u-boot.dtsi, so its automatic
+ * include falls back to px30-u-boot.dtsi (written for the PX30 EVB: eMMC
+ * first, UART5, cru assigned-clocks dropped). Everything below turns that
+ * into what rk3326-u-boot.dtsi + rk3326-odroid-go2-u-boot.dtsi provide for
+ * the OGA, minus the LED and SPI flash bits.
+ */
+
+/ {
+	aliases {
+		/* px30-u-boot.dtsi sets mmc0 = &emmc, mmc1 = &sdmmc */
+		/delete-property/ mmc1;
+		mmc0 = &sdmmc;
+	};
+
+	chosen {
+		/* SD is the only boot medium on this board */
+		u-boot,spl-boot-order = "same-as-spl", &sdmmc;
+	};
+};
+
+/* Restore the PLL/bus clock setup that px30-u-boot.dtsi deletes (values
+ * from px30.dtsi), so U-Boot proper runs with the same clocks as on the OGA.
+ * SPL/TPL drop these anyway through CONFIG_OF_SPL_REMOVE_PROPS.
+ */
+&cru {
+	assigned-clocks = <&cru PLL_NPLL>,
+		<&cru ACLK_BUS_PRE>, <&cru ACLK_PERI_PRE>,
+		<&cru HCLK_BUS_PRE>, <&cru HCLK_PERI_PRE>,
+		<&cru PCLK_BUS_PRE>, <&cru SCLK_GPU>;
+	assigned-clock-rates = <1188000000>,
+		<200000000>, <200000000>,
+		<150000000>, <150000000>,
+		<100000000>, <200000000>;
+};
+
+&pmucru {
+	assigned-clocks =
+		<&pmucru PLL_GPLL>, <&pmucru PCLK_PMU_PRE>,
+		<&pmucru SCLK_WIFI_PMU>;
+	assigned-clock-rates =
+		<1200000000>, <100000000>,
+		<26000000>;
+};
+
+&emmc {
+	status = "disabled";
+};
+
+/* No SPI flash is fitted on the RG351P (the vendor DT disables sfc) */
+&sfc {
+	status = "disabled";
+};
+
+/* SD card pins for TPL/SPL, as in rk3326-u-boot.dtsi */
+&pcfg_pull_none {
+	bootph-all;
+};
+
+&pcfg_pull_none_8ma {
+	bootph-pre-ram;
+	bootph-some-ram;
+};
+
+&pcfg_pull_up {
+	bootph-all;
+};
+
+&pcfg_pull_up_8ma {
+	bootph-pre-ram;
+	bootph-some-ram;
+};
+
+&pmucru {
+	bootph-all;
+};
+
+&sdmmc {
+	bootph-pre-ram;
+	bootph-some-ram;
+};
+
+&sdmmc_bus4 {
+	bootph-pre-ram;
+	bootph-some-ram;
+};
+
+&sdmmc_clk {
+	bootph-pre-ram;
+	bootph-some-ram;
+};
+
+&sdmmc_cmd {
+	bootph-pre-ram;
+	bootph-some-ram;
+};
+
+&sdmmc_det {
+	bootph-pre-ram;
+	bootph-some-ram;
+};
+
+/* Debug console: UART2 on the m1 pins, as in rk3326-u-boot.dtsi */
+&uart2m1_xfer {
+	bootph-pre-sram;
+	bootph-pre-ram;
+};
+
+/* RK817 access from SPL (CONFIG_SPL_PMIC_RK8XX, power-on reason check),
+ * as in rk3326-odroid-go2-u-boot.dtsi.
+ */
+&i2c0_xfer {
+	bootph-pre-ram;
+};
+
+&i2s1_2ch_mclk {
+	bootph-pre-ram;
+};
+
+&pcfg_pull_none_smt {
+	bootph-pre-ram;
+};
+
+&pmic_int {
+	bootph-pre-ram;
+};
+
+&rk817 {
+	regulators {
+		bootph-pre-ram;
+	};
+};
+
+/* go2.c reads the board ID from SARADC channel 0 in SPL; give it the
+ * reference voltage directly so SPL does not need the vcc_1v8 regulator.
+ */
+&saradc {
+	bootph-pre-ram;
+	vdd-microvolts = <1800000>;
+};
