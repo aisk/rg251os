@@ -30,3 +30,7 @@
 	path = external/tinyalsa
 	url = https://github.com/tinyalsa/tinyalsa.git
 	shallow = true
+[submodule "external/gpsp"]
+	path = external/gpsp
+	url = https://github.com/libretro/gpsp.git
+	branch = master

@@ -1,20 +1,33 @@
 /*
  * Audio: RK817 codec through tinyalsa, card 0 device 0.
  *
+ * tinyalsa on arm64. The kernel only lets x86/ppc/alpha mmap the PCM
+ * status and control records, so tinyalsa falls back to the SYNC_PTR
+ * ioctl with a cached copy of appl_ptr. pcm_state() (which pcm_writei()
+ * itself calls before every write) issues SYNC_PTR without
+ * SNDRV_PCM_SYNC_PTR_APPL, which makes the kernel take the cached
+ * appl_ptr as the new one. Plain read/write I/O never refreshes that
+ * cache, so every write first rewound appl_ptr to where it was at the
+ * last prepare: in simple mode the queue never grew past one write
+ * (fill 798..801), never reached the start threshold, and nothing
+ * played; in nonblocking mode the rewinds behind a running hw_ptr showed
+ * up as underruns and as the device "consuming twice the rate". So after
+ * every write the cache is refreshed with pcm_avail_update(), which
+ * syncs with SYNC_PTR_APPL, and the PCM state is read the same way.
+ *
  * Mixer. The mainline rk817 codec has two playback controls: "Master
  * Playback Volume" (0..255, inverted register, 255 = 0 dB, 0.375 dB/step)
- * and "Playback Mux" (HP/SPK). The mux is a virtual enum without a
- * register, so it boots as "HP". The driver notes that the speaker output
- * and the left headphone pin are internally the same, and on the RG351
- * boards the speaker hangs off the headphone side: ROCKNIX runs with the
- * mux at HP and a working speaker (pid351 project, probe of a ROCKNIX
- * RG351P, mux numid=5 = 0, Master 255). There is no speaker amp enable
- * GPIO in the RG351M DT (no aux amp, no pin switches), and simple-card's
- * hp-det-gpios jack only enables/disables the "Headphones" DAPM pin, while
- * the "Speaker" pin stays enabled, so the HP route stays powered either
- * way. So: mux = HP always, the jack event is only logged. If the speaker
- * stays silent on hardware, <data>/mixer.txt can override any control
- * without a rebuild, e.g. "Playback Mux=SPK".
+ * and "Playback Mux" (HP/SPK), a virtual enum without a register that
+ * boots as "HP". In DAPM "HP" powers DAC L/R and the headphone stage,
+ * "SPK" powers SPK DAC with the class D amp; HPOL, HPOR and SPKO all hang
+ * off the mux. simple-card's hp-det jack only gates the "Headphones"
+ * pin, "Speaker" stays enabled, so the jack never changes the route by
+ * itself. The first two hardware runs had the speaker audible (crackling
+ * game sound, no headphones plugged) with the mux at HP, as on ROCKNIX
+ * (pid351 probe), so HP is the default for both jack states. The mux is
+ * reapplied on every jack event, and <data>/mixer.txt can set any control
+ * for both states ("Name=value") or for one ("speaker: Name=value",
+ * "headphones: Name=value"), e.g. "speaker: Playback Mux=SPK".
  *
  * Timing. The display is the master clock: one retro_run per vblank
  * (60.02 Hz) although the GBA runs at 59.73 Hz. The resampling ratio is
@@ -25,29 +38,25 @@
  * Modes (settings.audio). Simple, the default: 48 kHz S16 512x8 with
  * blocking writes, the stream starting by itself at half a buffer, a
  * fixed resampling ratio and half a buffer of silence after an underrun;
- * this is what pid351 runs with no underruns on this board on mainline.
- * Adaptive: the calibrated, nonblocking, rate controlled path below,
- * which made things worse on the second hardware run and stays opt-in
- * until the cause is understood.
+ * this is what pid351 runs on this board on mainline. Adaptive: the
+ * calibrated, nonblocking, rate controlled path below.
  *
  * Diagnostics in both modes: 3 s into each game the clock and I2S
  * registers (and once per boot clk_summary and /proc/asound) are logged;
  * at game end audio_summary() logs mode, config, calibration, the device
- * rate measured during play, underruns and fill; perf.csv gets the same
- * as columns; the settings screen has a 440 Hz test tone.
+ * rate measured during play, underruns, fill, the mux and the DAPM power
+ * state; perf.csv gets the same as columns; the settings screen has a
+ * 440 Hz test tone that logs the same.
  *
- * Calibration (adaptive). The first hardware run consumed about twice
- * the configured 48 kHz (fill never above ~250 frames, ~40 underruns/s).
- * So before the
- * first game the device plays silence for a moment and the frames it
- * really consumed are fitted against CLOCK_MONOTONIC. The first config
- * within 2% of its nominal rate is kept; otherwise the next one is tried
- * (other period size, S32 instead of packed S16, 44.1 kHz). If none
- * matches, a large buffer is opened and its measured rate is used as the
- * device rate for resampling, so the game still sounds right and stops
- * underrunning. Everything measured is logged ("audio: calibrate ...")
- * together with the clock and I2S registers that decide the real LRCK.
+ * Calibration (adaptive). Before the first game the open stream plays
+ * silence for a moment and the frames it really consumed are fitted
+ * against CLOCK_MONOTONIC. Within 2% of nominal it is kept as is. Only
+ * if it is far off, a larger buffer is opened once and its measured rate
+ * is used as the device rate for resampling. Nothing else is reopened,
+ * since every reopen pops. Everything measured is logged ("audio:
+ * calibrate ...") together with the clock and I2S registers.
  */
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
@@ -64,6 +73,7 @@
 
 /* In libtinyalsa but missing from its public header. */
 int pcm_state(struct pcm *pcm);
+int pcm_avail_update(struct pcm *pcm);
 
 #include "audio.h"
 #include "fe.h"
@@ -86,15 +96,14 @@ struct cand {
 };
 
 /*
- * Tried in order until one plays at its nominal rate. pid351 runs 48 kHz
- * S16 512x8 on mainline 6.12 on this board with no underruns.
+ * Adaptive mode opens the first of these that the driver accepts; pid351
+ * runs 48 kHz S16 512x8 on mainline 6.12 on this board.
  */
 static const struct cand cands[] = {
 	{ 48000, 512, 8, 0 },   /* 85 ms */
 	{ 48000, 1024, 4, 0 },  /* same buffer, more DMA refill slack */
 	{ 48000, 512, 8, 1 },   /* S32: rules out a 16 bit packing problem */
 	{ 44100, 512, 8, 0 },   /* other fractional divider setting */
-	{ 48000, 240, 12, 0 },  /* what the first hardware run used */
 };
 /* Nothing matched: big enough to survive a 2x device rate. */
 static const struct cand fallback = { 48000, 1024, 8, 0 };
@@ -128,6 +137,9 @@ static struct {
 	int prev_ok;
 	unsigned flushes;
 	int game_dumped;
+	int jack;           /* headphones: 1 in, 0 out, -1 not reported yet */
+	char mixer_text[2048];  /* <data>/mixer.txt, read once */
+	int mixer_text_len; /* -1: no file */
 	unsigned rate, buffer, period, target;
 	double dev_rate;    /* frames/s the device really plays */
 	int calibrated;
@@ -146,7 +158,8 @@ static struct {
 	uint64_t written;
 	uint64_t rate_frames;
 	int64_t rate_ns;
-} a = { .adj = 1.0, .null_ratio = 1.0, .st = { .fill_min = -1 } };
+} a = { .adj = 1.0, .null_ratio = 1.0, .st = { .fill_min = -1 }, .jack = -1,
+	.mixer_text_len = -1 };
 
 /* ---------------------------------------------------------- diagnostics */
 
@@ -419,14 +432,20 @@ static int mixer_set(const char *name, const char *value)
 	return r ? -1 : 0;
 }
 
-int audio_apply_mixer_text(const char *text)
+/*
+ * Apply "Control Name=value" lines. A line may start with "speaker:" or
+ * "headphones:" to apply only in that jack state; jack < 0 applies only
+ * the lines without a prefix.
+ */
+static int apply_mixer_lines(const char *text, int jack)
 {
 	int n = 0;
 
 	while (*text) {
-		const char *eol = strchr(text, '\n'), *eq;
+		const char *eol = strchr(text, '\n'), *eq, *l;
 		size_t len = eol ? (size_t)(eol - text) : strlen(text);
 		char line[160];
+		int want = -1;
 
 		if (len >= sizeof(line))
 			len = sizeof(line) - 1;
@@ -434,10 +453,23 @@ int audio_apply_mixer_text(const char *text)
 		line[len] = 0;
 		while (len && (line[len - 1] == '\r' || line[len - 1] == ' '))
 			line[--len] = 0;
-		eq = strchr(line, '=');
-		if (line[0] != '#' && eq && eq != line) {
-			line[eq - line] = 0;
-			if (mixer_set(line, eq + 1) == 0)
+		l = line;
+		if (!strncmp(l, "speaker:", 8)) {
+			want = 0;
+			l += 8;
+		} else if (!strncmp(l, "headphones:", 11)) {
+			want = 1;
+			l += 11;
+		}
+		while (*l == ' ')
+			l++;
+		eq = strchr(l, '=');
+		if (l[0] != '#' && eq && eq != l && want == jack) {
+			char name[160];
+
+			memcpy(name, l, (size_t)(eq - l));
+			name[eq - l] = 0;
+			if (mixer_set(name, eq + 1) == 0)
 				n++;
 		}
 		if (!eol)
@@ -447,9 +479,38 @@ int audio_apply_mixer_text(const char *text)
 	return n;
 }
 
+int audio_apply_mixer_text(const char *text)
+{
+	return apply_mixer_lines(text, -1);
+}
+
+/* Route for the current jack state, then the matching mixer.txt lines. */
+static void mixer_route(void)
+{
+	int jack = a.jack > 0;
+
+	mixer_set("Playback Mux", "HP");  /* see the top of this file */
+	if (a.mixer_text_len >= 0)
+		apply_mixer_lines(a.mixer_text, jack);
+}
+
+static const char *mux_state(void)
+{
+	struct mixer_ctl *ctl = a.mixer ?
+		mixer_get_ctl_by_name(a.mixer, "Playback Mux") : NULL;
+	int v;
+
+	if (!ctl)
+		return "unknown";
+	v = mixer_ctl_get_value(ctl, 0);
+	if (v < 0 || (unsigned)v >= mixer_ctl_get_num_enums(ctl))
+		return "unknown";
+	return mixer_ctl_get_enum_string(ctl, (unsigned)v);
+}
+
 static void mixer_setup(void)
 {
-	char path[300], buf[2048];
+	char path[300], buf[16];
 	int n;
 
 	a.mixer = mixer_open(CARD);
@@ -459,17 +520,18 @@ static void mixer_setup(void)
 	}
 	if (!a.dumped)
 		mixer_dump("as found");
-	mixer_set("Playback Mux", "HP");
 	snprintf(buf, sizeof(buf), "%d", settings.volume);
 	mixer_set("Master Playback Volume", buf);
 
 	snprintf(path, sizeof(path), "%s/mixer.txt", fe_data_dir);
-	n = read_file(path, buf, sizeof(buf) - 1);
+	n = read_file(path, a.mixer_text, sizeof(a.mixer_text) - 1);
+	a.mixer_text_len = n;
 	if (n >= 0) {
-		buf[n] = 0;
+		a.mixer_text[n] = 0;
 		log_msg("mixer: applying %s", path);
-		audio_apply_mixer_text(buf);
+		apply_mixer_lines(a.mixer_text, -1);
 	}
+	mixer_route();
 	if (!a.dumped) {
 		mixer_dump("after setup");
 		xrun_debug_enable();
@@ -499,8 +561,92 @@ void audio_jack(int inserted)
 	if (fe_is_init && devmem_read(PX30_GPIO2 + 0x50, &v, 1) == 0)
 		snprintf(raw, sizeof(raw), "GPIO2_PC6 level %s",
 			 (v >> 22) & 1 ? "high" : "low");
-	log_msg("audio: headphones %s (jack switch %d, %s, DT says ACTIVE_LOW; "
-		"mux stays HP)", inserted ? "inserted" : "removed", inserted, raw);
+	a.jack = inserted ? 1 : 0;
+	if (a.mixer)
+		mixer_route();
+	log_msg("audio: headphones %s (jack switch %d, %s, DT says ACTIVE_LOW), "
+		"Playback Mux %s", inserted ? "inserted" : "removed", inserted, raw,
+		a.mixer ? mux_state() : "set when the mixer opens");
+}
+
+/*
+ * DAPM power state of the playback path from debugfs, one line:
+ * /sys/kernel/debug/asoc/<card>/dapm/<widget> for the board widgets and
+ * <card>/<component>/dapm/<widget> for the codec ones. Each file starts
+ * with "<widget>: On|Off ...".
+ */
+static void dapm_dump(const char *when)
+{
+	static const char *const names[] = {
+		"Playback Mux", "DAC L", "DAC R", "SPK DAC", "Enable Class D",
+		"HPOL", "HPOR", "SPKO", "Headphones", "Speaker", "bias_level",
+	};
+	char line[700], path[800], buf[256];
+	int off = 0, found = 0;
+	struct stat st;
+	DIR *cards, *comps;
+	struct dirent *c, *d;
+
+	if (fe_is_init && stat("/sys/kernel/debug/asoc", &st))
+		mount("debugfs", "/sys/kernel/debug", "debugfs", 0, NULL);
+	cards = opendir("/sys/kernel/debug/asoc");
+	if (!cards) {
+		log_msg("audio: dapm (%s): no debugfs: %s", when, strerror(errno));
+		return;
+	}
+	line[0] = 0;
+	while ((c = readdir(cards))) {
+		if (c->d_name[0] == '.')
+			continue;
+		snprintf(path, sizeof(path), "/sys/kernel/debug/asoc/%s", c->d_name);
+		comps = opendir(path);
+		if (!comps)
+			continue;
+		/* "" is the card itself, then each component directory. */
+		for (d = NULL;; ) {
+			const char *sub = d ? d->d_name : "";
+
+			if (!d || (sub[0] != '.' && strcmp(sub, "dapm"))) {
+				for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
+					char *nl, *p;
+					int n;
+
+					snprintf(path, sizeof(path),
+						 "/sys/kernel/debug/asoc/%s%s%s/dapm/%s",
+						 c->d_name, d ? "/" : "", sub, names[i]);
+					n = read_file(path, buf, sizeof(buf) - 1);
+					if (n <= 0)
+						continue;
+					buf[n] = 0;
+					nl = strchr(buf, '\n');
+					if (nl)
+						*nl = 0;
+					/* "Name: On  in 1 out 2" -> "Name On" */
+					p = strstr(buf, ": ");
+					if (p) {
+						char *e;
+
+						memmove(p, p + 1, strlen(p));
+						e = strstr(p + 1, "  ");
+						if (e)
+							*e = 0;
+					}
+					found++;
+					if (off < (int)sizeof(line) - 2)
+						off += snprintf(line + off, sizeof(line) - off,
+								"%s%s%s", off ? ", " : "",
+								p ? "" : "bias ", buf);
+				}
+			}
+			d = readdir(comps);
+			if (!d)
+				break;
+		}
+		closedir(comps);
+	}
+	closedir(cards);
+	log_msg("audio: dapm (%s): Playback Mux = %s; %s", when, mux_state(),
+		found ? line : "no widget files found");
 }
 
 /* ------------------------------------------------------------------ PCM */
@@ -667,6 +813,31 @@ unsigned audio_buffer(void)
 	return a.buffer;
 }
 
+/*
+ * Refresh tinyalsa's cached appl_ptr from the kernel (see the top of this
+ * file). Must follow every write, or the next pcm_writei()/pcm_state()
+ * rewinds the kernel's appl_ptr to the stale value.
+ */
+static void dev_sync(void)
+{
+	int e = errno;
+
+	if (a.pcm)
+		pcm_avail_update(a.pcm);
+	errno = e;
+}
+
+/* The stream runs (has passed its start threshold, no underrun). */
+static int dev_running(void)
+{
+	if (a.null_dev)
+		return a.null_running;
+	if (!a.pcm)
+		return 0;
+	dev_sync();
+	return pcm_state(a.pcm) == PCM_STATE_RUNNING;
+}
+
 /* Write to the device; returns frames accepted, or -1 with errno. */
 static int dev_write(const int16_t *buf, unsigned frames)
 {
@@ -685,6 +856,7 @@ static int dev_write(const int16_t *buf, unsigned frames)
 	if (!a.cand.s32) {
 		int n = pcm_writei(a.pcm, buf, frames);
 
+		dev_sync();
 		if (n > 0)
 			a.written += (unsigned)n;
 		return n;
@@ -698,6 +870,7 @@ static int dev_write(const int16_t *buf, unsigned frames)
 		for (unsigned i = 0; i < chunk * 2; i++)
 			a.conv[i] = (int32_t)((uint32_t)(uint16_t)buf[2 * done + i] << 16);
 		n = pcm_writei(a.pcm, a.conv, chunk);
+		dev_sync();
 		if (n < 0) {
 			if (done)
 				break;
@@ -847,45 +1020,48 @@ static int rate_ok(double r)
 	return r > 0 && fabs(r / a.rate - 1) < CAL_TOL;
 }
 
-/* Find a config that plays at its nominal rate, else adapt to the device. */
+/*
+ * Measure the open stream. Off by more than CAL_TOL (never seen once the
+ * appl_ptr rewinds were fixed), reopen once with a bigger buffer and
+ * resample for the measured rate. No other config is tried: every
+ * reopen is an audible pop.
+ */
 static void choose_config(void)
 {
 	double r;
 
 	a.calibrated = 1;
-	for (size_t i = 0; i < ARRAY_SIZE(cands); i++) {
-		/* Keep the stream opened at boot: its first hw_params is the
-		 * one the register dump should show. */
-		if (!(a.pcm && !memcmp(&a.cand, &cands[i], sizeof(a.cand))) &&
-		    open_cand(&cands[i]))
-			continue;
-		r = calibrate(!a.hw_dumped);
-		a.hw_dumped = 1;
-		if (rate_ok(r)) {
-			a.dev_rate = a.rate;
-			log_msg("audio: using %s (measured %.0f Hz is within %.0f%%)",
-				cand_name(&a.cand), r, CAL_TOL * 100);
-			return;
-		}
+	if (!audio_ready() && open_cand(&cands[0]))
+		return;
+	r = calibrate(!a.hw_dumped);
+	a.hw_dumped = 1;
+	if (rate_ok(r)) {
+		a.dev_rate = a.rate;
+		log_msg("audio: using %s (measured %.0f Hz is within %.0f%%)",
+			cand_name(&a.cand), r, CAL_TOL * 100);
+		return;
+	}
+	if (r <= 0) {
+		a.dev_rate = a.rate;
+		log_msg("audio: calibration failed, using %s at its nominal rate",
+			cand_name(&a.cand));
+		return;
 	}
 	if (open_cand(&fallback) == 0) {
-		r = calibrate(0);
-		if (r > 0) {
-			a.dev_rate = rate_ok(r) ? a.rate : r;
-			log_msg("audio: no config plays at its nominal rate; using %s "
-				"and resampling for a device rate of %.0f Hz", cand_name(&a.cand),
-				a.dev_rate);
-			return;
-		}
+		double r2 = calibrate(0);
+
+		if (r2 > 0)
+			r = r2;
+		a.dev_rate = rate_ok(r) ? a.rate : r;
+		log_msg("audio: %s does not play at its nominal rate; using %s and "
+			"resampling for a device rate of %.0f Hz", cand_name(&cands[0]),
+			cand_name(&a.cand), a.dev_rate);
+		return;
 	}
-	for (size_t i = 0; i < ARRAY_SIZE(cands); i++) {
-		if (open_cand(&cands[i]) == 0) {
-			log_msg("audio: calibration failed everywhere, using %s at its "
-				"nominal rate", cand_name(&a.cand));
-			return;
-		}
-	}
-	log_msg("audio: no PCM config opens any more");
+	open_cand(&cands[0]);
+	a.dev_rate = r;
+	log_msg("audio: resampling %s for a measured device rate of %.0f Hz",
+		cand_name(&a.cand), a.dev_rate);
 }
 
 /* --------------------------------------------------------------- stream */
@@ -972,7 +1148,7 @@ static void session_rate_sample(long fill)
 {
 	int64_t now = now_ns();
 	uint64_t played = a.written > (uint64_t)fill ? a.written - (uint64_t)fill : 0;
-	int running = a.null_dev || (a.pcm && pcm_state(a.pcm) == PCM_STATE_RUNNING);
+	int running = a.null_dev || dev_running();
 
 	if (a.null_dev)
 		now = (int64_t)a.flushes * 16661000LL;  /* simulated frames */
@@ -1068,8 +1244,7 @@ void audio_flush(void)
 	if ((int)fill > a.sess_fill_max)
 		a.sess_fill_max = (int)fill;
 	session_rate_sample(fill);
-	if (++a.flushes == 180 && !a.game_dumped && a.pcm &&
-	    pcm_state(a.pcm) == PCM_STATE_RUNNING) {
+	if (++a.flushes == 180 && !a.game_dumped && a.pcm && dev_running()) {
 		/* 3 s into the game, with the stream running for real. */
 		a.game_dumped = 1;
 		hw_dump("in game");
@@ -1200,6 +1375,12 @@ void audio_summary(const char *when)
 		a.ncal ? cal : a.mode == AUDIO_SIMPLE ? "not used (simple mode)" :
 		"not run", a.hw_mclk, a.hw_codec_mclk, a.hw_lrck,
 		a.hw_lrck > 0 ? "" : " (not read)");
+	if (!a.null_dev) {
+		log_msg("audio summary (%s): stream %s, headphones %s", when,
+			dev_running() ? "running" : "not running",
+			a.jack < 0 ? "not reported" : a.jack ? "in" : "out");
+		dapm_dump(when);
+	}
 }
 
 int audio_csv_fields(char *buf, size_t size)
@@ -1239,6 +1420,7 @@ void audio_test_tone(double seconds)
 	int16_t buf[512 * 2];
 	unsigned len, done = 0, xr0 = a.xruns_total;
 	int64_t t0, t_start = 0;
+	int dumped = 0;
 	uint64_t w0;
 	long d;
 
@@ -1277,9 +1459,15 @@ void audio_test_tone(double seconds)
 			done += (unsigned)w;
 		d = pcm_get_delay(a.pcm);
 		if (d >= 0) {
-			if (!t_start && pcm_state(a.pcm) == PCM_STATE_RUNNING)
+			if (!t_start && dev_running())
 				t_start = now_ns();
 			session_rate_sample(d);
+			/* Half way through: what the hardware and DAPM do. */
+			if (t_start && !dumped && done >= len / 2) {
+				dumped = 1;
+				hw_dump("test tone");
+				dapm_dump("test tone, playing");
+			}
 		}
 		if (w <= 0 || (unsigned)w < n) {
 			struct timespec ts = { 0, 2000000 };
@@ -1297,6 +1485,8 @@ void audio_test_tone(double seconds)
 		session_rate_sample(d);
 		nanosleep(&ts, NULL);
 	}
+	if (!dumped)
+		dapm_dump(t_start ? "test tone, end" : "test tone, never started");
 	pcm_stop(a.pcm);
 	a.started = 0;
 	log_msg("audio: test tone 440 Hz %.1f s, %s %s mode: %u underruns, "
