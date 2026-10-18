@@ -1,4 +1,8 @@
-# Bootloader for the RG351P: TF-A BL31 + mainline U-Boot (TPL/SPL/proper),
+# BOOTLOADER=legacy (default) uses ROCKNIX's U-Boot 2017.09, see
+# mk/bootloader-legacy.mk. BOOTLOADER=mainline is described below; it does
+# not boot on the device yet (no sign of life from U-Boot proper).
+#
+# Mainline bootloader for the RG351P: TF-A BL31 + U-Boot (TPL/SPL/proper),
 # packed by binman into u-boot-rockchip.bin, written at 32KiB (sector 64)
 # of the SD card. The FIT with U-Boot proper and BL31 sits at
 # CONFIG_SPL_PAD_TO (0x7f8000) inside the image, i.e. 8MiB on the card, so
@@ -24,10 +28,14 @@
 # pinned and never edited, so source changes are not tracked: after updating
 # external/u-boot or external/trusted-firmware-a run `make bootloader-clean`.
 
+BOOTLOADER ?= legacy
 DDR_INIT ?= rkbin
 BL31 ?= tfa
 UBOOT_DT ?= rg351m
 
+ifeq ($(filter $(BOOTLOADER),legacy mainline),)
+$(error BOOTLOADER must be "legacy" or "mainline", got "$(BOOTLOADER)")
+endif
 ifeq ($(filter $(DDR_INIT),rkbin open),)
 $(error DDR_INIT must be "rkbin" or "open", got "$(DDR_INIT)")
 endif
@@ -140,3 +148,12 @@ u-boot-menuconfig: $(UBOOT_CONFIG)
 
 bootloader-clean:
 	rm -rf $(UBOOT_BUILD) $(TFA_BUILD)
+
+include $(TOP)/mk/bootloader-legacy.mk
+
+# What mk/image.mk writes at sector 64
+ifeq ($(BOOTLOADER),legacy)
+BOOT_BLOB := $(LEGACY_BIN)
+else
+BOOT_BLOB := $(UBOOT_BIN)
+endif

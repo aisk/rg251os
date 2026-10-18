@@ -87,9 +87,16 @@
 	bootph-all;
 };
 
+/*
+ * Mainline U-Boot mishandles the SD vmmc/vqmmc regulators on RK3326 and
+ * some cards then fail to initialise (ROCKNIX distribution PR #2120). The
+ * bootrom and PMIC defaults already power the slot, as with legacy U-Boot.
+ */
 &sdmmc {
 	bootph-pre-ram;
 	bootph-some-ram;
+	/delete-property/ vmmc-supply;
+	/delete-property/ vqmmc-supply;
 };
 
 &sdmmc_bus4 {

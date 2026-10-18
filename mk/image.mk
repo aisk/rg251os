@@ -8,15 +8,17 @@ SDCARD_IMG := $(BUILD)/sdcard.img
 GENIMAGE_CFG := $(BOARD_DIR)/genimage.cfg
 GENIMAGE_TMP := $(BUILD)/genimage.tmp
 EXTLINUX_CONF := $(BOARD_DIR)/extlinux.conf
+# Entry point for the legacy U-Boot, ignored by mainline U-Boot
+BOOT_INI := $(BOARD_DIR)/boot.ini
 
 GENIMAGE ?= genimage
 # mkdosfs and friends live in /usr/sbin, which may not be in PATH.
 IMAGE_PATH := /usr/sbin:/sbin:$(PATH)
 
-$(SDCARD_IMG): $(LINUX_IMAGE) $(LINUX_DTB) $(UBOOT_BIN) $(ROOTFS_IMG) \
-		$(GENIMAGE_CFG) $(EXTLINUX_CONF)
-	@if [ -z "$(LINUX_IMAGE)" ] || [ -z "$(LINUX_DTB)" ] || [ -z "$(UBOOT_BIN)" ]; then \
-		echo "error: LINUX_IMAGE, LINUX_DTB or UBOOT_BIN undefined (mk/linux.mk, mk/bootloader.mk)" >&2; \
+$(SDCARD_IMG): $(LINUX_IMAGE) $(LINUX_DTB) $(BOOT_BLOB) $(ROOTFS_IMG) \
+		$(GENIMAGE_CFG) $(EXTLINUX_CONF) $(BOOT_INI)
+	@if [ -z "$(LINUX_IMAGE)" ] || [ -z "$(LINUX_DTB)" ] || [ -z "$(BOOT_BLOB)" ]; then \
+		echo "error: LINUX_IMAGE, LINUX_DTB or BOOT_BLOB undefined (mk/linux.mk, mk/bootloader.mk)" >&2; \
 		exit 1; \
 	fi
 	@missing=; \
@@ -33,7 +35,8 @@ $(SDCARD_IMG): $(LINUX_IMAGE) $(LINUX_DTB) $(UBOOT_BIN) $(ROOTFS_IMG) \
 	cp $(LINUX_IMAGE) $(IMAGES_DIR)/Image
 	cp $(LINUX_DTB) $(IMAGES_DIR)/rk3326-anbernic-rg351p.dtb
 	cp $(EXTLINUX_CONF) $(IMAGES_DIR)/extlinux/extlinux.conf
-	cp $(UBOOT_BIN) $(IMAGES_DIR)/u-boot-rockchip.bin
+	cp $(BOOT_BLOB) $(IMAGES_DIR)/bootloader.bin
+	cp $(BOOT_INI) $(IMAGES_DIR)/boot.ini
 	cp $(ROOTFS_IMG) $(IMAGES_DIR)/rootfs.ext4
 	PATH=$(IMAGE_PATH) $(GENIMAGE) \
 		--config $(GENIMAGE_CFG) \

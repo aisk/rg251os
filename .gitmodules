@@ -16,3 +16,8 @@
 	url = https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
 	shallow = true
 	branch = linux-6.18.y
+[submodule "external/u-boot-legacy"]
+	path = external/u-boot-legacy
+	url = https://github.com/ROCKNIX/hardkernel-uboot.git
+	branch = RK3326
+	shallow = true
