@@ -3,7 +3,8 @@
  * edited on a PC:
  *
  *   config/settings.txt          global: volume, brightness, LCD grid,
- *                                CPU mode (cpu=adaptive|max|<MHz>)
+ *                                CPU mode (cpu=adaptive|max|<MHz>),
+ *                                audio path (audio=simple|adaptive)
  *   config/roms/<rom name>.txt   per game: color correction, and the
  *                                learned start OPP (cpu_start=<MHz>)
  *
@@ -41,6 +42,7 @@ const struct settings settings_defaults = {
 	.grid_dim = 50,
 	.grid_boost = 0,
 	.cpu = CPU_MODE_ADAPTIVE,
+	.audio = AUDIO_SIMPLE,
 };
 struct settings settings = settings_defaults;
 struct rom_settings rom_settings;
@@ -50,6 +52,7 @@ static unsigned rom_in_file;  /* fields present in the ROM's file */
 
 static const char *const on_off[] = { "off", "on" };
 static const char *const cpu_modes[] = { "adaptive", "max" };
+static const char *const audio_modes[] = { "simple", "adaptive" };
 
 /*
  * Value i < nnames is written as names[i]; nnames 0 means names cover
@@ -75,6 +78,7 @@ static const struct field global_fields[] = {
 	F(settings, grid_dim, 0, 90, NULL),
 	F(settings, grid_boost, 0, 100, NULL),
 	FN(settings, cpu, 300, 5000, cpu_modes),
+	FN(settings, audio, 0, 1, audio_modes),
 };
 
 static const struct field rom_fields[] = {
@@ -231,10 +235,11 @@ void settings_load(void)
 	else
 		snprintf(cpu, sizeof(cpu), "%s", cpu_modes[settings.cpu]);
 	log_msg("settings: %s, %d values: volume %d, brightness %d%%, grid %s "
-		"dim %d%% boost %d%%, cpu %s", n < 0 ? "defaults (no file)" : from,
+		"dim %d%% boost %d%%, cpu %s, audio %s",
+		n < 0 ? "defaults (no file)" : from,
 		n < 0 ? 0 : n, settings.volume, settings.brightness,
 		settings.grid ? "on" : "off", settings.grid_dim,
-		settings.grid_boost, cpu);
+		settings.grid_boost, cpu, audio_modes[settings.audio]);
 }
 
 void settings_save(void)

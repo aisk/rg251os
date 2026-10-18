@@ -21,6 +21,7 @@
 
 int fe_is_init;
 char fe_data_dir[256] = "/mnt/data";
+char fe_log_dir[300] = "/mnt/data/log";
 
 static void on_sigchld(int sig)
 {
@@ -99,6 +100,88 @@ void sys_make_dirs(void)
 		if (mkdir(path, 0755) && errno != EEXIST)
 			log_msg("mkdir %s: %s", path, strerror(errno));
 	}
+	snprintf(fe_log_dir, sizeof(fe_log_dir), "%s/log", fe_data_dir);
+}
+
+/* Remove a directory and the plain files in it. */
+static void rm_flat_dir(const char *path)
+{
+	DIR *d = opendir(path);
+	struct dirent *e;
+	char f[900];
+
+	if (!d)
+		return;
+	while ((e = readdir(d))) {
+		if (e->d_name[0] == '.')
+			continue;
+		snprintf(f, sizeof(f), "%s/%s", path, e->d_name);
+		unlink(f);
+	}
+	closedir(d);
+	rmdir(path);
+}
+
+/*
+ * One directory per boot: <data>/log/boot-NNNN holds that boot's
+ * frontend.txt and dmesg dumps, so a session is never overwritten by the
+ * boots after it. The counter lives in log/boot-counter.txt; the newest
+ * LOG_KEEP_BOOTS directories are kept; log/LATEST.txt names the current
+ * one. perf.csv stays in log/ (appended across boots).
+ */
+#define LOG_KEEP_BOOTS 20
+
+unsigned sys_log_init(void)
+{
+	char path[300], buf[32], name[16];
+	unsigned n = 0;
+	DIR *d;
+	struct dirent *e;
+	int len;
+
+	snprintf(path, sizeof(path), "%s/log/boot-counter.txt", fe_data_dir);
+	len = read_file(path, buf, sizeof(buf) - 1);
+	if (len > 0) {
+		buf[len] = 0;
+		n = (unsigned)strtoul(buf, NULL, 10);
+	}
+	n++;
+	len = snprintf(buf, sizeof(buf), "%u\n", n);
+	write_file_atomic(path, buf, (size_t)len);
+
+	snprintf(name, sizeof(name), "boot-%04u", n % 10000);
+	snprintf(fe_log_dir, sizeof(fe_log_dir), "%s/log/%s", fe_data_dir, name);
+	if (mkdir(fe_log_dir, 0755) && errno != EEXIST) {
+		log_msg("mkdir %s: %s", fe_log_dir, strerror(errno));
+		snprintf(fe_log_dir, sizeof(fe_log_dir), "%s/log", fe_data_dir);
+		return n;
+	}
+	snprintf(path, sizeof(path), "%s/log/LATEST.txt", fe_data_dir);
+	len = snprintf(buf, sizeof(buf), "%s\n", name);
+	write_file_atomic(path, buf, (size_t)len);
+
+	snprintf(path, sizeof(path), "%s/log", fe_data_dir);
+	d = opendir(path);
+	while (d && (e = readdir(d))) {
+		unsigned k;
+		char *end;
+
+		if (strncmp(e->d_name, "boot-", 5))
+			continue;
+		k = (unsigned)strtoul(e->d_name + 5, &end, 10);
+		if (*end || end == e->d_name + 5)
+			continue;
+		/* Numbers wrap at 10000: compare modulo, keep the newest. */
+		if (k >= 10000 || (n % 10000 + 10000 - k) % 10000 >= LOG_KEEP_BOOTS) {
+			char old[600];
+
+			snprintf(old, sizeof(old), "%s/%s", path, e->d_name);
+			rm_flat_dir(old);
+		}
+	}
+	if (d)
+		closedir(d);
+	return n;
 }
 
 /* ------------------------------------------------------------------ LED */
@@ -151,7 +234,7 @@ void led_set_red(int red)
 void klog_dump(const char *name)
 {
 	int size = klogctl(10 /* SYSLOG_ACTION_SIZE_BUFFER */, NULL, 0);
-	char path[300], *buf;
+	char path[400], *buf;
 	int n, fd;
 
 	if (!fe_is_init)
@@ -162,7 +245,7 @@ void klog_dump(const char *name)
 	if (!buf)
 		return;
 	n = klogctl(3 /* SYSLOG_ACTION_READ_ALL */, buf, size);
-	snprintf(path, sizeof(path), "%s/log/%s", fe_data_dir, name);
+	snprintf(path, sizeof(path), "%s/%s", fe_log_dir, name);
 	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 	if (fd >= 0 && n > 0) {
 		if (write(fd, buf, n) != n)

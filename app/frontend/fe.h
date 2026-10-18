@@ -16,6 +16,9 @@ extern int fe_is_init;
 /* Root of the GBA partition: /mnt/data, or a directory given on the
  * command line when testing on a PC. */
 extern char fe_data_dir[256];
+/* This boot's log directory, <data>/log/boot-NNNN (sys_log_init), or
+ * <data>/log before that or when testing on a PC. */
+extern char fe_log_dir[300];
 
 int64_t now_ns(void);   /* CLOCK_MONOTONIC */
 int64_t boot_ms(void);  /* CLOCK_BOOTTIME, the clock dmesg uses */
@@ -34,6 +37,8 @@ void log_sync_async(void);
 void sys_early_init(void);
 int sys_mount_data(void);
 void sys_make_dirs(void);
+/* New per boot log directory (fe_log_dir); returns the boot number. */
+unsigned sys_log_init(void);
 void led_set_red(int red);
 void klog_dump(const char *name);
 void klog_dump_async(const char *name);
@@ -62,6 +67,8 @@ extern const char *const color_mode_names[COLOR_COUNT];   /* in files */
 extern const char *const color_mode_labels[COLOR_COUNT];  /* in menus */
 
 /* settings.cpu, otherwise a fixed frequency in MHz (see cpuctl.c) */
+#define AUDIO_SIMPLE 0    /* 48 kHz S16 512x8, blocking writes, fixed ratio */
+#define AUDIO_ADAPTIVE 1  /* calibrated, nonblocking, rate control */
 #define CPU_MODE_ADAPTIVE 0
 #define CPU_MODE_MAX 1
 
@@ -73,6 +80,7 @@ struct settings {
 	int grid_dim;    /* darkening of the 3 unlit pixels of a cell, percent */
 	int grid_boost;  /* brightening of the lit pixel, percent */
 	int cpu;         /* CPU_MODE_ADAPTIVE, CPU_MODE_MAX or MHz */
+	int audio;       /* AUDIO_SIMPLE or AUDIO_ADAPTIVE (audio.c) */
 };
 /* Per game, in config/roms/<rom name>.txt. */
 struct rom_settings {

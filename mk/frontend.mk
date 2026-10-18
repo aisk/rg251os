@@ -96,5 +96,20 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	test $$(grep -c '^time,' $(FRONTEND_TEST_DIR)/stub/log/perf.csv) -eq 1
 	test $$(grep -c ',all,' $(FRONTEND_TEST_DIR)/stub/log/perf.csv) -eq 2
 	grep -q ',max,1296000,' $(FRONTEND_TEST_DIR)/stub/log/perf.csv
-	$(QEMU_AARCH64) $(FRONTEND_ELF) --headless $(FRONTEND_TEST_DIR)/core \
-		$(FRONTEND_TEST_ROM) 3000
+	# Audio: summary line and the audio columns at the end of perf.csv.
+	grep -q 'audio summary (headless): adaptive mode' \
+		$(FRONTEND_TEST_DIR)/stub/log/frontend.txt
+	grep -q ',audio_lrck_hz$$' $(FRONTEND_TEST_DIR)/stub/log/perf.csv
+	grep -q ',adaptive,48000 Hz S16 512x8,48000,' \
+		$(FRONTEND_TEST_DIR)/stub/log/perf.csv
+	# A perf.csv from an older build (other header) is moved aside.
+	mkdir -p $(FRONTEND_TEST_DIR)/core/log
+	printf 'time,old\n1,2\n' > $(FRONTEND_TEST_DIR)/core/log/perf.csv
+	# The real core on the default (simple) audio path.
+	FE_AUDIO=simple $(QEMU_AARCH64) $(FRONTEND_ELF) --headless \
+		$(FRONTEND_TEST_DIR)/core $(FRONTEND_TEST_ROM) 3000
+	grep -q 'audio summary (headless): simple mode, 48000 Hz S16 512x8' \
+		$(FRONTEND_TEST_DIR)/core/log/frontend.txt
+	grep -q '^time,old' $(FRONTEND_TEST_DIR)/core/log/perf-old.csv
+	grep -q ',simple,48000 Hz S16 512x8,48000,' \
+		$(FRONTEND_TEST_DIR)/core/log/perf.csv

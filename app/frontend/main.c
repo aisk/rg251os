@@ -19,10 +19,13 @@
  *   red steady      powering off (saving)
  * Before PID 1 starts the kernel shows its heartbeat trigger (see dts).
  *
- * Logs on the GBA partition (log/): frontend.txt (this program; the
- * previous boot's is frontend-prev.txt), dmesg-5s.txt, dmesg-20s.txt,
- * dmesg-poweroff.txt, and perf.csv (per game and CPU frequency timing and
- * power statistics, appended at the end of every game, see cpuctl.c).
+ * Logs on the GBA partition: log/boot-NNNN/ per boot (the last 20 are
+ * kept, log/LATEST.txt names the newest, see sys_log_init) with
+ * frontend.txt (this program), dmesg-5s.txt, dmesg-20s.txt,
+ * dmesg-game<N>-30s.txt and dmesg-game<N>-end.txt (each game),
+ * dmesg-poweroff.txt; and log/perf.csv across boots (per game and CPU
+ * frequency timing, power and audio statistics, appended at the end of
+ * every game, see cpuctl.c).
  *
  * CPU frequency: schedutil throughout; in game cpuctl.c sets a floor from
  * the frame times (CPU mode setting: adaptive, max or a fixed OPP).
@@ -102,6 +105,8 @@ static struct {
 	unsigned reports;
 	int genpd_logged;
 	struct audio_stats last_as;
+	unsigned games;        /* started this boot, numbers the dmesg dumps */
+	uint64_t game_frames;  /* frames of the current game */
 } m = { .cv = { .w = 480, .h = 320 } };
 
 /* ------------------------------------------------------- input events */
@@ -151,12 +156,26 @@ static void end_game_stats(void)
 		rom_settings.cpu_start = cpuctl_game_end();
 }
 
+/* Audio summary and a kernel log dump (XRUN / hw_ptr reports) at the end
+ * of a game. Before audio_pause, while the session numbers are intact. */
+static void game_end_logs(const char *why)
+{
+	char name[48];
+
+	if (!core_loaded())
+		return;
+	audio_summary(why);
+	snprintf(name, sizeof(name), "dmesg-game%u-end.txt", m.games);
+	klog_dump(name);
+}
+
 static void fatal(const char *title, const char *msg)
 {
 	snprintf(m.fatal_title, sizeof(m.fatal_title), "%s", title);
 	snprintf(m.fatal_msg, sizeof(m.fatal_msg), "%s", msg);
 	log_msg("FATAL: %s: %s", title, msg);
 	log_sync();
+	game_end_logs("fatal");
 	if (core_loaded())
 		core_unload();
 	end_game_stats();
@@ -167,6 +186,7 @@ static void fatal(const char *title, const char *msg)
 static void do_poweroff(void)
 {
 	led_set_red(1);
+	game_end_logs("power off");
 	audio_pause();
 	core_unload();
 	end_game_stats();
@@ -195,6 +215,8 @@ static void start_game(const char *path)
 	audio_init();
 	audio_set_source(core_info()->sample_rate, core_info()->fps,
 			 display_ready() ? di->refresh_hz : 60.0);
+	m.games++;
+	m.game_frames = 0;
 	rom_settings_load(m.rom_name);
 	m.saved_rom = rom_settings;
 	fx_update();
@@ -209,6 +231,7 @@ static void start_game(const char *path)
 
 static void quit_game(void)
 {
+	game_end_logs("quit");
 	audio_pause();
 	core_unload();
 	end_game_stats();
@@ -371,6 +394,13 @@ static void game_frame(uint32_t buttons, int64_t now)
 		m.next_perf = now + PERF_INTERVAL_NS;
 	}
 	core_save_tick(now);
+	if (++m.game_frames == 30 * 60) {
+		char name[48];
+
+		/* Early XRUN / hw_ptr reports, before the ring buffer wraps. */
+		snprintf(name, sizeof(name), "dmesg-game%u-30s.txt", m.games);
+		klog_dump_async(name);
+	}
 }
 
 static void frame(int64_t now)
@@ -477,7 +507,8 @@ static void clock_log(void)
 static void startup(void)
 {
 	struct utsname u;
-	char path[300];
+	char path[400];
+	unsigned boot;
 
 	m.cv.px = m.canvas_px;
 	sys_early_init();
@@ -492,8 +523,10 @@ static void startup(void)
 		      "live there.");
 	} else {
 		sys_make_dirs();
-		snprintf(path, sizeof(path), "%s/log/frontend.txt", fe_data_dir);
+		boot = sys_log_init();
+		snprintf(path, sizeof(path), "%s/frontend.txt", fe_log_dir);
 		log_open_file(path);
+		log_msg("log: boot %u, logging to %s", boot, fe_log_dir);
 	}
 	settings_load();
 	m.saved = settings;
@@ -626,11 +659,20 @@ static int headless(const char *data, const char *rom, long frames)
 	sys_make_dirs();
 	snprintf(path, sizeof(path), "%s/log/frontend.txt", fe_data_dir);
 	log_open_file(path);
-	audio_init_null(48000, 0.001);
 	/* Settings from DATA, so effects can be exercised too. */
 	settings_load();
 	rom_settings_load(strrchr(rom, '/') ? strrchr(rom, '/') + 1 : rom);
 	fx_update();
+	/* FE_AUDIO=simple: the default path with a realistic 50 ppm codec
+	 * drift (it has no rate control); otherwise adaptive with 0.1%. */
+	{
+		const char *mode = getenv("FE_AUDIO");
+
+		settings.audio = mode && !strcmp(mode, "simple") ? AUDIO_SIMPLE :
+				 AUDIO_ADAPTIVE;
+		audio_init_null(48000, settings.audio == AUDIO_SIMPLE ? 0.00005 :
+				0.001);
+	}
 	/* Simulated cpufreq: real work times, fake 60 Hz clock. */
 	snprintf(path, sizeof(path), "%s/fake-cpufreq", fe_data_dir);
 	cpuctl_fake_sysfs(path);
@@ -675,6 +717,7 @@ static int headless(const char *data, const char *rom, long frames)
 	}
 	if (m.perf_frames)
 		perf_report();
+	audio_summary("headless");
 	log_msg("headless: %ld frames, frame %dx%d pitch %d, final drc %.4f, "
 		"fill %d..%d, underruns after warmup %u",
 		frames, fw, fh, fp, as->adj, as->fill_min, as->fill_max,

@@ -873,7 +873,9 @@ static const char csv_header[] =
 	"time,boot_s,rom,mode,opp_khz,frames,seconds,work_avg_ms,work_p50_ms,"
 	"work_p99_ms,work_max_ms,missed,missed_cpu,underruns,changes,"
 	"bat_samples,avg_mA,avg_mV,avg_mW,backlight_pct,grid,grid_dim,"
-	"grid_boost,color,kernel_s,kernel_trans,start_mhz,learned_mhz\n";
+	"grid_boost,color,kernel_s,kernel_trans,start_mhz,learned_mhz,"
+	"audio_mode,audio_config,audio_dev_hz,audio_measured_hz,"
+	"audio_fill_min,audio_fill_max,audio_lrck_hz\n";
 
 /* One CSV row and one log line. opp < 0: summary of a class. */
 static size_t emit(char *buf, size_t size, const char *when, const char *qrom,
@@ -885,8 +887,10 @@ static size_t emit(char *buf, size_t size, const char *when, const char *qrom,
 	double avg = a->frames ? a->work_sum / a->frames : 0;
 	float p50 = hist_pct(a, 0.5), p99 = hist_pct(a, 0.99);
 	char oppk[16], bat[80] = "", batl[80] = "no samples", ks[24] = "",
-	     kt[24] = "", st[16] = "", le[16] = "";
+	     kt[24] = "", st[16] = "", le[16] = "", au[160];
 	size_t n;
+
+	audio_csv_fields(au, sizeof(au));
 
 	if (opp < 0)
 		snprintf(oppk, sizeof(oppk), "all");
@@ -911,14 +915,14 @@ static size_t emit(char *buf, size_t size, const char *when, const char *qrom,
 		snprintf(le, sizeof(le), "%d", learned);
 	}
 	n = snprintf(buf, size, "%s,%.1f,%s,%s,%s,%llu,%.1f,%.2f,%.2f,%.2f,%.2f,"
-		     "%u,%u,%u,%u,%u,%s,%.0f,%d,%d,%d,%s,%s,%s,%s,%s\n", when,
+		     "%u,%u,%u,%u,%u,%s,%.0f,%d,%d,%d,%s,%s,%s,%s,%s,%s\n", when,
 		     boot_ms() / 1000.0, qrom, mode, oppk,
 		     (unsigned long long)a->frames, a->seconds, avg, p50, p99,
 		     a->work_max, a->missed, a->missed_cpu, a->underruns,
 		     opp < 0 ? c.s.changes : a->entered, a->bat_n, bat,
 		     a->seconds > 0 ? a->bl_sum / a->seconds : settings.brightness,
 		     settings.grid, settings.grid_dim, settings.grid_boost,
-		     color_mode_names[rom_settings.color], ks, kt, st, le);
+		     color_mode_names[rom_settings.color], ks, kt, st, le, au);
 	log_msg("perf summary: %s %s: %llu frames %.1f s, work avg/p50/p99/max "
 		"%.2f/%.2f/%.2f/%.2f ms, missed %u (cpu %u), underruns %u, "
 		"%s %u, bat %s, backlight %.0f%%", mode, oppk,
@@ -929,6 +933,26 @@ static size_t emit(char *buf, size_t size, const char *when, const char *qrom,
 	return n < size ? n : size;
 }
 
+/*
+ * A perf.csv with a different header (older build, fewer columns) is
+ * renamed to perf-old.csv (replacing an earlier one) and a new file is
+ * started, so every file has one consistent header.
+ */
+static void csv_rotate_old(const char *path)
+{
+	char head[sizeof(csv_header)], old[300];
+	int n = read_file(path, head, sizeof(head) - 1);
+
+	if (n <= 0)
+		return;
+	head[n] = 0;
+	if (!strncmp(head, csv_header, sizeof(csv_header) - 1))
+		return;
+	snprintf(old, sizeof(old), "%s/log/perf-old.csv", fe_data_dir);
+	if (rename(path, old) == 0)
+		log_msg("cpufreq: perf.csv had another header, moved to %s", old);
+}
+
 static void csv_append(const char *rows, size_t len)
 {
 	char path[300];
@@ -936,6 +960,7 @@ static void csv_append(const char *rows, size_t len)
 	int fd;
 
 	snprintf(path, sizeof(path), "%s/log/perf.csv", fe_data_dir);
+	csv_rotate_old(path);
 	fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
 	if (fd < 0) {
 		log_msg("cpufreq: open %s: %s", path, strerror(errno));

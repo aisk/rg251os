@@ -2,6 +2,7 @@
  * Unit tests for the parts that do not need the device; run with
  * `frontend --selftest DIR`, e.g. under qemu-aarch64.
  */
+#include <dirent.h>
 #include <errno.h>
 #include <math.h>
 #include <stdio.h>
@@ -184,6 +185,7 @@ static void test_drc(double drift)
 	unsigned xruns = 0;
 	int fmin = 1 << 30, fmax = 0;
 
+	settings.audio = AUDIO_ADAPTIVE;
 	audio_init_null(48000, drift);
 	audio_set_source(32768, 59.7275, 60.0186);
 	for (int f = 0; f < 60 * 120; f++) {
@@ -374,8 +376,10 @@ static void test_settings(const char *base)
 	s.grid_dim = 75;
 	s.grid_boost = 30;
 	s.cpu = 1008;
+	s.audio = AUDIO_ADAPTIVE;
 	CHECK(settings_format(&s, buf, sizeof(buf)) > 0, "format");
-	CHECK(settings_parse(&t, buf) == 6, "parse back: %s", buf);
+	CHECK(settings_parse(&t, buf) == 7, "parse back: %s", buf);
+	CHECK(strstr(buf, "audio=adaptive\n") != NULL, "audio mode: %s", buf);
 	CHECK(!memcmp(&s, &t, sizeof(s)), "round trip: %s", buf);
 	CHECK(strstr(buf, "grid=on\n") != NULL, "grid written as on/off");
 	CHECK(strstr(buf, "cpu=1008\n") != NULL, "cpu written as MHz: %s", buf);
@@ -535,6 +539,65 @@ static void test_battery(const char *base)
 	CHECK(battery_read(&b) != 0 && !b.valid, "no battery");
 	battery_init(ps);  /* back, for the UI renders */
 	battery_poll(5000000000000000LL);
+}
+
+/* The default path: fixed ratio, half a buffer, no calibration. */
+static void test_audio_simple(double drift, int seconds)
+{
+	static int16_t silence[1200 * 2];
+	struct audio_stats st;
+	double acc = 0;
+	unsigned xruns = 0;
+	char csv[200];
+
+	settings.audio = AUDIO_SIMPLE;
+	audio_init_null(48000, drift);
+	audio_set_source(32768, 59.7275, 60.0186);
+	for (int f = 0; f < 60 * seconds; f++) {
+		int n;
+
+		acc += 32768 / 59.7275;
+		n = (int)acc;
+		acc -= n;
+		audio_push(silence, n);
+		audio_flush();
+		if (f % 600 == 599) {
+			audio_take_stats(&st);
+			xruns += st.xruns;
+		}
+	}
+	audio_summary("selftest");
+	audio_csv_fields(csv, sizeof(csv));
+	log_msg("selftest: simple drift %+.4f%% %d s: underruns %u, measured %.0f "
+		"Hz, csv %s", drift * 100, seconds, xruns, audio_session_rate(), csv);
+	CHECK(xruns == 0, "simple mode underruns with drift %f", drift);
+	CHECK(audio_device_rate() == 48000 && audio_buffer() == 4096,
+	      "simple mode config");
+	CHECK(fabs(audio_session_rate() / (48000 * (1 + drift)) - 1) < 0.003,
+	      "simple mode measured rate %f", audio_session_rate());
+	CHECK(!strncmp(csv, "simple,48000 Hz S16 512x8,48000,", 32),
+	      "csv fields %s", csv);
+	settings.audio = settings_defaults.audio;
+}
+
+static void test_tone(void)
+{
+	unsigned len = 48000, zero = 0;
+	int peak = 0;
+
+	CHECK(audio_tone_sample(0, len, 48000, 440) == 0, "tone starts at 0");
+	for (unsigned i = 1; i < len; i++) {
+		int a = audio_tone_sample(i - 1, len, 48000, 440);
+		int b = audio_tone_sample(i, len, 48000, 440);
+
+		if ((a < 0) != (b < 0))
+			zero++;
+		if (abs(b) > peak)
+			peak = abs(b);
+	}
+	/* 440 Hz: 880 sign changes per second, about -10 dBFS. */
+	CHECK(zero >= 875 && zero <= 885, "tone zero crossings %u", zero);
+	CHECK(peak > 9000 && peak < 10500, "tone peak %d", peak);
 }
 
 static void touch(const char *dir, const char *name)
@@ -849,6 +912,47 @@ static void test_ui(const char *dir)
 	write_file_atomic(path, px, sizeof(px));
 }
 
+/* Per boot log directories: numbered, the newest 20 kept. */
+static void test_log_dirs(const char *base)
+{
+	char data[200], path[500], keep_data[256], keep_log[300], buf[32];
+	unsigned n = 0;
+	int count = 0, has_first = 0, has_last = 0;
+	DIR *d;
+	struct dirent *e;
+
+	snprintf(keep_data, sizeof(keep_data), "%s", fe_data_dir);
+	snprintf(keep_log, sizeof(keep_log), "%s", fe_log_dir);
+	snprintf(data, sizeof(data), "%s/logtest", base);
+	mkdir(data, 0755);
+	snprintf(fe_data_dir, sizeof(fe_data_dir), "%s", data);
+	sys_make_dirs();
+	for (int i = 0; i < 25; i++) {
+		n = sys_log_init();
+		snprintf(path, sizeof(path), "%s/frontend.txt", fe_log_dir);
+		write_file_atomic(path, "x\n", 2);
+	}
+	CHECK(n == 25, "boot counter %u", n);
+	snprintf(path, sizeof(path), "%s/log", data);
+	d = opendir(path);
+	while (d && (e = readdir(d))) {
+		if (strncmp(e->d_name, "boot-0", 6))
+			continue;
+		count++;
+		has_first |= !strcmp(e->d_name, "boot-0006");
+		has_last |= !strcmp(e->d_name, "boot-0025");
+		CHECK(strcmp(e->d_name, "boot-0005") != 0, "boot-0005 kept");
+	}
+	if (d)
+		closedir(d);
+	CHECK(count == 20 && has_first && has_last, "%d boot dirs", count);
+	snprintf(path, sizeof(path), "%s/log/LATEST.txt", data);
+	CHECK(read_file(path, buf, sizeof(buf)) == 10 && !strncmp(buf, "boot-0025", 9),
+	      "LATEST.txt");
+	snprintf(fe_data_dir, sizeof(fe_data_dir), "%s", keep_data);
+	snprintf(fe_log_dir, sizeof(fe_log_dir), "%s", keep_log);
+}
+
 int selftest(const char *dir)
 {
 	mkdir(dir, 0755);
@@ -862,6 +966,11 @@ int selftest(const char *dir)
 	test_drc(-0.003);
 	test_drc(1.0);    /* the first hardware run: device at 2x */
 	test_drc(-0.25);  /* device slower than nominal */
+	test_audio_simple(0, 60);
+	test_audio_simple(0.00005, 300);  /* 50 ppm for 5 minutes */
+	test_audio_simple(-0.0002, 300);  /* slower codec: blocks, never xruns */
+	test_tone();
+	test_log_dirs(dir);
 	test_fx_tables();
 	test_grid_pattern();
 	test_romlist(dir);

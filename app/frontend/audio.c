@@ -22,8 +22,23 @@
  * adjusts it by up to +-0.5% to keep the ALSA buffer at its target fill,
  * which absorbs the remaining drift between the panel and codec clocks.
  *
- * Calibration. The first hardware run consumed about twice the configured
- * 48 kHz (fill never above ~250 frames, ~40 underruns/s). So before the
+ * Modes (settings.audio). Simple, the default: 48 kHz S16 512x8 with
+ * blocking writes, the stream starting by itself at half a buffer, a
+ * fixed resampling ratio and half a buffer of silence after an underrun;
+ * this is what pid351 runs with no underruns on this board on mainline.
+ * Adaptive: the calibrated, nonblocking, rate controlled path below,
+ * which made things worse on the second hardware run and stays opt-in
+ * until the cause is understood.
+ *
+ * Diagnostics in both modes: 3 s into each game the clock and I2S
+ * registers (and once per boot clk_summary and /proc/asound) are logged;
+ * at game end audio_summary() logs mode, config, calibration, the device
+ * rate measured during play, underruns and fill; perf.csv gets the same
+ * as columns; the settings screen has a 440 Hz test tone.
+ *
+ * Calibration (adaptive). The first hardware run consumed about twice
+ * the configured 48 kHz (fill never above ~250 frames, ~40 underruns/s).
+ * So before the
  * first game the device plays silence for a moment and the frames it
  * really consumed are fitted against CLOCK_MONOTONIC. The first config
  * within 2% of its nominal rate is kept; otherwise the next one is tried
@@ -46,6 +61,9 @@
 #include <unistd.h>
 
 #include <tinyalsa/asoundlib.h>
+
+/* In libtinyalsa but missing from its public header. */
+int pcm_state(struct pcm *pcm);
 
 #include "audio.h"
 #include "fe.h"
@@ -80,6 +98,11 @@ static const struct cand cands[] = {
 };
 /* Nothing matched: big enough to survive a 2x device rate. */
 static const struct cand fallback = { 48000, 1024, 8, 0 };
+/* AUDIO_SIMPLE: exactly what pid351 runs on this board (blocking writes,
+ * start at half a buffer, re-prime half a buffer after an underrun). */
+static const struct cand simple_cand = { 48000, 512, 8, 0 };
+
+#define MAX_CAL 8
 
 static struct {
 	struct pcm *pcm;
@@ -88,7 +111,23 @@ static struct {
 	double null_ratio;  /* simulated device speed / nominal */
 	double null_fill, null_hz, null_consume;  /* simulated device */
 	int null_xrun;
+	int null_running;   /* simulated start threshold reached */
 	struct cand cand;   /* currently open */
+	int mode;           /* AUDIO_SIMPLE / AUDIO_ADAPTIVE of the open PCM */
+	struct { struct cand c; double rate; } cal[MAX_CAL];
+	int ncal;
+	double hw_mclk, hw_codec_mclk, hw_lrck;  /* from registers, 0: unknown */
+	/* This game: underruns, fill range, rate measured between flushes
+	 * (intervals without an underrun only). */
+	unsigned sess_xruns;
+	int sess_fill_min, sess_fill_max;
+	uint64_t sess_frames;
+	int64_t sess_ns;
+	uint64_t prev_played;
+	int64_t prev_ns;
+	int prev_ok;
+	unsigned flushes;
+	int game_dumped;
 	unsigned rate, buffer, period, target;
 	double dev_rate;    /* frames/s the device really plays */
 	int calibrated;
@@ -264,6 +303,9 @@ static void hw_dump(const char *when)
 		(i2s[0] >> 5) & 1, i2s[2], mdiv, tsd,
 		(i2s[2] >> 27) & 1 ? "slave" : "master", (i2s[2] >> 28) & 3,
 		i2s[3], i2s[4], xfer, bclk, lrck);
+	a.hw_mclk = mclk;
+	a.hw_codec_mclk = codec_mclk;
+	a.hw_lrck = lrck;
 }
 
 /* Kernel side view, once: clock rates, ALSA hw/sw params and status. */
@@ -515,6 +557,7 @@ static int open_cand(const struct cand *c)
 		.start_threshold = c->period * c->periods / 4,
 		.avail_min = c->period,
 	};
+	int simple = c == &simple_cand;
 	const struct pcm_config *got;
 	struct pcm *pcm;
 
@@ -526,14 +569,19 @@ static int open_cand(const struct cand *c)
 	a.written = 0;
 	a.rate_ns = 0;
 	a.rate_frames = 0;
+	a.prev_ok = 0;
 	if (a.null_dev) {
 		a.null_fill = 0;
+		a.null_running = 0;
 		a.null_hz = a.rate * a.null_ratio;
 		a.dev_rate = a.rate;
 		a.target = a.buffer / 2;
 		return 0;
 	}
-	pcm = pcm_open(CARD, DEVICE, PCM_OUT | PCM_NONBLOCK | PCM_NORESTART, &cfg);
+	if (simple)
+		cfg.start_threshold = c->period * c->periods / 2;
+	pcm = pcm_open(CARD, DEVICE, PCM_OUT | PCM_NORESTART |
+		       (simple ? 0 : PCM_NONBLOCK), &cfg);
 	if (!pcm || !pcm_is_ready(pcm)) {
 		log_msg("audio: open %s failed: %s", cand_name(c),
 			pcm ? pcm_get_error(pcm) : "no memory");
@@ -547,8 +595,11 @@ static int open_cand(const struct cand *c)
 	a.buffer = pcm_get_buffer_size(pcm);
 	a.target = a.buffer / 2;
 	got = pcm_get_config(pcm);
-	log_msg("audio: opened %s, buffer %u frames (%.1f ms), kernel period %u "
-		"x %u", cand_name(c), a.buffer, a.buffer * 1000.0 / a.rate,
+	a.mode = simple ? AUDIO_SIMPLE : AUDIO_ADAPTIVE;
+	log_msg("audio: opened %s (%s, %s writes), buffer %u frames (%.1f ms), "
+		"kernel period %u x %u", cand_name(c),
+		simple ? "simple" : "adaptive", simple ? "blocking" : "nonblocking",
+		a.buffer, a.buffer * 1000.0 / a.rate,
 		got ? got->period_size : 0, got ? got->period_count : 0);
 	return 0;
 }
@@ -569,6 +620,8 @@ int audio_init(void)
 		return -1;
 	log_params();
 
+	if (settings.audio == AUDIO_SIMPLE)
+		return open_cand(&simple_cand);
 	/* After calibration reopen what it chose, else the first that opens. */
 	if (a.calibrated && open_cand(&a.cand) == 0)
 		return 0;
@@ -624,6 +677,9 @@ static int dev_write(const int16_t *buf, unsigned frames)
 		unsigned n = room < frames ? (unsigned)room : frames;
 
 		a.null_fill += n;
+		a.written += n;
+		if (a.null_fill >= (a.mode == AUDIO_SIMPLE ? a.buffer / 2 : a.buffer / 4))
+			a.null_running = 1;
 		return (int)n;
 	}
 	if (!a.cand.s32) {
@@ -754,6 +810,7 @@ static double calibrate(int full_dump)
 	if (a.pcm)
 		pcm_stop(a.pcm);
 	a.null_fill = 0;
+	a.null_running = 0;
 	a.null_xrun = 0;
 	a.started = 0;
 	a.written = 0;
@@ -765,9 +822,19 @@ static double calibrate(int full_dump)
 	if (fail) {
 		log_msg("audio: calibrate %s: failed (%s) after %.0f ms", cand_name(&a.cand),
 			fail, (cal_now() - t0) / 1e6);
+		if (a.ncal < MAX_CAL) {
+			a.cal[a.ncal].c = a.cand;
+			a.cal[a.ncal].rate = 0;
+			a.ncal++;
+		}
 		return 0;
 	}
 	rate = (n * sxy - sx * sy) / dn;
+	if (a.ncal < MAX_CAL) {
+		a.cal[a.ncal].c = a.cand;
+		a.cal[a.ncal].rate = rate;
+		a.ncal++;
+	}
 	log_msg("audio: calibrate %s: device consumed %.0f frames/s = %.4fx "
 		"nominal (%d samples over %.0f ms, pointer step >= %ld frames, "
 		"%llu frames written)", cand_name(&a.cand), rate, rate / a.rate, n,
@@ -823,10 +890,41 @@ static void choose_config(void)
 
 /* --------------------------------------------------------------- stream */
 
+/* Reopen the PCM if settings.audio changed since it was opened. */
+static void apply_mode(void)
+{
+	if (a.null_dev) {
+		a.mode = settings.audio;
+		return;
+	}
+	if (!a.pcm || a.mode == settings.audio)
+		return;
+	log_msg("audio: switching to %s mode",
+		settings.audio == AUDIO_SIMPLE ? "simple" : "adaptive");
+	close_pcm();
+	if (settings.audio == AUDIO_SIMPLE)
+		open_cand(&simple_cand);
+	else if (!(a.calibrated && open_cand(&a.cand) == 0))
+		for (size_t i = 0; i < ARRAY_SIZE(cands); i++)
+			if (open_cand(&cands[i]) == 0)
+				break;
+}
+
 void audio_set_source(double in_rate, double core_fps, double display_hz)
 {
-	if (!a.calibrated && audio_ready())
+	apply_mode();
+	if (a.mode == AUDIO_ADAPTIVE && !a.calibrated && audio_ready())
 		choose_config();
+	if (a.mode == AUDIO_SIMPLE)
+		a.dev_rate = a.rate;
+	a.sess_xruns = 0;
+	a.sess_fill_min = -1;
+	a.sess_fill_max = 0;
+	a.sess_frames = 0;
+	a.sess_ns = 0;
+	a.prev_ok = 0;
+	a.flushes = 0;
+	a.game_dumped = 0;
 	if (!a.rate || !audio_ready())
 		return;
 	/* Input frames per output frame, with the core sped up to the panel. */
@@ -839,6 +937,8 @@ void audio_set_source(double in_rate, double core_fps, double display_hz)
 	a.target = (unsigned)((a.buffer - a.dev_rate / display_hz) / 2);
 	if (a.target < a.buffer / 4)
 		a.target = a.buffer / 4;
+	if (a.mode == AUDIO_SIMPLE)
+		a.target = a.buffer / 2;  /* re-prime level after an underrun */
 	a.adj = 1.0;
 	a.fill_ema = a.target;
 	rs_init(&a.rs, a.base_step);
@@ -846,11 +946,11 @@ void audio_set_source(double in_rate, double core_fps, double display_hz)
 	a.started = 0;
 	if (a.null_dev)
 		a.null_consume = a.null_hz / display_hz;  /* per video frame */
-	log_msg("audio: source %.0f Hz at %.4f fps, display %.4f Hz, device "
-		"%u Hz (plays %.0f), step %.6f (%.2f out frames per video frame), "
-		"buffer %u, target fill %u", in_rate, core_fps, display_hz, a.rate,
-		a.dev_rate, a.base_step, in_rate / core_fps / a.base_step, a.buffer,
-		a.target);
+	log_msg("audio: source %.0f Hz at %.4f fps, display %.4f Hz, %s mode, "
+		"device %u Hz (plays %.0f), step %.6f (%.2f out frames per video "
+		"frame), buffer %u, target fill %u", in_rate, core_fps, display_hz,
+		a.mode == AUDIO_SIMPLE ? "simple" : "adaptive", a.rate, a.dev_rate,
+		a.base_step, in_rate / core_fps / a.base_step, a.buffer, a.target);
 }
 
 void audio_push(const int16_t *samples, size_t frames)
@@ -861,6 +961,28 @@ void audio_push(const int16_t *samples, size_t frames)
 		a.out_n += rs_process(&a.rs, samples, frames, a.out + 2 * a.out_n,
 				      OUT_MAX - a.out_n);
 	a.time_ns += now_ns() - t0;
+}
+
+/*
+ * Device rate during play: frames played between two flushes over the
+ * time between them, only for intervals with the stream running and no
+ * underrun in between (an underrun stops the clock for an unknown time).
+ */
+static void session_rate_sample(long fill)
+{
+	int64_t now = now_ns();
+	uint64_t played = a.written > (uint64_t)fill ? a.written - (uint64_t)fill : 0;
+	int running = a.null_dev || (a.pcm && pcm_state(a.pcm) == PCM_STATE_RUNNING);
+
+	if (a.null_dev)
+		now = (int64_t)a.flushes * 16661000LL;  /* simulated frames */
+	if (running && a.prev_ok && played >= a.prev_played && now > a.prev_ns) {
+		a.sess_frames += played - a.prev_played;
+		a.sess_ns += now - a.prev_ns;
+	}
+	a.prev_played = played;
+	a.prev_ns = now;
+	a.prev_ok = running;
 }
 
 /* Restart after an underrun or pause: queue the target fill of silence. */
@@ -885,6 +1007,8 @@ static void on_xrun(const char *what)
 {
 	a.st.xruns++;
 	a.xruns_total++;
+	a.sess_xruns++;
+	a.prev_ok = 0;
 	if (a.xruns_total <= 20 || a.xruns_total % 100 == 0)
 		log_msg("audio: underrun #%u (%s)", a.xruns_total, what);
 	if (a.pcm)
@@ -903,17 +1027,29 @@ void audio_flush(void)
 		a.out_n = 0;
 		return;
 	}
-	if (a.null_dev) {
+	if (a.null_dev && a.null_running) {
 		/* The simulated codec plays one video frame worth of audio. */
 		a.null_fill -= a.null_consume;
 		if (a.null_fill < 0) {
 			a.null_fill = 0;
+			a.null_running = 0;
 			if (a.started)
 				on_xrun("simulated");
 		}
 	}
-	if (!a.started)
-		prime();
+	if (!a.started) {
+		/* Simple mode starts on its own at half a buffer of game audio
+		 * (pid351: priming on open was its boot pop). */
+		if (a.mode == AUDIO_SIMPLE) {
+			/* After a pause the stream is in SETUP, where the delay
+			 * cannot be read (that would count as an underrun). */
+			if (a.pcm)
+				pcm_prepare(a.pcm);
+			a.started = 1;
+		} else {
+			prime();
+		}
+	}
 
 	fill = dev_delay();
 	if (fill < 0) {
@@ -927,7 +1063,23 @@ void audio_flush(void)
 		a.st.fill_min = (int)fill;
 	if ((int)fill > a.st.fill_max)
 		a.st.fill_max = (int)fill;
+	if (a.sess_fill_min < 0 || (int)fill < a.sess_fill_min)
+		a.sess_fill_min = (int)fill;
+	if ((int)fill > a.sess_fill_max)
+		a.sess_fill_max = (int)fill;
+	session_rate_sample(fill);
+	if (++a.flushes == 180 && !a.game_dumped && a.pcm &&
+	    pcm_state(a.pcm) == PCM_STATE_RUNNING) {
+		/* 3 s into the game, with the stream running for real. */
+		a.game_dumped = 1;
+		hw_dump("in game");
+		if (!a.hw_dumped)
+			kernel_dump();
+		a.hw_dumped = 1;
+	}
 
+	if (a.mode == AUDIO_SIMPLE)
+		goto write;
 	/* Proportional control on the smoothed fill level. */
 	a.fill_ema += FILL_EMA * (fill - a.fill_ema);
 	err = ((double)a.target - a.fill_ema) / a.target;
@@ -938,6 +1090,7 @@ void audio_flush(void)
 	a.adj = 1.0 + DRC_MAX * err;
 	rs_set_ratio(&a.rs, a.base_step / a.adj);
 
+write:
 	if (a.out_n) {
 		n = dev_write(a.out, (unsigned)a.out_n);
 		if (n < 0 && errno == EPIPE) {
@@ -965,8 +1118,10 @@ void audio_pause(void)
 		pcm_stop(a.pcm);
 	}
 	a.null_fill = 0;
+	a.null_running = 0;
 	a.started = 0;
 	a.out_n = 0;
+	a.prev_ok = 0;
 }
 
 /*
@@ -1011,4 +1166,144 @@ int64_t audio_take_time_ns(void)
 
 	a.time_ns = 0;
 	return t;
+}
+
+/* ------------------------------------------------------------- summary */
+
+static const char *mode_name(void)
+{
+	return a.mode == AUDIO_SIMPLE ? "simple" : "adaptive";
+}
+
+double audio_session_rate(void)
+{
+	return a.sess_ns > 0 ? a.sess_frames * 1e9 / a.sess_ns : 0;
+}
+
+void audio_summary(const char *when)
+{
+	char cal[400] = "";
+	int off = 0;
+
+	for (int i = 0; i < a.ncal && off < (int)sizeof(cal) - 60; i++)
+		off += snprintf(cal + off, sizeof(cal) - off, "%s%s = %.0f Hz",
+				i ? ", " : "", cand_name(&a.cal[i].c), a.cal[i].rate);
+	log_msg("audio summary (%s): %s mode, %s%s, device plays %.0f Hz "
+		"(assumed), measured in play %.0f Hz over %.1f s, underruns %u "
+		"this game / %u since boot, fill %d..%d of buffer %u",
+		when, mode_name(), audio_ready() ? cand_name(&a.cand) : "no PCM",
+		a.null_dev ? " (simulated)" : "", a.dev_rate, audio_session_rate(),
+		a.sess_ns / 1e9, a.sess_xruns, a.xruns_total, a.sess_fill_min,
+		a.sess_fill_max, a.buffer);
+	log_msg("audio summary (%s): calibration %s; registers: MCLK %.0f Hz, "
+		"codec MCLK %.0f Hz, LRCK %.0f Hz%s", when,
+		a.ncal ? cal : a.mode == AUDIO_SIMPLE ? "not used (simple mode)" :
+		"not run", a.hw_mclk, a.hw_codec_mclk, a.hw_lrck,
+		a.hw_lrck > 0 ? "" : " (not read)");
+}
+
+int audio_csv_fields(char *buf, size_t size)
+{
+	char cfg[48];
+	int n;
+
+	snprintf(cfg, sizeof(cfg), "%s", audio_ready() ? cand_name(&a.cand) : "");
+	n = snprintf(buf, size, "%s,%s,%.0f,%.0f,%d,%d,%.0f", mode_name(), cfg,
+		     a.dev_rate, audio_session_rate(), a.sess_fill_min,
+		     a.sess_fill_max, a.hw_lrck);
+	return n < (int)size ? n : (int)size - 1;
+}
+
+/* ---------------------------------------------------------- test tone */
+
+/* Sine sample at frame i of a tone of len frames with 20 ms fades. */
+int16_t audio_tone_sample(unsigned i, unsigned len, unsigned rate, double hz)
+{
+	double fade = rate * 0.02, g = 1.0;
+
+	if (i < fade)
+		g = i / fade;
+	else if (len - i < fade)
+		g = (len - i) / fade;
+	return (int16_t)(sin(2 * M_PI * hz * i / rate) * 0.3 * 32767 * g);
+}
+
+/*
+ * 440 Hz at the nominal rate through the open PCM, the same config and
+ * write mode as in game, so pitch (an octave up means the device plays
+ * twice the rate) and crackle can be judged without a game. Blocks for
+ * about the tone's length.
+ */
+void audio_test_tone(double seconds)
+{
+	int16_t buf[512 * 2];
+	unsigned len, done = 0, xr0 = a.xruns_total;
+	int64_t t0, t_start = 0;
+	uint64_t w0;
+	long d;
+
+	audio_init();
+	apply_mode();
+	if (!a.pcm) {
+		log_msg("audio: test tone: no PCM");
+		return;
+	}
+	audio_pause();
+	pcm_prepare(a.pcm);
+	len = (unsigned)(seconds * a.rate);
+	w0 = a.written;
+	t0 = now_ns();
+	a.prev_ok = 0;
+	a.sess_frames = 0;
+	a.sess_ns = 0;
+	while (done < len) {
+		unsigned n = len - done < 512 ? len - done : 512;
+		int w;
+
+		for (unsigned i = 0; i < n; i++)
+			buf[2 * i] = buf[2 * i + 1] =
+				audio_tone_sample(done + i, len, a.rate, 440);
+		w = dev_write(buf, n);
+		if (w < 0 && errno == EPIPE) {
+			on_xrun("tone");
+			pcm_prepare(a.pcm);
+			continue;
+		}
+		if (w < 0 && errno != EAGAIN) {
+			log_msg("audio: test tone: write: %s", pcm_get_error(a.pcm));
+			break;
+		}
+		if (w > 0)
+			done += (unsigned)w;
+		d = pcm_get_delay(a.pcm);
+		if (d >= 0) {
+			if (!t_start && pcm_state(a.pcm) == PCM_STATE_RUNNING)
+				t_start = now_ns();
+			session_rate_sample(d);
+		}
+		if (w <= 0 || (unsigned)w < n) {
+			struct timespec ts = { 0, 2000000 };
+
+			nanosleep(&ts, NULL);
+		}
+	}
+	/* Let it drain, then stop. */
+	for (int i = 0; i < 200; i++) {
+		struct timespec ts = { 0, 5000000 };
+
+		d = pcm_get_delay(a.pcm);
+		if (d < 0 || d < (long)a.period)
+			break;
+		session_rate_sample(d);
+		nanosleep(&ts, NULL);
+	}
+	pcm_stop(a.pcm);
+	a.started = 0;
+	log_msg("audio: test tone 440 Hz %.1f s, %s %s mode: %u underruns, "
+		"measured %.0f Hz, %llu frames written in %.2f s wall (%.2f s "
+		"after start)", seconds, cand_name(&a.cand), mode_name(),
+		a.xruns_total - xr0, audio_session_rate(),
+		(unsigned long long)(a.written - w0), (now_ns() - t0) / 1e9,
+		t_start ? (now_ns() - t_start) / 1e9 : 0);
+	audio_summary("test tone");
 }

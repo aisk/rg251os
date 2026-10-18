@@ -42,6 +42,18 @@ int64_t audio_take_time_ns(void);
 /* Underruns since start, never reset. */
 unsigned audio_xruns_total(void);
 
+/* Log the calibration, chosen config, rates, underruns and fill of
+ * this game (call at game end, before audio_pause, and at power off). */
+void audio_summary(const char *when);
+/* Device rate measured during play this game, 0 if unknown. */
+double audio_session_rate(void);
+/* perf.csv columns: audio_mode,audio_config,audio_dev_hz,
+ * audio_measured_hz,audio_fill_min,audio_fill_max,audio_lrck_hz */
+int audio_csv_fields(char *buf, size_t size);
+/* Play a 440 Hz sine through the game's audio path (blocks). */
+void audio_test_tone(double seconds);
+int16_t audio_tone_sample(unsigned i, unsigned len, unsigned rate, double hz);
+
 /* Apply "Control Name=value" lines (from <data>/mixer.txt). */
 int audio_apply_mixer_text(const char *text);
 
