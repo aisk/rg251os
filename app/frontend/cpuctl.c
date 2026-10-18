@@ -439,8 +439,10 @@ void cpuctl_set_mode(int mode)
 		return;
 	}
 	opp = mode_opp(mode);
-	log_msg("cpufreq: %ld -> %ld kHz (mode change %s -> %s)",
-		c.khz[c.s.opp], c.khz[opp], a, b);
+	/* Changes are counted (perf summary); the lines are debug only. */
+	if (log_debug())
+		log_msg("cpufreq: %ld -> %ld kHz (mode change %s -> %s)",
+			c.khz[c.s.opp], c.khz[opp], a, b);
 	if (opp != c.s.opp) {
 		c.s.changes++;
 		c.s.acc[mode == CPU_MODE_ADAPTIVE ? CLS_ADAPTIVE : CLS_PINNED][opp]
@@ -618,12 +620,14 @@ static void change_opp(int to, const char *reason, const char *extra,
 		c.s.downs++;
 		c.s.last_down = now;
 	}
-	log_msg("cpufreq: %ld -> %ld kHz (%s), %d frames work p50/p99/max "
-		"%.2f/%.2f/%.2f ms (%.0f/%.0f/%.0f%% of %.2f ms)%s%s, hold %lld s",
-		c.khz[from], c.khz[to], reason, w.n, w.p50, w.p99, w.max,
-		100 * w.p50 / p, 100 * w.p99 / p, 100 * w.max / p, p,
-		extra ? ", " : "", extra ? extra : "",
-		(long long)(c.s.hold_until > now ? (c.s.hold_until - now) / NS : 0));
+	if (log_debug())
+		log_msg("cpufreq: %ld -> %ld kHz (%s), %d frames work p50/p99/max "
+			"%.2f/%.2f/%.2f ms (%.0f/%.0f/%.0f%% of %.2f ms)%s%s, "
+			"hold %lld s", c.khz[from], c.khz[to], reason, w.n, w.p50,
+			w.p99, w.max, 100 * w.p50 / p, 100 * w.p99 / p,
+			100 * w.max / p, p, extra ? ", " : "", extra ? extra : "",
+			(long long)(c.s.hold_until > now ?
+				    (c.s.hold_until - now) / NS : 0));
 	c.s.opp = to;
 	c.s.changes++;
 	c.s.acc[c.s.cls][to].entered++;
@@ -732,7 +736,7 @@ void cpuctl_game_frame(int64_t work_ns, unsigned missed, int64_t now)
 	c.s.prev_cls = c.s.cls;
 	c.s.prev_opp = c.s.opp;
 
-	if (c.s.verify > 0 && --c.s.verify == 0)
+	if (c.s.verify > 0 && --c.s.verify == 0 && log_debug())
 		log_msg("cpufreq: target %ld kHz, util_min %u (%s), observed %ld kHz",
 			c.khz[c.s.opp], opp_util(c.s.opp), act_names[c.act],
 			cpu_freq_khz());

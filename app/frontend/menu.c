@@ -3,17 +3,21 @@
  *
  * ROM list: up/down (left/right page), A or START starts, SELECT opens
  * the global settings (Volume, Brightness, CPU, LCD grid, Grid darkness,
- * Dot boost, Audio mode Simple/Adaptive, and Audio test: A plays a 3 s
- * 440 Hz tone through the game's audio path). In game, SELECT+START
- * opens the in-game menu: Resume, Volume, Brightness, CPU, Settings,
- * Quit to ROM list, Power off; B or SELECT+START again resumes. CPU is
- * the global CPU mode (Adaptive, Max or a fixed frequency, see cpuctl.c);
- * changed in game it applies as soon as the game resumes. The in-game
- * Settings screen shows the game with the effects applied (live preview)
- * under a panel with Color (this game),
- * LCD grid, Grid darkness and Dot boost. In menus, up/down select,
- * left/right change a value, A activates, B goes back. The battery level
- * is shown in the ROM list header and above the in-game menus.
+ * Dot boost, Audio mode Simple/Adaptive, Audio test: A plays a 3 s
+ * 440 Hz tone through the game's audio path, and Debug log on/off, see
+ * log.c). In game, SELECT+START opens the in-game menu: Resume, Volume,
+ * Brightness, CPU, Core, Settings, Quit to ROM list, Power off; B or
+ * SELECT+START again resumes. CPU is the global CPU mode (Adaptive, Max
+ * or a fixed frequency, see cpuctl.c); changed in game it applies as soon
+ * as the game resumes. Core (this game: mGBA or gpSP) shows the running
+ * core; left/right pick another one, the row then reads "Restart with"
+ * and A saves and restarts the game with it (resuming instead keeps it
+ * for the next start). The in-game Settings screen shows the game with
+ * the effects applied (live preview) under a panel with Color (this
+ * game), LCD grid, Grid darkness, Dot boost and Debug log. In menus,
+ * up/down select, left/right change a value, A activates, B goes back.
+ * The battery level is shown in the ROM list header and above the
+ * in-game menus.
  */
 #include <stdio.h>
 #include <string.h>
@@ -21,6 +25,8 @@
 
 #include "audio.h"
 #include "battery.h"
+#include "core.h"
+#include "core_api.h"
 #include "cpuctl.h"
 #include "fe.h"
 #include "fx.h"
@@ -237,9 +243,27 @@ void romlist_menu_draw(struct canvas *c)
 /* -------------------------------------------------------- in-game menu */
 
 enum {
-	IG_RESUME, IG_VOLUME, IG_BRIGHTNESS, IG_CPU, IG_SETTINGS, IG_QUIT,
-	IG_POWEROFF, IG_COUNT
+	IG_RESUME, IG_VOLUME, IG_BRIGHTNESS, IG_CPU, IG_CORE, IG_SETTINGS,
+	IG_QUIT, IG_POWEROFF, IG_COUNT
 };
+
+/* The game's core setting, to the next core that is built in. */
+static void core_step(int d)
+{
+	int id = rom_settings.core;
+
+	for (int i = 0; i < CORE_COUNT; i++) {
+		id = (id + CORE_COUNT + d) % CORE_COUNT;
+		if (core_api_get(id))
+			break;
+	}
+	rom_settings.core = id;
+}
+
+static int core_pending(void)
+{
+	return core_loaded() && rom_settings.core != core_info()->core;
+}
 
 void ingame_menu_enter(const char *rom_name)
 {
@@ -268,10 +292,17 @@ int ingame_menu_update(uint32_t pressed)
 		brightness_step(d);
 	if (d && ig.sel == IG_CPU)
 		cpu_step(d);
+	if (d && ig.sel == IG_CORE)
+		core_step(d);
 	if (pressed & (BIT(A) | BIT(START))) {
 		switch (ig.sel) {
 		case IG_RESUME:
 			return UI_RESUME;
+		case IG_CORE:
+			if (core_pending())
+				return UI_RESTART;
+			core_step(1);
+			break;
 		case IG_SETTINGS:
 			return UI_SETTINGS;
 		case IG_QUIT:
@@ -287,10 +318,10 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 		      int w, int h)
 {
 	static const char *const items[IG_COUNT] = {
-		"Resume", "Volume", "Brightness", "CPU", "Settings",
+		"Resume", "Volume", "Brightness", "CPU", "Core", "Settings",
 		"Quit to ROM list", "Power off",
 	};
-	int bx = 56, by = 48, bw = c->w - 112, bh = 40 + IG_COUNT * 30;
+	int bx = 56, by = 48, bw = c->w - 112, bh = 40 + IG_COUNT * 28;
 
 	draw_image_dim(c, frame, pitch, w, h);
 	draw_battery(c, c->w - 8, 16);
@@ -298,12 +329,13 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 	draw_frame(c, bx, by, bw, bh, COL_SEL);
 	draw_name(c, bx + 12, by + 12, COL_HI, ig.name, (bw - 24) / 16);
 	for (int i = 0; i < IG_COUNT; i++) {
-		int y = by + 40 + i * 30;
+		int y = by + 40 + i * 28;
 		uint16_t col = i == ig.sel ? COL_FG : COL_DIM;
 
 		if (i == ig.sel)
 			draw_fill(c, bx + 4, y - 5, bw - 8, 26, COL_SEL);
-		draw_text(c, bx + 16, y, 2, col, items[i]);
+		draw_text(c, bx + 16, y, 2, col, i == IG_CORE && core_pending() ?
+			  "Restart with" : items[i]);
 		if (i == IG_VOLUME) {
 			char v[16];
 
@@ -317,6 +349,11 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 
 			cpuctl_mode_label(settings.cpu, v, sizeof(v));
 			draw_text(c, bx + bw - 16 - 16 * (int)strlen(v), y, 2, col, v);
+		} else if (i == IG_CORE) {
+			const char *v = core_labels[rom_settings.core];
+
+			draw_text(c, bx + bw - 16 - 16 * (int)strlen(v), y, 2,
+				  core_pending() ? COL_HI : col, v);
 		}
 	}
 }
@@ -325,20 +362,20 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 
 enum {
 	SI_VOLUME, SI_BRIGHTNESS, SI_CPU, SI_COLOR, SI_GRID, SI_GRID_DIM,
-	SI_GRID_BOOST, SI_AUDIO, SI_AUDIO_TEST, SI_BACK,
+	SI_GRID_BOOST, SI_AUDIO, SI_AUDIO_TEST, SI_DEBUG, SI_BACK,
 };
 
 static const char *const si_names[] = {
 	"Volume", "Brightness", "CPU", "Color", "LCD grid", "Grid darkness",
-	"Dot boost", "Audio", "Audio test", "Back",
+	"Dot boost", "Audio", "Audio test", "Debug log", "Back",
 };
 
 static const uint8_t si_romlist[] = {
 	SI_VOLUME, SI_BRIGHTNESS, SI_CPU, SI_GRID, SI_GRID_DIM, SI_GRID_BOOST,
-	SI_AUDIO, SI_AUDIO_TEST, SI_BACK,
+	SI_AUDIO, SI_AUDIO_TEST, SI_DEBUG, SI_BACK,
 };
 static const uint8_t si_ingame[] = {
-	SI_COLOR, SI_GRID, SI_GRID_DIM, SI_GRID_BOOST, SI_BACK,
+	SI_COLOR, SI_GRID, SI_GRID_DIM, SI_GRID_BOOST, SI_DEBUG, SI_BACK,
 };
 
 static struct {
@@ -387,6 +424,10 @@ static void settings_change(int item, int d)
 		settings.audio = settings.audio == AUDIO_SIMPLE ? AUDIO_ADAPTIVE :
 				 AUDIO_SIMPLE;
 		break;
+	case SI_DEBUG:
+		settings.debug = !settings.debug;
+		log_set_debug(settings.debug);
+		break;
 	}
 	fx_update();
 }
@@ -408,7 +449,8 @@ int settings_menu_update(uint32_t pressed)
 	if (pressed & (BIT(A) | BIT(START))) {
 		if (item == SI_BACK)
 			return UI_BACK;
-		if (item == SI_GRID || item == SI_COLOR || item == SI_AUDIO)
+		if (item == SI_GRID || item == SI_COLOR || item == SI_AUDIO ||
+		    item == SI_DEBUG)
 			settings_change(item, 1);
 		if (item == SI_AUDIO_TEST)
 			audio_test_tone(3.0);  /* blocks for the tone */
@@ -449,6 +491,9 @@ static void settings_value(int item, char *buf, size_t size)
 		break;
 	case SI_AUDIO_TEST:
 		snprintf(buf, size, "440Hz");
+		break;
+	case SI_DEBUG:
+		snprintf(buf, size, "%s", settings.debug ? "On" : "Off");
 		break;
 	default:
 		buf[0] = 0;
@@ -537,7 +582,7 @@ void settings_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 	draw_text(c, 8, 8, 2, COL_HI, "Settings");
 	draw_battery(c, c->w - 8, 8);
 	draw_fill(c, 0, 30, c->w, 2, COL_SEL);
-	settings_rows(c, 0, 42, c->w, 18);
+	settings_rows(c, 0, 40, c->w, 17);
 	frame = test_pattern(&w, &h);
 	draw_image_fx(c, 0, c->h - 2 * h, frame, w, w, h, fx);
 }

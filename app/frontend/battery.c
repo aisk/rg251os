@@ -149,7 +149,7 @@ void battery_poll(int64_t now)
 		battery_init(s.scanned ? s.root : "/sys/class/power_supply");
 	battery_read(&s.b);
 	s.b.seq = ++s.seq;
-	if (s.b.valid && now >= s.next_log) {
+	if (s.b.valid && now >= s.next_log && log_debug()) {
 		s.next_log = now + LOG_NS;
 		battery_format(&s.b, buf, sizeof(buf));
 		log_msg("battery: %s", buf);

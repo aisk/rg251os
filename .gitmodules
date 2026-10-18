@@ -34,3 +34,4 @@
 	path = external/gpsp
 	url = https://github.com/libretro/gpsp.git
 	branch = master
+	shallow = true

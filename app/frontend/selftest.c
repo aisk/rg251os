@@ -14,6 +14,7 @@
 #include "audio.h"
 #include "battery.h"
 #include "blit.h"
+#include "core.h"
 #include "cpuctl.h"
 #include "draw.h"
 #include "menu.h"
@@ -377,8 +378,11 @@ static void test_settings(const char *base)
 	s.grid_boost = 30;
 	s.cpu = 1008;
 	s.audio = AUDIO_ADAPTIVE;
+	s.debug = 1;
 	CHECK(settings_format(&s, buf, sizeof(buf)) > 0, "format");
-	CHECK(settings_parse(&t, buf) == 7, "parse back: %s", buf);
+	CHECK(settings_parse(&t, buf) == 8, "parse back: %s", buf);
+	CHECK(strstr(buf, "debug=on\n") != NULL, "debug: %s", buf);
+	CHECK(settings_defaults.debug == 0, "debug log off by default");
 	CHECK(strstr(buf, "audio=adaptive\n") != NULL, "audio mode: %s", buf);
 	CHECK(!memcmp(&s, &t, sizeof(s)), "round trip: %s", buf);
 	CHECK(strstr(buf, "grid=on\n") != NULL, "grid written as on/off");
@@ -416,6 +420,11 @@ static void test_settings(const char *base)
 	      r.color == COLOR_GBA_LIGHT, "rom parse");
 	CHECK(rom_settings_parse(&r, "color=7\ncolor=sepia\n") == 0 &&
 	      r.color == COLOR_GBA_LIGHT, "rom parse range");
+	CHECK(r.core == CORE_MGBA, "core default mgba");
+	CHECK(rom_settings_parse(&r, "core=gpSP\n") == 1 && r.core == CORE_GPSP,
+	      "core parse");
+	CHECK(rom_settings_parse(&r, "core=vba\ncore=2\n") == 0 &&
+	      r.core == CORE_GPSP, "core parse range");
 
 	/* Files: missing, old location, config/, per ROM. */
 	sys_make_dirs();
@@ -472,8 +481,18 @@ static void test_settings(const char *base)
 	read_file(path, buf, sizeof(buf) - 1);
 	CHECK(strstr(buf, "color=off") != NULL, "color in the file stays: %s",
 	      buf);
+	CHECK(!strstr(buf, "core="), "default core not written: %s", buf);
+	rom_settings.core = CORE_GPSP;
+	rom_settings_save();
+	rom_settings_load("Other.gba");
+	CHECK(rom_settings.core == CORE_GPSP, "core round trip");
+	memset(buf, 0, sizeof(buf));
+	read_file(path, buf, sizeof(buf) - 1);
+	CHECK(strstr(buf, "core=gpsp\n") != NULL, "core in the file: %s", buf);
 	rom_settings_load(NULL);
+	CHECK(rom_settings.core == CORE_MGBA, "no game: default core");
 	settings = keep;
+	log_set_debug(1);
 }
 
 static void put(const char *dir, const char *name, const char *val)
@@ -980,6 +999,113 @@ int selftest(const char *dir)
 	test_cpuctl(dir);
 	test_ui(dir);
 	log_msg("selftest: %s (%d failures)", failures ? "FAILED" : "passed",
+		failures);
+	return failures ? 1 : 0;
+}
+
+/* ------------------------------------------------------ core switching */
+
+/*
+ * A minimal GBA ROM for the save path: it adds one to the SRAM byte at
+ * 0x0E000000 (0xFF, blank, counts as 0) and writes 0x5A after it, then
+ * spins. The header carries the bytes gpSP checks and an "SRAM_V" tag,
+ * so both cores see 32KiB SRAM.
+ */
+static void save_test_rom(const char *path)
+{
+	static const uint32_t code[] = {
+		0xe3a0040e,  /* mov   r0, #0x0e000000 */
+		0xe5d01000,  /* ldrb  r1, [r0] */
+		0xe35100ff,  /* cmp   r1, #0xff */
+		0x03a01000,  /* moveq r1, #0 */
+		0xe2811001,  /* add   r1, r1, #1 */
+		0xe5c01000,  /* strb  r1, [r0] */
+		0xe3a0205a,  /* mov   r2, #0x5a */
+		0xe5c02001,  /* strb  r2, [r0, #1] */
+		0xeafffffe,  /* b     . */
+	};
+	static uint8_t rom[4096];
+	uint32_t b = 0xea00002e;  /* b 0xc0 */
+
+	memset(rom, 0, sizeof(rom));
+	memcpy(rom, &b, 4);
+	memcpy(rom + 0xa0, "SAVETEST", 8);
+	memcpy(rom + 0xac, "ZSVE", 4);
+	rom[0xb2] = 0x96;
+	memcpy(rom + 0xc0, code, sizeof(code));
+	memcpy(rom + 0x800, "SRAM_V113", 9);
+	CHECK(write_file_atomic(path, rom, sizeof(rom)) == 0, "write %s", path);
+}
+
+static void run_frames(long frames)
+{
+	for (long i = 0; i < frames; i++) {
+		pid_t pid;
+		int st;
+
+		core_run(0);
+		audio_flush();
+		core_save_tick(i * 16661000LL);
+		while ((pid = sys_reap(&st)) > 0)
+			core_child_exited(pid, st);
+	}
+}
+
+static int switch_round(const char *rom, const char *sav, int core,
+			int expect, long frames)
+{
+	uint8_t buf[1 << 17];
+	char err[128];
+	int n;
+
+	if (core_load(rom, core, err, sizeof(err))) {
+		CHECK(0, "%s: %s", core_names[core], err);
+		return -1;
+	}
+	CHECK(core_info()->core == core, "running %s", core_names[core]);
+	audio_set_source(core_info()->sample_rate, core_info()->fps, 60.0186);
+	run_frames(frames);
+	core_unload();
+	n = read_file(sav, buf, sizeof(buf));
+	CHECK(n == 32768, "%s: save size %d", core_names[core], n);
+	CHECK(n > 1 && buf[0] == expect && buf[1] == 0x5a,
+	      "%s: save counter %d, expected %d", core_names[core],
+	      n > 0 ? buf[0] : -1, expect);
+	log_msg("core switch: %s wrote counter %d", core_names[core],
+		n > 0 ? buf[0] : -1);
+	return 0;
+}
+
+/*
+ * mGBA -> gpSP -> mGBA in one process on the same .sav, then a RetroArch
+ * .srm picked up by gpSP when there is no .sav (and left untouched).
+ */
+int selftest_core_switch(const char *data, long frames)
+{
+	char rom[300], sav[300], srm[300], path[300];
+	uint8_t buf[64];
+
+	mkdir(data, 0755);
+	snprintf(fe_data_dir, sizeof(fe_data_dir), "%s", data);
+	sys_make_dirs();
+	snprintf(path, sizeof(path), "%s/log/frontend.txt", fe_data_dir);
+	log_open_file(path);
+	settings_load();
+	audio_init_null(48000, 0.001);
+	snprintf(rom, sizeof(rom), "%s/savetest.gba", data);
+	snprintf(sav, sizeof(sav), "%s/saves/savetest.sav", data);
+	snprintf(srm, sizeof(srm), "%s/saves/savetest.srm", data);
+	save_test_rom(rom);
+	unlink(sav);
+	unlink(srm);
+	switch_round(rom, sav, CORE_MGBA, 1, frames);
+	switch_round(rom, sav, CORE_GPSP, 2, frames);
+	switch_round(rom, sav, CORE_MGBA, 3, frames);
+	CHECK(rename(sav, srm) == 0, "rename to .srm");
+	switch_round(rom, sav, CORE_GPSP, 4, frames);
+	CHECK(read_file(srm, buf, sizeof(buf)) == sizeof(buf) && buf[0] == 3,
+	      ".srm left alone");
+	log_msg("core switch: %s (%d failures)", failures ? "FAILED" : "passed",
 		failures);
 	return failures ? 1 : 0;
 }

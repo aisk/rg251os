@@ -3,6 +3,14 @@
  * dmesg. Until the GBA partition is mounted, lines are kept in memory and
  * written out when the log file opens. Important lines also go to
  * /dev/kmsg, so they show up in the dmesg dumps as well.
+ *
+ * Debug logging (settings "debug", off by default, switchable live in
+ * the settings menus): when off, log_verbose() lines are dropped, and the
+ * other modules skip what only serves investigations (log_debug()): the
+ * 10 s perf lines, battery and cpufreq change lines, kernel log dumps
+ * other than at power off and fatal errors, genpd, clk, /proc/asound,
+ * mixer, DAPM and /dev/mem register dumps, and ALSA xrun_debug. Startup,
+ * errors, game start/stop, saves and the per game summaries stay.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -16,6 +24,7 @@
 
 static int kmsg_fd = -1;
 static int file_fd = -1;
+static int debug = 1;
 static char backlog[32768];
 static size_t backlog_len;
 
@@ -103,9 +112,24 @@ void log_verbose(const char *fmt, ...)
 {
 	va_list ap;
 
+	if (!debug)
+		return;
 	va_start(ap, fmt);
 	vlog(0, fmt, ap);
 	va_end(ap);
+}
+
+void log_set_debug(int on)
+{
+	on = !!on;
+	if (on != debug)
+		log_msg("log: debug logging %s", on ? "on" : "off");
+	debug = on;
+}
+
+int log_debug(void)
+{
+	return debug;
 }
 
 /*

@@ -495,7 +495,7 @@ void genpd_log(const char *when)
 	char *buf, *line, *save;
 	int n;
 
-	if (!fe_is_init)
+	if (!fe_is_init || !log_debug())
 		return;
 	if (stat("/sys/kernel/debug", &dbg) == 0 && stat("/sys", &sys) == 0 &&
 	    dbg.st_dev == sys.st_dev)

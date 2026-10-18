@@ -279,6 +279,8 @@ static void hw_dump(const char *when)
 	double gpll, npll, src, frac = 0, mclk = 0, codec_mclk, bclk, lrck;
 	unsigned div, num, den, mux, mdiv, tsd;
 
+	if (!log_debug())
+		return;
 	gpll = pll_hz(PX30_PMUCRU, PX30_PMUCRU + 0x20, 0, gdesc, sizeof(gdesc));
 	npll = pll_hz(PX30_CRU + 0x60, PX30_CRU + 0xa0, 6, ndesc, sizeof(ndesc));
 	if (!gpll || devmem_read(PX30_CRU + 0x178, sel, 2) ||
@@ -326,6 +328,8 @@ static void kernel_dump(void)
 {
 	struct stat st;
 
+	if (!log_debug())
+		return;
 	if (fe_is_init && stat("/sys/kernel/debug/clk", &st))
 		mount("debugfs", "/sys/kernel/debug", "debugfs", 0, NULL);
 	log_file("audio: clk ", "/sys/kernel/debug/clk/clk_summary",
@@ -340,6 +344,8 @@ static void kernel_dump(void)
 /* Ask ALSA to report XRUNs and hw_ptr jumps in dmesg (SND_PCM_XRUN_DEBUG). */
 static void xrun_debug_enable(void)
 {
+	if (!log_debug())
+		return;
 	int fd = open("/proc/asound/card0/pcm0p/xrun_debug", O_WRONLY | O_CLOEXEC);
 
 	if (fd < 0)
@@ -353,6 +359,8 @@ static void xrun_debug_enable(void)
 
 static void mixer_dump(const char *when)
 {
+	if (!log_debug())
+		return;
 	unsigned n = mixer_get_num_ctls(a.mixer);
 
 	log_verbose("mixer \"%s\" (%s): %u controls", mixer_get_name(a.mixer),
@@ -587,6 +595,8 @@ static void dapm_dump(const char *when)
 	DIR *cards, *comps;
 	struct dirent *c, *d;
 
+	if (!log_debug())
+		return;
 	if (fe_is_init && stat("/sys/kernel/debug/asoc", &st))
 		mount("debugfs", "/sys/kernel/debug", "debugfs", 0, NULL);
 	cards = opendir("/sys/kernel/debug/asoc");
@@ -1008,7 +1018,8 @@ static double calibrate(int full_dump)
 		a.cal[a.ncal].rate = rate;
 		a.ncal++;
 	}
-	log_msg("audio: calibrate %s: device consumed %.0f frames/s = %.4fx "
+	if (log_debug())
+		log_msg("audio: calibrate %s: device consumed %.0f frames/s = %.4fx "
 		"nominal (%d samples over %.0f ms, pointer step >= %ld frames, "
 		"%llu frames written)", cand_name(&a.cand), rate, rate / a.rate, n,
 		CAL_WINDOW_NS / 1e6, step_min, (unsigned long long)written);

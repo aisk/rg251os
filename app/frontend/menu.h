@@ -14,6 +14,7 @@ enum ui_action {
 	UI_POWEROFF,
 	UI_SETTINGS,  /* open the settings screen */
 	UI_BACK,      /* leave the settings screen */
+	UI_RESTART,   /* restart the game with rom_settings.core */
 };
 
 /* Button edges with key repeat for the d-pad. */

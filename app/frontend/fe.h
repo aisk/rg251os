@@ -32,6 +32,11 @@ void log_msg(const char *fmt, ...) FE_PRINTF(1, 2);
 void log_verbose(const char *fmt, ...) FE_PRINTF(1, 2);
 void log_sync(void);
 void log_sync_async(void);
+/* Debug logging (settings.debug): log_verbose lines, periodic perf and
+ * battery lines, cpufreq changes, kernel/register/mixer dumps. On until
+ * the settings are loaded; log_set_debug logs a change. */
+void log_set_debug(int on);
+int log_debug(void);
 
 /* ---- sys.c */
 void sys_early_init(void);
@@ -66,6 +71,15 @@ enum color_mode {
 extern const char *const color_mode_names[COLOR_COUNT];   /* in files */
 extern const char *const color_mode_labels[COLOR_COUNT];  /* in menus */
 
+/* The libretro cores linked in (core.c), selectable per game. */
+enum core_id {
+	CORE_MGBA,
+	CORE_GPSP,  /* gpSP, ARM64 dynarec: much faster, less accurate */
+	CORE_COUNT
+};
+extern const char *const core_names[CORE_COUNT];   /* in files */
+extern const char *const core_labels[CORE_COUNT];  /* in menus */
+
 /* settings.cpu, otherwise a fixed frequency in MHz (see cpuctl.c) */
 #define AUDIO_SIMPLE 0    /* 48 kHz S16 512x8, blocking writes, fixed ratio */
 #define AUDIO_ADAPTIVE 1  /* calibrated, nonblocking, rate control */
@@ -81,11 +95,13 @@ struct settings {
 	int grid_boost;  /* brightening of the lit pixel, percent */
 	int cpu;         /* CPU_MODE_ADAPTIVE, CPU_MODE_MAX or MHz */
 	int audio;       /* AUDIO_SIMPLE or AUDIO_ADAPTIVE (audio.c) */
+	int debug;       /* debug logging (see log.c), off for normal play */
 };
 /* Per game, in config/roms/<rom name>.txt. */
 struct rom_settings {
 	int color;       /* enum color_mode */
 	int cpu_start;   /* learned start OPP in MHz, 0: the top */
+	int core;        /* enum core_id, used when the game starts */
 };
 extern struct settings settings;
 extern struct rom_settings rom_settings;  /* for the running game */

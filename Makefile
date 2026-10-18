@@ -16,6 +16,7 @@ include mk/toolchain.mk
 -include mk/linux.mk
 -include mk/bootloader.mk
 -include mk/mgba.mk
+-include mk/gpsp.mk
 -include mk/tinyalsa.mk
 -include mk/frontend.mk
 -include mk/rootfs.mk

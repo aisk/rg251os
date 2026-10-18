@@ -1,14 +1,24 @@
 /*
- * libretro glue for a statically linked core (mGBA, or the stub core).
+ * libretro glue for the statically linked cores (mGBA and gpSP, or the
+ * stub core). The core is picked per game (rom_settings.core); all calls
+ * go through its struct core_api (cores.c), and only one core is
+ * initialized at a time: core_unload() deinits it fully, so the next game
+ * can use the other one.
  *
- * Saves: mGBA's libretro port never writes save files itself (it has no
- * use of the save directory). It keeps battery saves (SRAM, flash, EEPROM)
- * in a 128KiB buffer exposed as RETRO_MEMORY_SAVE_RAM, prefilled with
- * 0xFF, and reads it into the emulated cartridge on the first retro_run.
- * So the frontend copies <data>/saves/<rom>.sav into that buffer after
- * retro_load_game and before the first retro_run, and writes it back when
- * it changed. retro_get_memory_size() reports 128KiB until the game's save
- * type is detected, then the real size, which is what gets written.
+ * Saves: neither core writes save files itself (no use of the save
+ * directory). Both keep battery saves (SRAM, flash, EEPROM) in a 128KiB
+ * buffer exposed as RETRO_MEMORY_SAVE_RAM, prefilled with 0xFF. mGBA reads
+ * it into the emulated cartridge on the first retro_run, gpSP emulates
+ * straight out of it. So the frontend copies <data>/saves/<rom>.sav into
+ * that buffer after retro_load_game and before the first retro_run, and
+ * writes it back when it changed. The layout in the buffer is the same
+ * for both (raw SRAM, flash banks in order, EEPROM 8 byte blocks with the
+ * first bit in bit 7), so one .sav works with either core. What gets
+ * written is the real size: mGBA's retro_get_memory_size() reports it once
+ * the save type is detected, for gpSP (always 128KiB) cores.c works it out
+ * from the detected type. Without a .sav, a RetroArch <rom>.srm (same raw
+ * format) is loaded instead; it is left alone and saves go to the .sav.
+ * Neither core keeps RTC state in the save: both read the system clock.
  *
  * Writes go through write_file_atomic() in a forked child, so a slow card
  * never stalls emulation; the child sees a consistent snapshot of the
@@ -27,14 +37,23 @@
 
 #include "audio.h"
 #include "core.h"
+#include "core_api.h"
 #include "fe.h"
 #include "libretro.h"
 
 #define SAVE_SETTLE_NS 1000000000LL
 #define MAX_ROM_SIZE (64u << 20)
+/* Core log lines per game. mGBA logs every DMA at info level (hundreds
+ * per frame in some games); writing those to the card cost milliseconds
+ * per frame and, when a write blocked on the card, stalled a frame for
+ * over a second. */
+#define MAX_INFO_LINES 100
+#define MAX_WARN_LINES 200
 
 static struct {
+	const struct core_api *api;  /* the initialized core, or NULL */
 	int loaded;
+	int in_game;         /* after load: core info lines are limited */
 	struct core_info info;
 	uint32_t buttons;
 	const uint16_t *frame;
@@ -51,6 +70,8 @@ static struct {
 	size_t save_len;
 	unsigned saves_written;
 	unsigned bad_cmds;
+	unsigned info_lines, warn_lines, dropped_lines;
+	char options[512];   /* answered core options, logged after load */
 } c;
 
 /* ----------------------------------------------------------- callbacks */
@@ -61,32 +82,70 @@ static void core_log(enum retro_log_level level, const char *fmt, ...)
 	va_list ap;
 	size_t n;
 
+	if (level < RETRO_LOG_INFO)
+		return;
+	if (level == RETRO_LOG_INFO && !log_debug())
+		return;
+	if (level == RETRO_LOG_INFO ?
+	    c.in_game && c.info_lines++ >= MAX_INFO_LINES :
+	    c.warn_lines++ >= MAX_WARN_LINES) {
+		c.dropped_lines++;
+		return;
+	}
 	va_start(ap, fmt);
 	vsnprintf(buf, sizeof(buf), fmt, ap);
 	va_end(ap);
 	n = strlen(buf);
 	while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
 		buf[--n] = 0;
-	/* mGBA logs every DMA at debug level, thousands of lines a minute */
 	if (level >= RETRO_LOG_WARN)
 		log_msg("core: %s", buf);
-	else if (level == RETRO_LOG_INFO)
+	else
 		log_verbose("core: %s", buf);
 }
 
+/*
+ * Core options. Keys are prefixed per core, so one table serves both;
+ * keys not listed get the core's default. The BIOS options depend on
+ * whether <data>/bios/gba_bios.bin exists.
+ */
+static const char *const options[][2] = {
+	{ "mgba_skip_bios", "OFF" },
+	{ "mgba_idle_optimization", "Remove Known" },
+	{ "mgba_frameskip", "0" },
+	{ "mgba_audio_low_pass_filter", "disabled" },
+	{ "gpsp_boot_mode", "game" },
+	{ "gpsp_drc", "enabled" },
+	{ "gpsp_sprlim", "disabled" },          /* keep the sprite limit */
+	{ "gpsp_rtc", "auto" },
+	{ "gpsp_rtc_time_source", "system" },   /* like mGBA */
+	{ "gpsp_serial", "disabled" },
+	{ "gpsp_rumble", "disabled" },
+	{ "gpsp_sound_rate", "32768" },
+	{ "gpsp_frameskip", "disabled" },
+	{ "gpsp_color_correction", "disabled" },  /* ours, see fx.c */
+	{ "gpsp_frame_mixing", "disabled" },
+};
+
 static const char *get_variable(const char *key)
 {
+	const char *v = NULL;
+	size_t n;
+
 	if (!strcmp(key, "mgba_use_bios"))
-		return c.have_bios ? "ON" : "OFF";
-	if (!strcmp(key, "mgba_skip_bios"))
-		return "OFF";
-	if (!strcmp(key, "mgba_idle_optimization"))
-		return "Remove Known";
-	if (!strcmp(key, "mgba_frameskip"))
-		return "0";
-	if (!strcmp(key, "mgba_audio_low_pass_filter"))
-		return "disabled";
-	return NULL;
+		v = c.have_bios ? "ON" : "OFF";
+	else if (!strcmp(key, "gpsp_bios"))
+		v = c.have_bios ? "auto" : "builtin";
+	for (size_t i = 0; !v && i < ARRAY_SIZE(options); i++)
+		if (!strcmp(key, options[i][0]))
+			v = options[i][1];
+	/* Record each key once for the load log line. */
+	n = strlen(c.options);
+	if (!c.loaded && !strstr(c.options, key) &&
+	    n + strlen(key) + 16 < sizeof(c.options))
+		snprintf(c.options + n, sizeof(c.options) - n, "%s%s=%s",
+			 n ? " " : "", key, v ? v : "(default)");
+	return v;
 }
 
 static bool environment(unsigned cmd, void *data)
@@ -118,6 +177,14 @@ static bool environment(unsigned cmd, void *data)
 	case RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION:
 		*(unsigned *)data = 0;  /* legacy SET_VARIABLES */
 		return true;
+	case RETRO_ENVIRONMENT_SET_MESSAGE:
+		log_msg("core message: %s",
+			((const struct retro_message *)data)->msg);
+		return true;
+	case RETRO_ENVIRONMENT_SET_MESSAGE_EXT:
+		log_msg("core message: %s",
+			((const struct retro_message_ext *)data)->msg);
+		return true;
 	case RETRO_ENVIRONMENT_SET_VARIABLES:
 	case RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS:
 	case RETRO_ENVIRONMENT_SET_CONTROLLER_INFO:
@@ -127,6 +194,7 @@ static bool environment(unsigned cmd, void *data)
 	case RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME:
 	case RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS:
 	case RETRO_ENVIRONMENT_SET_SERIALIZATION_QUIRKS:
+	case RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY:
 		return true;
 	case RETRO_ENVIRONMENT_GET_CAN_DUPE:
 		*(bool *)data = true;
@@ -190,8 +258,11 @@ static void save_load(void)
 {
 	int n;
 
-	c.sram = retro_get_memory_data(RETRO_MEMORY_SAVE_RAM);
-	c.sram_cap = retro_get_memory_size(RETRO_MEMORY_SAVE_RAM);
+	char srm[400];
+	size_t len = strlen(c.save_path);
+
+	c.sram = c.api->get_memory_data(RETRO_MEMORY_SAVE_RAM);
+	c.sram_cap = c.api->get_memory_size(RETRO_MEMORY_SAVE_RAM);
 	c.dirty = 0;
 	free(c.last);
 	c.last = NULL;
@@ -200,11 +271,21 @@ static void save_load(void)
 		return;
 	}
 	n = read_file(c.save_path, c.sram, c.sram_cap);
-	if (n > 0)
+	if (n > 0) {
 		log_msg("save: loaded %d bytes from %s", n, c.save_path);
-	else
+	} else if (n < 0 && errno == ENOENT && len > 4) {
+		/* RetroArch's name for the same raw save data. */
+		snprintf(srm, sizeof(srm), "%.*s.srm", (int)(len - 4), c.save_path);
+		n = read_file(srm, c.sram, c.sram_cap);
+		if (n > 0)
+			log_msg("save: loaded %d bytes from %s (RetroArch save, "
+				"saving to %s)", n, srm, c.save_path);
+		else
+			log_msg("save: no save file %s or .srm", c.save_path);
+	} else {
 		log_msg("save: no save file %s (%s)", c.save_path,
 			n < 0 ? strerror(errno) : "empty");
+	}
 	c.last = malloc(c.sram_cap);
 	if (c.last)
 		memcpy(c.last, c.sram, c.sram_cap);
@@ -212,7 +293,8 @@ static void save_load(void)
 
 static size_t save_size(void)
 {
-	size_t n = retro_get_memory_size(RETRO_MEMORY_SAVE_RAM);
+	size_t n = c.api->save_size ? c.api->save_size() :
+		   c.api->get_memory_size(RETRO_MEMORY_SAVE_RAM);
 
 	return n > c.sram_cap ? c.sram_cap : n;
 }
@@ -358,7 +440,7 @@ static void *read_rom(const char *path, size_t *size)
 	return buf;
 }
 
-int core_load(const char *rom_path, char *err, size_t errlen)
+int core_load(const char *rom_path, int core, char *err, size_t errlen)
 {
 	struct retro_system_info si = { 0 };
 	struct retro_system_av_info av = { 0 };
@@ -366,9 +448,18 @@ int core_load(const char *rom_path, char *err, size_t errlen)
 	const char *base = strrchr(rom_path, '/');
 	char bios[340];
 	size_t size = 0, blen;
-	void *rom;
+	void *rom = NULL;
 	int64_t t0 = now_ns();
 
+	if (c.api)
+		core_unload();
+	if (core < 0 || core >= CORE_COUNT || !core_api_get(core)) {
+		log_msg("core: %s not built in, using %s",
+			core >= 0 && core < CORE_COUNT ? core_names[core] : "?",
+			core_names[CORE_MGBA]);
+		core = CORE_MGBA;
+	}
+	c.api = core_api_get(core);
 	base = base ? base + 1 : rom_path;
 	snprintf(c.bios_dir, sizeof(c.bios_dir), "%s/bios", fe_data_dir);
 	snprintf(bios, sizeof(bios), "%s/gba_bios.bin", c.bios_dir);
@@ -378,37 +469,53 @@ int core_load(const char *rom_path, char *err, size_t errlen)
 		blen -= 4;
 	snprintf(c.save_path, sizeof(c.save_path), "%s/saves/%.*s.sav",
 		 fe_data_dir, (int)blen, base);
+	c.options[0] = 0;
+	c.in_game = 0;
+	c.info_lines = c.warn_lines = c.dropped_lines = 0;
+	c.bad_cmds = 0;
 
-	rom = read_rom(rom_path, &size);
-	if (!rom) {
-		snprintf(err, errlen, "Cannot read ROM: %s", strerror(errno));
-		log_msg("core: read %s: %s", rom_path, strerror(errno));
-		return -1;
+	/* gpSP reads the ROM itself (need_fullpath), mGBA wants it in memory. */
+	c.api->get_system_info(&si);
+	if (!si.need_fullpath) {
+		rom = read_rom(rom_path, &size);
+		if (!rom) {
+			snprintf(err, errlen, "Cannot read ROM: %s", strerror(errno));
+			log_msg("core: read %s: %s", rom_path, strerror(errno));
+			c.api = NULL;
+			return -1;
+		}
+	} else {
+		struct stat st;
+
+		size = stat(rom_path, &st) ? 0 : (size_t)st.st_size;
 	}
 
-	retro_set_environment(environment);
-	retro_set_video_refresh(video_refresh);
-	retro_set_audio_sample(audio_sample);
-	retro_set_audio_sample_batch(audio_batch);
-	retro_set_input_poll(input_poll);
-	retro_set_input_state(input_state);
-	retro_init();
-	retro_get_system_info(&si);
+	c.api->set_environment(environment);
+	c.api->set_video_refresh(video_refresh);
+	c.api->set_audio_sample(audio_sample);
+	c.api->set_audio_sample_batch(audio_batch);
+	c.api->set_input_poll(input_poll);
+	c.api->set_input_state(input_state);
+	c.api->init();
+	c.api->get_system_info(&si);
+	c.info.core = core;
 	c.info.name = si.library_name;
 	c.info.version = si.library_version;
 
 	gi.path = rom_path;
 	gi.data = rom;
-	gi.size = size;
-	if (!retro_load_game(&gi)) {
+	gi.size = rom ? size : 0;
+	if (!c.api->load_game(&gi)) {
 		free(rom);
-		retro_deinit();
+		c.api->deinit();
+		c.api = NULL;
 		snprintf(err, errlen, "The core could not load this ROM.");
-		log_msg("core: retro_load_game(%s) failed", rom_path);
+		log_msg("core: %s: retro_load_game(%s) failed", core_names[core],
+			rom_path);
 		return -1;
 	}
 	free(rom);  /* the core keeps its own copy */
-	retro_get_system_av_info(&av);
+	c.api->get_system_av_info(&av);
 	c.info.fps = av.timing.fps;
 	c.info.sample_rate = av.timing.sample_rate;
 	c.info.width = av.geometry.base_width;
@@ -422,17 +529,29 @@ int core_load(const char *rom_path, char *err, size_t errlen)
 		base, size >> 10, (long long)((now_ns() - t0) / 1000000),
 		c.info.width, c.info.height, c.info.fps, c.info.sample_rate,
 		c.have_bios ? bios : "HLE (built in)");
+	if (c.options[0])
+		log_msg("core: options %s", c.options);
 	save_load();
+	c.in_game = 1;
 	return 0;
 }
 
 void core_unload(void)
 {
+	if (!c.api)
+		return;
+	if (c.loaded) {
+		core_save_sync();
+		c.api->unload_game();
+	}
+	c.api->deinit();
+	c.api = NULL;
+	if (c.dropped_lines)
+		log_msg("core: %u log lines dropped (info lines limited to %d per "
+			"game, warnings to %d)", c.dropped_lines, MAX_INFO_LINES,
+			MAX_WARN_LINES);
 	if (!c.loaded)
 		return;
-	core_save_sync();
-	retro_unload_game();
-	retro_deinit();
 	c.loaded = 0;
 	c.frame = NULL;
 	free(c.last);
@@ -454,8 +573,10 @@ const struct core_info *core_info(void)
 
 void core_run(uint32_t buttons)
 {
+	if (!c.loaded)
+		return;
 	c.buttons = buttons;
-	retro_run();
+	c.api->run();
 }
 
 const uint16_t *core_frame(int *w, int *h, int *pitch_px)

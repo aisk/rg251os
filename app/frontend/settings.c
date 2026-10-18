@@ -4,9 +4,11 @@
  *
  *   config/settings.txt          global: volume, brightness, LCD grid,
  *                                CPU mode (cpu=adaptive|max|<MHz>),
- *                                audio path (audio=simple|adaptive)
- *   config/roms/<rom name>.txt   per game: color correction, and the
- *                                learned start OPP (cpu_start=<MHz>)
+ *                                audio path (audio=simple|adaptive),
+ *                                debug logging (debug=on|off)
+ *   config/roms/<rom name>.txt   per game: color correction, the
+ *                                learned start OPP (cpu_start=<MHz>) and
+ *                                the core (core=mgba|gpsp)
  *
  * <rom name> is the ROM file name without ".gba". Unknown keys, bad values,
  * comments (#), blank lines and CRLF line ends are ignored, so a missing or
@@ -34,6 +36,8 @@ const char *const color_mode_names[COLOR_COUNT] = {
 const char *const color_mode_labels[COLOR_COUNT] = {
 	"Off", "GBA", "GBA light", "SP101",
 };
+const char *const core_names[CORE_COUNT] = { "mgba", "gpsp" };
+const char *const core_labels[CORE_COUNT] = { "mGBA", "gpSP" };
 
 const struct settings settings_defaults = {
 	.volume = 255,
@@ -43,6 +47,7 @@ const struct settings settings_defaults = {
 	.grid_boost = 0,
 	.cpu = CPU_MODE_ADAPTIVE,
 	.audio = AUDIO_SIMPLE,
+	.debug = 0,
 };
 struct settings settings = settings_defaults;
 struct rom_settings rom_settings;
@@ -79,11 +84,13 @@ static const struct field global_fields[] = {
 	F(settings, grid_boost, 0, 100, NULL),
 	FN(settings, cpu, 300, 5000, cpu_modes),
 	FN(settings, audio, 0, 1, audio_modes),
+	F(settings, debug, 0, 1, on_off),
 };
 
 static const struct field rom_fields[] = {
 	F(rom_settings, color, 0, COLOR_COUNT - 1, color_mode_names),
 	F(rom_settings, cpu_start, 0, 5000, NULL),
+	F(rom_settings, core, 0, CORE_COUNT - 1, core_names),
 };
 
 static int field_nnames(const struct field *f)
@@ -235,11 +242,13 @@ void settings_load(void)
 	else
 		snprintf(cpu, sizeof(cpu), "%s", cpu_modes[settings.cpu]);
 	log_msg("settings: %s, %d values: volume %d, brightness %d%%, grid %s "
-		"dim %d%% boost %d%%, cpu %s, audio %s",
+		"dim %d%% boost %d%%, cpu %s, audio %s, debug %s",
 		n < 0 ? "defaults (no file)" : from,
 		n < 0 ? 0 : n, settings.volume, settings.brightness,
 		settings.grid ? "on" : "off", settings.grid_dim,
-		settings.grid_boost, cpu, audio_modes[settings.audio]);
+		settings.grid_boost, cpu, audio_modes[settings.audio],
+		on_off[settings.debug]);
+	log_set_debug(settings.debug);
 }
 
 void settings_save(void)
@@ -257,10 +266,12 @@ void settings_save(void)
 void rom_settings_defaults(const char *rom_name, struct rom_settings *r)
 {
 	/* Hook for per game defaults (e.g. color correction for titles
-	 * known to be authored for the unlit screen); same for all today. */
+	 * known to be authored for the unlit screen, or gpSP for games mGBA
+	 * cannot run at full speed); same for all today. */
 	(void)rom_name;
 	r->color = COLOR_OFF;
 	r->cpu_start = 0;
+	r->core = CORE_MGBA;
 }
 
 int rom_settings_parse(struct rom_settings *r, const char *text)
@@ -297,9 +308,10 @@ void rom_settings_load(const char *rom_name)
 	rom_path(path, sizeof(path));
 	n = load_file(path, &rom_settings, rom_fields, ARRAY_SIZE(rom_fields),
 		      &rom_in_file);
-	log_msg("settings: %s: %s, color %s, cpu_start %d MHz", rom_base,
-		n < 0 ? "defaults (no file)" : "loaded",
-		color_mode_names[rom_settings.color], rom_settings.cpu_start);
+	log_msg("settings: %s: %s, color %s, cpu_start %d MHz, core %s",
+		rom_base, n < 0 ? "defaults (no file)" : "loaded",
+		color_mode_names[rom_settings.color], rom_settings.cpu_start,
+		core_names[rom_settings.core]);
 }
 
 void rom_settings_save(void)

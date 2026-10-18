@@ -7,6 +7,9 @@
 #
 # Consumers use MGBA_LIBS (also a valid prerequisite), MGBA_LDLIBS and
 # MGBA_INCLUDE. The core is built with DISABLE_THREADING, GBA only (no GB).
+# MGBA_LIBS is mGBA's archive joined by mk/core-archive.sh into one object
+# that exports only mgba_retro_* (all else local), so it links next to
+# other cores.
 
 MGBA_SRC := $(EXTERNAL)/mgba
 MGBA_BUILD := $(BUILD)/mgba
@@ -14,7 +17,8 @@ MGBA_TOOLCHAIN_FILE := $(MGBA_BUILD)/toolchain.cmake
 MGBA_CONFIG_STAMP := $(MGBA_BUILD)/.configured
 MGBA_STATIC_HOOK := $(TOP)/mk/mgba-static.cmake
 
-MGBA_LIBS := $(MGBA_BUILD)/libmgba_libretro.a
+MGBA_RAW_LIB := $(MGBA_BUILD)/libmgba_libretro.a
+MGBA_LIBS := $(MGBA_BUILD)/libmgba_core.a
 MGBA_LDLIBS := -lm
 MGBA_INCLUDE := $(MGBA_SRC)/src/platform/libretro
 MGBA_STAMP := $(MGBA_LIBS)
@@ -69,8 +73,11 @@ $(MGBA_CONFIG_STAMP): $(MGBA_TOOLCHAIN_FILE) $(MGBA_STATIC_HOOK)
 	touch $@
 
 # Always defer to ninja, which leaves the archive alone when nothing changed
-$(MGBA_LIBS): $(MGBA_CONFIG_STAMP) FORCE
+$(MGBA_RAW_LIB): $(MGBA_CONFIG_STAMP) FORCE
 	ninja -C $(MGBA_BUILD) -j$(JOBS) mgba_libretro_static
+
+$(MGBA_LIBS): $(MGBA_RAW_LIB) $(TOP)/mk/core-archive.sh
+	$(TOP)/mk/core-archive.sh mgba $@ $(MGBA_RAW_LIB)
 
 .PHONY: mgba FORCE
 mgba: $(MGBA_LIBS)

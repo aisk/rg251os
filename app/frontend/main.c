@@ -43,6 +43,9 @@
  *   frontend --selftest DIR            unit tests, using DIR as scratch
  *   frontend --headless DATA ROM N     run N frames without display or
  *                                      sound device, DATA as GBA partition
+ *                                      (core from DATA's ROM settings)
+ *   frontend --core-switch DATA N      mGBA, gpSP, mGBA on one save in one
+ *                                      process, N frames each
  *   frontend --data DIR                normal UI with DATA from DIR
  */
 #include <errno.h>
@@ -75,6 +78,7 @@
 #define MAX_POLL 24
 
 int selftest(const char *dir);
+int selftest_core_switch(const char *data, long frames);
 
 enum state {
 	ST_ROMLIST, ST_GAME, ST_MENU, ST_SETTINGS, ST_FATAL, ST_POWEROFF
@@ -165,6 +169,10 @@ static void game_end_logs(const char *why)
 	if (!core_loaded())
 		return;
 	audio_summary(why);
+	/* Without debug logging only a fatal error keeps a kernel log (and
+	 * power off its own dmesg-poweroff.txt). */
+	if (!log_debug() && strcmp(why, "fatal"))
+		return;
 	snprintf(name, sizeof(name), "dmesg-game%u-end.txt", m.games);
 	klog_dump(name);
 }
@@ -206,8 +214,13 @@ static void start_game(const char *path)
 	base = base ? base + 1 : path;
 	snprintf(m.rom_path, sizeof(m.rom_path), "%s", path);
 	snprintf(m.rom_name, sizeof(m.rom_name), "%.127s", base);
-	log_msg("starting %s", path);
-	if (core_load(path, err, sizeof(err))) {
+	/* The ROM's settings first: they pick the core. */
+	rom_settings_load(m.rom_name);
+	m.saved_rom = rom_settings;
+	log_msg("starting %s with %s", path, core_names[rom_settings.core]);
+	if (core_load(path, rom_settings.core, err, sizeof(err))) {
+		rom_settings_load(NULL);
+		m.saved_rom = rom_settings;
 		romlist_menu_message(err);
 		log_sync();
 		return;
@@ -217,8 +230,6 @@ static void start_game(const char *path)
 			 display_ready() ? di->refresh_hz : 60.0);
 	m.games++;
 	m.game_frames = 0;
-	rom_settings_load(m.rom_name);
-	m.saved_rom = rom_settings;
 	fx_update();
 	cpuctl_game_start(m.rom_name, display_ready() ? di->refresh_hz : 60.0,
 			  rom_settings.cpu_start, now_ns());
@@ -243,6 +254,27 @@ static void quit_game(void)
 	m.st = ST_ROMLIST;
 	m.suppress = input_buttons();
 	log_sync();
+}
+
+/* After the core was changed in the in-game menu: the save is written
+ * and the game starts again with the new core. */
+static void restart_game(void)
+{
+	char path[sizeof(m.rom_path)];
+
+	snprintf(path, sizeof(path), "%s", m.rom_path);
+	log_msg("restarting with %s", core_names[rom_settings.core]);
+	game_end_logs("restart");
+	audio_pause();
+	core_unload();
+	end_game_stats();
+	save_settings();
+	start_game(path);
+	if (m.st != ST_GAME) {
+		romlist_menu_enter();
+		m.st = ST_ROMLIST;
+		m.suppress = input_buttons();
+	}
 }
 
 static void open_menu(uint32_t buttons)
@@ -296,9 +328,20 @@ static void perf_report(void)
 	char run[48], blit[48], aud[48], bat[80] = "n/a", cpu[96];
 	const struct battery *b = battery_get();
 	struct audio_stats as;
-	long khz = cpu_freq_khz(), mc = soc_temp_mc();
+	long khz, mc;
 	char temp[24] = "n/a";
 
+	if (!log_debug()) {
+		/* Only the counters (per game summary, headless result). */
+		audio_take_stats(&as);
+		m.xrun_total += as.xruns;
+		m.last_as = as;
+		m.perf_frames = 0;
+		m.missed = 0;
+		return;
+	}
+	khz = cpu_freq_khz();
+	mc = soc_temp_mc();
 	if (mc != -1)
 		snprintf(temp, sizeof(temp), "%.1f C", mc / 1000.0);
 	/* RK817 current is negative while discharging. */
@@ -394,7 +437,7 @@ static void game_frame(uint32_t buttons, int64_t now)
 		m.next_perf = now + PERF_INTERVAL_NS;
 	}
 	core_save_tick(now);
-	if (++m.game_frames == 30 * 60) {
+	if (++m.game_frames == 30 * 60 && log_debug()) {
 		char name[48];
 
 		/* Early XRUN / hw_ptr reports, before the ring buffer wraps. */
@@ -445,6 +488,9 @@ static void frame(int64_t now)
 			break;
 		case UI_QUIT:
 			quit_game();
+			break;
+		case UI_RESTART:
+			restart_game();
 			break;
 		case UI_POWEROFF:
 			on_power_key();
@@ -560,12 +606,12 @@ static void timers(int64_t now)
 	while ((pid = sys_reap(&st)) > 0)
 		core_child_exited(pid, st);
 
-	if (!m.dumped5 && up >= 5000) {
+	if (!m.dumped5 && up >= 5000 && log_debug()) {
 		m.dumped5 = 1;
 		klog_dump_async("dmesg-5s.txt");
 		genpd_log("5 s");
 	}
-	if (!m.dumped20 && up >= 20000) {
+	if (!m.dumped20 && up >= 20000 && log_debug()) {
 		m.dumped20 = 1;
 		klog_dump_async("dmesg-20s.txt");
 		log_sync();
@@ -678,7 +724,7 @@ static int headless(const char *data, const char *rom, long frames)
 	cpuctl_fake_sysfs(path);
 	cpuctl_init(path);
 	cpuctl_set_mode(settings.cpu);
-	if (core_load(rom, err, sizeof(err))) {
+	if (core_load(rom, rom_settings.core, err, sizeof(err))) {
 		log_msg("headless: %s", err);
 		return 1;
 	}
@@ -744,11 +790,15 @@ int main(int argc, char **argv)
 			return selftest(argv[2]);
 		if (argc == 5 && !strcmp(argv[1], "--headless"))
 			return headless(argv[2], argv[3], strtol(argv[4], NULL, 0));
+		if (argc == 4 && !strcmp(argv[1], "--core-switch"))
+			return selftest_core_switch(argv[2],
+						    strtol(argv[3], NULL, 0));
 		if (argc == 3 && !strcmp(argv[1], "--data")) {
 			snprintf(fe_data_dir, sizeof(fe_data_dir), "%s", argv[2]);
 		} else if (argc != 1) {
 			fprintf(stderr, "usage: %s [--selftest DIR | --headless DATA "
-				"ROM FRAMES | --data DIR]\n", argv[0]);
+				"ROM FRAMES | --core-switch DATA FRAMES | --data DIR]\n",
+				argv[0]);
 			return 1;
 		}
 	}

@@ -7,11 +7,14 @@
 struct core_info {
 	double fps, sample_rate;
 	unsigned width, height;
+	int core;  /* enum core_id actually loaded */
 	const char *name, *version;
 };
 
-/* Load a ROM by path; on failure returns -1 with a message in err. */
-int core_load(const char *rom_path, char *err, size_t errlen);
+/* Load a ROM by path with the given core (enum core_id; one that is not
+ * built in falls back to mGBA); on failure returns -1 with a message in
+ * err. A core still loaded is unloaded first. */
+int core_load(const char *rom_path, int core, char *err, size_t errlen);
 /* Save if needed, then unload the game and deinit the core. */
 void core_unload(void);
 int core_loaded(void);
