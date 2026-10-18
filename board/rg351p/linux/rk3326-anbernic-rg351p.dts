@@ -114,3 +114,29 @@
 		rockchip,sleep-filter-current-microamp = <100000>;
 	};
 };
+
+/*
+ * Sound (RK817 codec on i2s1_2ch via simple-audio-card).
+ *
+ * Headphone detect: the RG351P jack switch pulls GPIO2_PC6 low when a
+ * plug is in. The vendor BSP DT (rk3326-rg351p-linux.dts) has
+ * GPIO_ACTIVE_LOW; the inherited RG351M dtsi says ACTIVE_HIGH and
+ * reported "inserted" at boot with nothing plugged in. The hp_det pinctrl
+ * of the dtsi (pull-down) is deliberately not referenced: with an active
+ * low switch it would read as inserted when nothing is plugged in.
+ *
+ * MCLK: simple-card sets the codec clock (SCLK_I2S1_OUT) first on the
+ * first hw_params. Its mux has no CLK_SET_RATE_PARENT, so it picks the
+ * fastest parent at or below 12.288 MHz from the current rates: xin12m
+ * (12.000 MHz) unless clk_i2s1 already runs at 12.288 MHz. The codec
+ * would then get 12 MHz while the I2S runs from 12.288 MHz until the
+ * next hw_params. Starting clk_i2s1 at 256 x 48 kHz avoids that.
+ */
+&{/rk817-sound} {
+	simple-audio-card,hp-det-gpios = <&gpio2 RK_PC6 GPIO_ACTIVE_LOW>;
+};
+
+&i2s1_2ch {
+	assigned-clocks = <&cru SCLK_I2S1>;
+	assigned-clock-rates = <12288000>;
+};

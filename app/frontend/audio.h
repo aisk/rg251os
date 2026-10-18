@@ -14,12 +14,19 @@ struct audio_stats {
 
 /* Mixer setup and PCM open on card 0; safe to call again if it failed. */
 int audio_init(void);
-/* Simulated device for tests: consumes rate*(1+drift) frames per second. */
+/* Simulated device for tests: consumes rate*(1+drift) frames per second
+ * whatever config is opened (drift 1.0 simulates the 2x of the first run). */
 void audio_init_null(unsigned rate, double drift);
 int audio_ready(void);
+/* Nominal rate of the open PCM config. */
 unsigned audio_rate(void);
+/* Rate the device was measured to really play at (calibration). */
+double audio_device_rate(void);
 unsigned audio_target(void);
-/* Source format: core sample rate, core fps and display refresh. */
+unsigned audio_buffer(void);
+/* Source format: core sample rate, core fps and display refresh. The
+ * first call calibrates the device (about 0.4 s, longer if the first
+ * configs do not play at their nominal rate). */
 void audio_set_source(double in_rate, double core_fps, double display_hz);
 /* Called from the core's audio callback. */
 void audio_push(const int16_t *samples, size_t frames);

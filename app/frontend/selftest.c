@@ -173,6 +173,8 @@ static void test_resampler(void)
 		CHECK(out[2 * i] >= out[2 * i - 2], "ramp not monotonic at %zu", i);
 }
 
+#define CAL_TOL 0.02
+
 static void test_drc(double drift)
 {
 	static int16_t silence[1200 * 2];
@@ -202,13 +204,31 @@ static void test_drc(double drift)
 			}
 		}
 	}
-	log_msg("selftest: drc drift %+.3f%%: adj %.4f, fill %d..%d of target %u, "
-		"underruns %u", drift * 100, st.adj, fmin, fmax, audio_target(), xruns);
+	log_msg("selftest: drc drift %+.3f%%: device %.0f Hz, buffer %u, adj %.4f, "
+		"fill %d..%d of target %u, underruns %u", drift * 100,
+		audio_device_rate(), audio_buffer(), st.adj, fmin, fmax,
+		audio_target(), xruns);
 	CHECK(xruns == 0, "underruns with drift %f", drift);
 	CHECK(fmin > (int)audio_target() / 4, "fill too low with drift %f", drift);
 	CHECK(fabs(st.adj - 1) < 0.005, "drc saturated with drift %f", drift);
-	CHECK(fmax + 800 <= 2880, "buffer overflow with drift %f", drift);
+	CHECK(fmax + audio_device_rate() / 60.0186 <= audio_buffer() + 1,
+	      "buffer overflow with drift %f", drift);
 	CHECK(st.overflows == 0, "overflow with drift %f", drift);
+	if (fabs(drift) < CAL_TOL) {
+		/* Small drift: nominal rate, DRC absorbs the rest. */
+		CHECK(audio_device_rate() == 48000, "device rate %f with drift %f",
+		      audio_device_rate(), drift);
+		CHECK(audio_buffer() == 4096, "buffer %u with drift %f",
+		      audio_buffer(), drift);
+	} else {
+		/* A device playing far off its nominal rate is measured and
+		 * resampled for, with the big fallback buffer. */
+		CHECK(fabs(audio_device_rate() / (48000 * (1 + drift)) - 1) < 0.002,
+		      "device rate %f not measured with drift %f",
+		      audio_device_rate(), drift);
+		CHECK(audio_buffer() == 8192, "buffer %u with drift %f",
+		      audio_buffer(), drift);
+	}
 }
 
 /* Color tables: identity when off, grid scaling, sane color models. */
@@ -603,6 +623,8 @@ int selftest(const char *dir)
 	test_drc(-0.0005);
 	test_drc(0.003);
 	test_drc(-0.003);
+	test_drc(1.0);    /* the first hardware run: device at 2x */
+	test_drc(-0.25);  /* device slower than nominal */
 	test_fx_tables();
 	test_grid_pattern();
 	test_romlist(dir);
