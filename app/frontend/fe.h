@@ -51,14 +51,43 @@ void cpu_set_governor(const char *gov);
 long cpu_freq_khz(void);
 long soc_temp_mc(void);
 
-/* ---- settings kept in <data>/settings.txt */
+/* ---- settings.c: key=value text files in <data>/config */
+enum color_mode {
+	COLOR_OFF,
+	COLOR_GBA,        /* original GBA, unlit reflective screen */
+	COLOR_GBA_LIGHT,  /* same colors without the extra gamma darkening */
+	COLOR_SP101,      /* backlit GBA SP (AGS-101) */
+	COLOR_COUNT
+};
+extern const char *const color_mode_names[COLOR_COUNT];   /* in files */
+extern const char *const color_mode_labels[COLOR_COUNT];  /* in menus */
+
+/* Global, in config/settings.txt. */
 struct settings {
 	int volume;      /* raw "Master Playback Volume", 0..255 */
 	int brightness;  /* backlight percent, 5..100 */
+	int grid;        /* LCD pixel grid effect on/off */
+	int grid_dim;    /* darkening of the 3 unlit pixels of a cell, percent */
+	int grid_boost;  /* brightening of the lit pixel, percent */
+};
+/* Per game, in config/roms/<rom name>.txt. */
+struct rom_settings {
+	int color;       /* enum color_mode */
 };
 extern struct settings settings;
+extern struct rom_settings rom_settings;  /* for the running game */
+extern const struct settings settings_defaults;
+
 void settings_load(void);
 void settings_save(void);
 int settings_parse(struct settings *s, const char *text);
+int settings_format(const struct settings *s, char *buf, size_t size);
+/* Defaults for a ROM, then its file. NULL: no game (defaults only). */
+void rom_settings_load(const char *rom_name);
+void rom_settings_save(void);
+/* Where a per ROM default comes from (today the same for every ROM). */
+void rom_settings_defaults(const char *rom_name, struct rom_settings *r);
+int rom_settings_parse(struct rom_settings *r, const char *text);
+int rom_settings_format(const struct rom_settings *r, char *buf, size_t size);
 
 #endif

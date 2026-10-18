@@ -1,16 +1,24 @@
 /*
  * Menus on the 480x320 logical canvas, 8x8 font at 2x (30 columns).
  *
- * ROM list: up/down (left/right page), A starts. In game, SELECT+START
- * opens the in-game menu: Resume, Volume, Brightness, Quit to ROM list,
- * Power off. B or SELECT+START again resumes.
+ * ROM list: up/down (left/right page), A or START starts, SELECT opens
+ * the global settings (Volume, Brightness, LCD grid, Grid darkness, Dot
+ * boost). In game, SELECT+START opens the in-game menu: Resume, Volume,
+ * Brightness, Settings, Quit to ROM list, Power off; B or SELECT+START
+ * again resumes. The in-game Settings screen shows the game with the
+ * effects applied (live preview) under a panel with Color (this game),
+ * LCD grid, Grid darkness and Dot boost. In menus, up/down select,
+ * left/right change a value, A activates, B goes back. The battery level
+ * is shown in the ROM list header and above the in-game menus.
  */
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
 
 #include "audio.h"
+#include "battery.h"
 #include "fe.h"
+#include "fx.h"
 #include "libretro.h"
 #include "menu.h"
 #include "romlist.h"
@@ -20,6 +28,7 @@
 #define LIST_Y 40
 #define LIST_ROWS 14
 #define COLS 29
+#define COL_OFF RGB(0x50, 0x58, 0x68)
 
 static struct romlist roms;
 static int sel, top;
@@ -47,6 +56,78 @@ uint32_t ui_repeat(uint32_t held, int64_t now)
 	return pressed;
 }
 
+/* ------------------------------------------------------------- helpers */
+
+static void volume_step(int d)
+{
+	/* 8 steps of 0.375 dB = 3 dB. */
+	const int floor = 255 - 8 * 20;  /* -60 dB, below is mute */
+	int v = settings.volume;
+
+	if (d > 0)
+		v = v < floor ? floor : v + 8 > 255 ? 255 : v + 8;
+	else
+		v = v - 8 < floor ? 0 : v - 8;
+	settings.volume = v;
+	audio_set_volume(v);
+}
+
+static void volume_label(char *buf, size_t size)
+{
+	if (settings.volume == 0)
+		snprintf(buf, size, "mute");
+	else
+		snprintf(buf, size, "%ddB", -(255 - settings.volume) * 3 / 8);
+}
+
+static void brightness_step(int d)
+{
+	int b = settings.brightness + d * 10;
+
+	settings.brightness = b < 10 ? 5 : b > 100 ? 100 : b;
+	backlight_set(settings.brightness);
+}
+
+/* Next or previous entry of a level list, from any current value. */
+static int level_step(const int *levels, int n, int cur, int d)
+{
+	if (d > 0) {
+		for (int i = 0; i < n; i++)
+			if (levels[i] > cur)
+				return levels[i];
+		return levels[n - 1];
+	}
+	for (int i = n - 1; i >= 0; i--)
+		if (levels[i] < cur)
+			return levels[i];
+	return levels[0];
+}
+
+/* Battery icon and percent, right aligned at x_right; returns left x. */
+static int draw_battery(struct canvas *c, int x_right, int y)
+{
+	const struct battery *b = battery_get();
+	char label[16];
+	uint16_t col = COL_DIM;
+	int iw = 26, ih = 14, x, fill;
+
+	battery_label(b, label, sizeof(label));
+	if (!label[0])
+		return x_right;
+	if (battery_low())
+		col = COL_ERR;
+	else if (b->status == BAT_CHARGING || b->status == BAT_FULL)
+		col = COL_OK;
+	x = x_right - iw - 3;
+	draw_frame(c, x, y + 1, iw, ih, col);
+	draw_fill(c, x + iw, y + 5, 3, 6, col);
+	fill = (iw - 6) * (b->capacity < 0 ? 0 : b->capacity) / 100;
+	draw_fill(c, x + 3, y + 4, fill < 1 ? 1 : fill, ih - 6, col);
+	x -= 6 + 16 * (int)strlen(label);
+	draw_text(c, x, y, 2, col, label);
+	return x;
+}
+
 /* ------------------------------------------------------------ ROM list */
 
 void romlist_menu_message(const char *msg)
@@ -69,7 +150,7 @@ void romlist_menu_enter(void)
 int romlist_menu_update(uint32_t pressed, char *path, size_t size)
 {
 	if (!roms.count)
-		return UI_NONE;
+		pressed &= BIT(SELECT);
 	if (pressed & BIT(UP))
 		sel = sel > 0 ? sel - 1 : roms.count - 1;
 	if (pressed & BIT(DOWN))
@@ -82,6 +163,10 @@ int romlist_menu_update(uint32_t pressed, char *path, size_t size)
 		top = sel;
 	if (sel >= top + LIST_ROWS)
 		top = sel - LIST_ROWS + 1;
+	if (pressed & BIT(SELECT)) {
+		message[0] = 0;
+		return UI_SETTINGS;
+	}
 	if (pressed & (BIT(A) | BIT(START))) {
 		snprintf(path, size, "%s/roms/%s", fe_data_dir, roms.names[sel]);
 		message[0] = 0;
@@ -111,8 +196,9 @@ void romlist_menu_draw(struct canvas *c)
 	draw_fill(c, 0, 0, c->w, c->h, COL_BG);
 	draw_text(c, 8, 8, 2, COL_HI, "GBA");
 	if (roms.count)
-		draw_textf(c, c->w - 8 - 16 * 9, 8, 2, COL_DIM, "%4d/%-4d",
-			   sel + 1, roms.count);
+		draw_textf(c, 8 + 16 * 4, 8, 2, COL_DIM, "%d/%d", sel + 1,
+			   roms.count);
+	draw_battery(c, c->w - 8, 8);
 	draw_fill(c, 0, 30, c->w, 2, COL_SEL);
 
 	if (!roms.count) {
@@ -133,12 +219,16 @@ void romlist_menu_draw(struct canvas *c)
 		draw_text(c, 8, c->h - 18, 2, COL_ERR, message);
 	else
 		draw_text(c, 8, c->h - 18, 2, COL_DIM,
-			  roms.count ? "A:start  POWER:off" : "POWER:off");
+			  roms.count ? "A:start  SELECT:settings" :
+			  "SELECT:settings");
 }
 
 /* -------------------------------------------------------- in-game menu */
 
-enum { IG_RESUME, IG_VOLUME, IG_BRIGHTNESS, IG_QUIT, IG_POWEROFF, IG_COUNT };
+enum {
+	IG_RESUME, IG_VOLUME, IG_BRIGHTNESS, IG_SETTINGS, IG_QUIT, IG_POWEROFF,
+	IG_COUNT
+};
 
 void ingame_menu_enter(const char *rom_name)
 {
@@ -161,28 +251,16 @@ int ingame_menu_update(uint32_t pressed)
 	if (pressed & BIT(B))
 		return UI_RESUME;
 
-	if (d && ig.sel == IG_VOLUME) {
-		/* 8 steps of 0.375 dB = 3 dB. */
-		const int floor = 255 - 8 * 20;  /* -60 dB, below is mute */
-		int v = settings.volume;
-
-		if (d > 0)
-			v = v < floor ? floor : v + 8 > 255 ? 255 : v + 8;
-		else
-			v = v - 8 < floor ? 0 : v - 8;
-		settings.volume = v;
-		audio_set_volume(v);
-	}
-	if (d && ig.sel == IG_BRIGHTNESS) {
-		int b = settings.brightness + d * 10;
-
-		settings.brightness = b < 10 ? 5 : b > 100 ? 100 : b;
-		backlight_set(settings.brightness);
-	}
+	if (d && ig.sel == IG_VOLUME)
+		volume_step(d);
+	if (d && ig.sel == IG_BRIGHTNESS)
+		brightness_step(d);
 	if (pressed & (BIT(A) | BIT(START))) {
 		switch (ig.sel) {
 		case IG_RESUME:
 			return UI_RESUME;
+		case IG_SETTINGS:
+			return UI_SETTINGS;
 		case IG_QUIT:
 			return UI_QUIT;
 		case IG_POWEROFF:
@@ -196,11 +274,13 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 		      int w, int h)
 {
 	static const char *const items[IG_COUNT] = {
-		"Resume", "Volume", "Brightness", "Quit to ROM list", "Power off",
+		"Resume", "Volume", "Brightness", "Settings", "Quit to ROM list",
+		"Power off",
 	};
 	int bx = 56, by = 48, bw = c->w - 112, bh = 40 + IG_COUNT * 30;
 
 	draw_image_dim(c, frame, pitch, w, h);
+	draw_battery(c, c->w - 8, 16);
 	draw_fill(c, bx, by, bw, bh, COL_BOX);
 	draw_frame(c, bx, by, bw, bh, COL_SEL);
 	draw_name(c, bx + 12, by + 12, COL_HI, ig.name, (bw - 24) / 16);
@@ -212,16 +292,215 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 			draw_fill(c, bx + 4, y - 5, bw - 8, 26, COL_SEL);
 		draw_text(c, bx + 16, y, 2, col, items[i]);
 		if (i == IG_VOLUME) {
-			if (settings.volume == 0)
-				draw_text(c, bx + bw - 16 - 16 * 6, y, 2, col, "  mute");
-			else
-				draw_textf(c, bx + bw - 16 - 16 * 6, y, 2, col,
-					   "%4ddB", -(255 - settings.volume) * 3 / 8);
+			char v[16];
+
+			volume_label(v, sizeof(v));
+			draw_textf(c, bx + bw - 16 - 16 * 6, y, 2, col, "%6s", v);
 		} else if (i == IG_BRIGHTNESS) {
 			draw_textf(c, bx + bw - 16 - 16 * 6, y, 2, col, "%5d%%",
 				   settings.brightness);
 		}
 	}
+}
+
+/* ------------------------------------------------------------ settings */
+
+enum {
+	SI_VOLUME, SI_BRIGHTNESS, SI_COLOR, SI_GRID, SI_GRID_DIM, SI_GRID_BOOST,
+	SI_BACK,
+};
+
+static const char *const si_names[] = {
+	"Volume", "Brightness", "Color", "LCD grid", "Grid darkness",
+	"Dot boost", "Back",
+};
+
+static const uint8_t si_romlist[] = {
+	SI_VOLUME, SI_BRIGHTNESS, SI_GRID, SI_GRID_DIM, SI_GRID_BOOST, SI_BACK,
+};
+static const uint8_t si_ingame[] = {
+	SI_COLOR, SI_GRID, SI_GRID_DIM, SI_GRID_BOOST, SI_BACK,
+};
+
+static struct {
+	const uint8_t *items;
+	int count, sel, ingame;
+} st;
+
+void settings_menu_enter(int ingame)
+{
+	st.ingame = ingame;
+	st.items = ingame ? si_ingame : si_romlist;
+	st.count = ingame ? (int)sizeof(si_ingame) : (int)sizeof(si_romlist);
+	st.sel = 0;
+}
+
+static void settings_change(int item, int d)
+{
+	switch (item) {
+	case SI_VOLUME:
+		volume_step(d);
+		break;
+	case SI_BRIGHTNESS:
+		brightness_step(d);
+		break;
+	case SI_COLOR:
+		rom_settings.color = (rom_settings.color + COLOR_COUNT + d) %
+				     COLOR_COUNT;
+		break;
+	case SI_GRID:
+		settings.grid = !settings.grid;
+		break;
+	case SI_GRID_DIM:
+		settings.grid_dim = level_step(grid_dim_levels, grid_dim_count,
+					       settings.grid_dim, d);
+		break;
+	case SI_GRID_BOOST:
+		settings.grid_boost = level_step(grid_boost_levels,
+						 grid_boost_count,
+						 settings.grid_boost, d);
+		break;
+	}
+	fx_update();
+}
+
+int settings_menu_update(uint32_t pressed)
+{
+	int item = st.items[st.sel];
+
+	if (pressed & BIT(UP))
+		st.sel = (st.sel + st.count - 1) % st.count;
+	if (pressed & BIT(DOWN))
+		st.sel = (st.sel + 1) % st.count;
+	if (pressed & BIT(B))
+		return UI_BACK;
+	if (pressed & BIT(LEFT))
+		settings_change(item, -1);
+	if (pressed & BIT(RIGHT))
+		settings_change(item, 1);
+	if (pressed & (BIT(A) | BIT(START))) {
+		if (item == SI_BACK)
+			return UI_BACK;
+		if (item == SI_GRID || item == SI_COLOR)
+			settings_change(item, 1);
+	}
+	return UI_NONE;
+}
+
+static void settings_value(int item, char *buf, size_t size)
+{
+	switch (item) {
+	case SI_VOLUME:
+		volume_label(buf, size);
+		break;
+	case SI_BRIGHTNESS:
+		snprintf(buf, size, "%d%%", settings.brightness);
+		break;
+	case SI_COLOR:
+		snprintf(buf, size, "%s", color_mode_labels[rom_settings.color]);
+		break;
+	case SI_GRID:
+		snprintf(buf, size, "%s", settings.grid ? "On" : "Off");
+		break;
+	case SI_GRID_DIM:
+		snprintf(buf, size, "%d%%", settings.grid_dim);
+		break;
+	case SI_GRID_BOOST:
+		if (settings.grid_boost)
+			snprintf(buf, size, "+%d%%", settings.grid_boost);
+		else
+			snprintf(buf, size, "Off");
+		break;
+	default:
+		buf[0] = 0;
+	}
+}
+
+static void settings_rows(struct canvas *c, int x, int y, int w, int row_h)
+{
+	for (int i = 0; i < st.count; i++, y += row_h) {
+		int item = st.items[i];
+		uint16_t col = i == st.sel ? COL_FG : COL_DIM;
+		char v[24];
+
+		if (!settings.grid && (item == SI_GRID_DIM || item == SI_GRID_BOOST))
+			col = i == st.sel ? COL_DIM : COL_OFF;
+		if (i == st.sel)
+			draw_fill(c, x + 4, y - 4, w - 8, row_h, COL_SEL);
+		draw_text(c, x + 12, y, 2, col, si_names[item]);
+		if (item == SI_COLOR)
+			draw_text(c, x + 12 + 16 * 6, y, 2,
+				  i == st.sel ? COL_DIM : COL_OFF, "(game)");
+		settings_value(item, v, sizeof(v));
+		if (v[0]) {
+			if (i == st.sel)
+				draw_textf(c, x + w - 12 - 16 * ((int)strlen(v) + 2),
+					   y, 2, col, "<%s>", v);
+			else
+				draw_text(c, x + w - 12 - 16 * ((int)strlen(v) + 1),
+					  y, 2, col, v);
+		}
+	}
+}
+
+/* Color bars and ramps to judge the effects without a game. */
+static const uint16_t *test_pattern(int *w, int *h)
+{
+	static uint16_t px[240 * 56];
+	static int done;
+	static const uint16_t bars[8] = {
+		0xffdf, 0xffc0, 0x07df, 0x07c0, 0xf81f, 0xf800, 0x001f, 0x0000,
+	};
+
+	*w = 240;
+	*h = 56;
+	if (done)
+		return px;
+	for (int y = 0; y < 56; y++)
+		for (int x = 0; x < 240; x++) {
+			int v = x * 32 / 240;  /* 0..31 */
+			uint16_t p;
+
+			if (y < 28)
+				p = bars[x / 30];
+			else if (y < 35)
+				p = (uint16_t)(v << 11 | v << 6 | v);
+			else if (y < 42)
+				p = (uint16_t)(v << 11);
+			else if (y < 49)
+				p = (uint16_t)(v << 6);
+			else
+				p = (uint16_t)v;
+			px[y * 240 + x] = p;
+		}
+	done = 1;
+	return px;
+}
+
+void settings_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
+			int w, int h)
+{
+	const struct blit_fx *fx = fx_current();
+
+	if (st.ingame) {
+		int ph = 12 + st.count * 22, py = c->h - ph;
+
+		draw_fill(c, 0, 0, c->w, c->h, 0);
+		if (frame)
+			draw_image_fx(c, (c->w - 2 * w) / 2, (c->h - 2 * h) / 2,
+				      frame, pitch, w, h, fx);
+		draw_fill(c, 0, py, c->w, ph, COL_BOX);
+		draw_fill(c, 0, py, c->w, 2, COL_SEL);
+		settings_rows(c, 0, py + 10, c->w, 22);
+		return;
+	}
+	draw_fill(c, 0, 0, c->w, c->h, COL_BG);
+	draw_text(c, 8, 8, 2, COL_HI, "Settings");
+	draw_battery(c, c->w - 8, 8);
+	draw_fill(c, 0, 30, c->w, 2, COL_SEL);
+	settings_rows(c, 0, 44, c->w, 26);
+	frame = test_pattern(&w, &h);
+	draw_image_fx(c, 0, c->h - 2 * h, frame, w, w, h, fx);
 }
 
 void message_draw(struct canvas *c, const char *title, const char *body,

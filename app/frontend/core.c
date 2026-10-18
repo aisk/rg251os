@@ -221,8 +221,16 @@ static void save_wait_child(void)
 {
 	int st;
 
-	if (c.save_pid > 0 && waitpid(c.save_pid, &st, 0) == c.save_pid)
-		core_child_exited(c.save_pid, st);
+	if (c.save_pid > 0) {
+		pid_t pid = c.save_pid;
+
+		if (waitpid(pid, &st, 0) == pid)
+			core_child_exited(pid, st);
+		else
+			/* Already reaped elsewhere without being reported: the
+			 * outcome is unknown, so write again to be safe. */
+			c.dirty = 1;
+	}
 	c.save_pid = 0;
 }
 
@@ -278,11 +286,36 @@ static int save_check(int64_t now)
 	return c.dirty;
 }
 
+/*
+ * Collect our own save child without waiting. The main loop's generic
+ * reaper normally gets it first and passes it to core_child_exited(); this
+ * keeps saving going even if a caller forgets to, since a save_pid that
+ * never clears would block every later background save.
+ */
+static void save_poll_child(void)
+{
+	pid_t pid = c.save_pid, r;
+	int st;
+
+	if (pid <= 0)
+		return;
+	r = waitpid(pid, &st, WNOHANG);
+	if (r == pid) {
+		core_child_exited(pid, st);
+	} else if (r < 0 && errno == ECHILD) {
+		/* Reaped elsewhere and never reported: write again. */
+		log_msg("save: lost track of writer %d, will rewrite", (int)pid);
+		c.save_pid = 0;
+		c.dirty = 1;
+	}
+}
+
 void core_save_tick(int64_t now)
 {
 	if (!c.loaded || now < c.next_tick_ns)
 		return;
 	c.next_tick_ns = now + 1000000000LL;
+	save_poll_child();
 	/* Games write saves over several frames; wait until it settles. */
 	if (save_check(now) && c.save_pid == 0 &&
 	    now - c.changed_ns >= SAVE_SETTLE_NS)

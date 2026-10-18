@@ -11,10 +11,12 @@
 #include <unistd.h>
 
 #include "audio.h"
+#include "battery.h"
 #include "blit.h"
 #include "draw.h"
 #include "menu.h"
 #include "fe.h"
+#include "fx.h"
 #include "resample.h"
 #include "romlist.h"
 
@@ -61,18 +63,45 @@ static void test_blit(void)
 		memset(a, 0x55, dpitch * 480 * 2);
 		memset(b, 0x55, dpitch * 480 * 2);
 		blit_rotate(a, dpitch, nw, nh, cases[k].rot, src, cases[k].spitch,
-			    cases[k].sw, cases[k].sh, cases[k].scale);
+			    cases[k].sw, cases[k].sh, cases[k].scale, NULL);
 		blit_reference(b, dpitch, nw, nh, cases[k].rot, src,
 			       cases[k].spitch, cases[k].sw, cases[k].sh,
-			       cases[k].scale);
+			       cases[k].scale, NULL);
 		for (int y = 0; y < nh; y++)
 			diff += memcmp(a + y * dpitch, b + y * dpitch, nw * 2) != 0;
 		CHECK(!diff, "blit case %zu: %d rows differ", k, diff);
 	}
 
+	/* Same with effects: random tables, color only and with the grid. */
+	{
+		static uint16_t lit[FX_LUT_SIZE], dark[FX_LUT_SIZE];
+		const struct blit_fx fxs[2] = { { lit, NULL }, { lit, dark } };
+
+		for (int i = 0; i < FX_LUT_SIZE; i++) {
+			lit[i] = rnd16();
+			dark[i] = rnd16();
+		}
+		for (int f = 0; f < 2; f++)
+			for (size_t k = 0; k < ARRAY_SIZE(cases); k++) {
+				int nw = cases[k].nw, nh = cases[k].nh, diff = 0;
+
+				blit_rotate(a, dpitch, nw, nh, cases[k].rot, src,
+					    cases[k].spitch, cases[k].sw, cases[k].sh,
+					    cases[k].scale, &fxs[f]);
+				blit_reference(b, dpitch, nw, nh, cases[k].rot, src,
+					       cases[k].spitch, cases[k].sw,
+					       cases[k].sh, cases[k].scale, &fxs[f]);
+				for (int y = 0; y < nh; y++)
+					diff += memcmp(a + y * dpitch, b + y * dpitch,
+						       nw * 2) != 0;
+				CHECK(!diff, "fx %d blit case %zu: %d rows differ", f,
+				      k, diff);
+			}
+	}
+
 	/* Orientation, as verified with hwtest: rotation 270 puts logical
 	 * (0,0), the user's top-left, at native column 0 of the last row. */
-	blit_rotate(a, dpitch, 320, 480, 270, src, 256, 240, 160, 2);
+	blit_rotate(a, dpitch, 320, 480, 270, src, 256, 240, 160, 2, NULL);
 	CHECK(a[479 * dpitch + 0] == src[0], "top-left pixel not at native (0,479)");
 	CHECK(a[478 * dpitch + 1] == src[0], "2x scaling of top-left pixel");
 	CHECK(a[0 * dpitch + 319] == src[159 * 256 + 239],
@@ -81,7 +110,7 @@ static void test_blit(void)
 
 	t0 = now_ns();
 	for (int i = 0; i < 50; i++)
-		blit_rotate(a, dpitch, 320, 480, 270, src, 256, 240, 160, 2);
+		blit_rotate(a, dpitch, 320, 480, 270, src, 256, 240, 160, 2, NULL);
 	log_msg("selftest: GBA blit %.3f ms per frame (host or emulator time)",
 		(now_ns() - t0) / 50 / 1e6);
 	free(src);
@@ -182,6 +211,277 @@ static void test_drc(double drift)
 	CHECK(st.overflows == 0, "overflow with drift %f", drift);
 }
 
+/* Color tables: identity when off, grid scaling, sane color models. */
+static void test_fx_tables(void)
+{
+	static uint16_t lit[FX_LUT_SIZE], dark[FX_LUT_SIZE];
+	int64_t t0;
+	int bad = 0;
+
+	fx_build(lit, NULL, COLOR_OFF, 0, 0);
+	for (int v = 0; v < 65536; v++)
+		if (!(v & 0x20) && lit[FX_INDEX(v)] != v)
+			bad++;
+	CHECK(!bad, "color off is not the identity for %d colors", bad);
+
+	fx_build(lit, dark, COLOR_OFF, 50, 0);
+	CHECK(lit[FX_INDEX(0xffdf)] == 0xffdf, "grid lit white %04x",
+	      lit[FX_INDEX(0xffdf)]);
+	CHECK(dark[FX_INDEX(0xffdf)] == (16 << 11 | 31 << 5 | 16),
+	      "grid dark white %04x", dark[FX_INDEX(0xffdf)]);
+	CHECK(dark[0] == 0 && lit[0] == 0, "grid black");
+	fx_build(lit, dark, COLOR_OFF, 75, 30);
+	CHECK(lit[FX_INDEX(0xffdf)] == 0xffff, "boost clamps to white: %04x",
+	      lit[FX_INDEX(0xffdf)]);
+	CHECK(lit[FX_INDEX(10 << 11)] == 13 << 11, "boost 30%% of red 10: %04x",
+	      lit[FX_INDEX(10 << 11)]);
+	CHECK(dark[FX_INDEX(0xffdf)] == (8 << 11 | 16 << 5 | 8),
+	      "dim 75%% of white: %04x", dark[FX_INDEX(0xffdf)]);
+
+	for (int mode = COLOR_GBA; mode < COLOR_COUNT; mode++) {
+		int prev = -1, mono = 1;
+
+		bad = 0;
+		t0 = now_ns();
+		fx_build(lit, NULL, mode, 0, 0);
+		log_msg("selftest: color %s table %.1f ms, white %04x, red %04x, "
+			"mid gray %04x", color_mode_names[mode],
+			(now_ns() - t0) / 1e6, lit[0x7fff], lit[0x7c00], lit[0x3def]);
+		CHECK(lit[0] == 0, "%s: black is %04x", color_mode_names[mode],
+		      lit[0]);
+		/* Every model maps gray to gray (rows sum to 1). */
+		for (int g = 0; g < 32; g++) {
+			uint16_t v = lit[g << 10 | g << 5 | g];
+			int r = v >> 11, gg = (v >> 5) & 63, b = v & 31;
+
+			if (abs(r - b) > 1 || abs(gg - 2 * r) > 2)
+				bad++;
+			if (r < prev)
+				mono = 0;
+			prev = r;
+		}
+		CHECK(!bad, "%s: grays are tinted", color_mode_names[mode]);
+		CHECK(mono, "%s: gray ramp not monotonic", color_mode_names[mode]);
+		/* Saturated red loses saturation. */
+		CHECK((lit[0x7c00] & 0x7e0) && (lit[0x7c00] & 0x1f),
+		      "%s: pure red stays pure", color_mode_names[mode]);
+	}
+	fx_build(lit, NULL, COLOR_GBA, 0, 0);
+	{
+		uint16_t gba = lit[0x3def];
+
+		fx_build(lit, NULL, COLOR_GBA_LIGHT, 0, 0);
+		CHECK((gba >> 11) < (lit[0x3def] >> 11),
+		      "GBA is not darker than GBA light");
+	}
+}
+
+/*
+ * The grid as the player sees it: a white frame with the grid on must
+ * give, in logical (rotated) coordinates, a lit pixel at the top-left of
+ * every 2x2 cell and dark ones elsewhere.
+ */
+static void test_grid_pattern(void)
+{
+	static uint16_t lit[FX_LUT_SIZE], dark[FX_LUT_SIZE];
+	static uint16_t frame[256 * 160], native[320 * 480];
+	const struct blit_fx fx = { lit, dark };
+	uint16_t w, d;
+	int bad = 0;
+	int64_t t0;
+
+	for (int i = 0; i < 256 * 160; i++)
+		frame[i] = 0xffdf;
+	fx_build(lit, dark, COLOR_OFF, 50, 0);
+	w = lit[FX_INDEX(0xffdf)];
+	d = dark[FX_INDEX(0xffdf)];
+	blit_rotate(native, 320, 320, 480, 270, frame, 256, 240, 160, 2, &fx);
+	/* Rotation 270: logical (lx, ly) is native (ly, 479 - lx). */
+	for (int lx = 0; lx < 480; lx++)
+		for (int ly = 0; ly < 320; ly++) {
+			uint16_t want = lx % 2 == 0 && ly % 2 == 0 ? w : d;
+
+			if (native[(479 - lx) * 320 + ly] != want)
+				bad++;
+		}
+	CHECK(!bad, "grid pattern: %d pixels wrong", bad);
+	CHECK(native[479 * 320 + 0] == w, "grid: user's top-left is not lit");
+	CHECK(native[478 * 320 + 0] == d && native[479 * 320 + 1] == d &&
+	      native[478 * 320 + 1] == d, "grid: rest of the first cell");
+
+	/* The canvas version (in-game settings preview) matches. */
+	{
+		static uint16_t px[480 * 320];
+		struct canvas cv = { px, 480, 320 };
+
+		bad = 0;
+		draw_image_fx(&cv, 0, 0, frame, 256, 240, 160, &fx);
+		for (int ly = 0; ly < 320; ly++)
+			for (int lx = 0; lx < 480; lx++)
+				if (px[ly * 480 + lx] != native[(479 - lx) * 320 + ly])
+					bad++;
+		CHECK(!bad, "draw_image_fx differs from blit in %d pixels", bad);
+	}
+
+	for (int i = 0; i < 256 * 160; i++)
+		frame[i] = rnd16() & ~0x20;
+	fx_build(lit, dark, COLOR_GBA, 50, 15);
+	t0 = now_ns();
+	for (int i = 0; i < 50; i++)
+		blit_rotate(native, 320, 320, 480, 270, frame, 256, 240, 160, 2, &fx);
+	log_msg("selftest: GBA blit with color + grid %.3f ms per frame "
+		"(host or emulator time, random colors)",
+		(now_ns() - t0) / 50 / 1e6);
+}
+
+static void write_text(const char *path, const char *text)
+{
+	CHECK(write_file_atomic(path, text, strlen(text)) == 0, "write %s", path);
+}
+
+static void test_settings(const char *base)
+{
+	struct settings s = settings_defaults, t = settings_defaults;
+	struct rom_settings r;
+	char buf[512], path[400];
+	struct settings keep = settings;
+
+	/* Round trip, every field changed. */
+	s.volume = 100;
+	s.brightness = 70;
+	s.grid = 1;
+	s.grid_dim = 75;
+	s.grid_boost = 30;
+	CHECK(settings_format(&s, buf, sizeof(buf)) > 0, "format");
+	CHECK(settings_parse(&t, buf) == 5, "parse back: %s", buf);
+	CHECK(!memcmp(&s, &t, sizeof(s)), "round trip: %s", buf);
+	CHECK(strstr(buf, "grid=on\n") != NULL, "grid written as on/off");
+
+	/* Old format, CRLF, spaces, comments, junk: good values only. */
+	t = settings_defaults;
+	CHECK(settings_parse(&t, "volume=200\r\nbrightness=70\nbogus=1\n") == 2,
+	      "settings parse");
+	CHECK(t.volume == 200 && t.brightness == 70, "settings values");
+	settings_parse(&t, "volume=999\nbrightness=1\ngrid=maybe\n"
+		       "grid_dim=50x\n#grid_boost=30\nnoequals\n=5\n"
+		       "  grid = ON \r\ngrid_boost=\n");
+	CHECK(t.volume == 200 && t.brightness == 70 && t.grid == 1 &&
+	      t.grid_dim == 50 && t.grid_boost == 0, "settings range check");
+	t = settings_defaults;
+	CHECK(settings_parse(&t, "\x01\xff\n\n===\nvolume") == 0 &&
+	      !memcmp(&t, &settings_defaults, sizeof(t)), "garbage");
+
+	rom_settings_defaults("x.gba", &r);
+	CHECK(r.color == COLOR_OFF, "rom default");
+	CHECK(rom_settings_parse(&r, "color=GBA-light\r\n") == 1 &&
+	      r.color == COLOR_GBA_LIGHT, "rom parse");
+	CHECK(rom_settings_parse(&r, "color=7\ncolor=sepia\n") == 0 &&
+	      r.color == COLOR_GBA_LIGHT, "rom parse range");
+
+	/* Files: missing, old location, config/, per ROM. */
+	sys_make_dirs();
+	settings_load();
+	CHECK(!memcmp(&settings, &settings_defaults, sizeof(settings)),
+	      "no file gives defaults");
+	snprintf(path, sizeof(path), "%s/settings.txt", base);
+	write_text(path, "volume=40\nbrightness=30\n");
+	settings_load();
+	CHECK(settings.volume == 40 && settings.brightness == 30,
+	      "old settings.txt still read");
+	settings.grid = 1;
+	settings.grid_dim = 25;
+	settings_save();
+	settings = settings_defaults;
+	settings_load();
+	CHECK(settings.volume == 40 && settings.grid == 1 &&
+	      settings.grid_dim == 25, "config/settings.txt round trip");
+	snprintf(path, sizeof(path), "%s/config/settings.txt", base);
+	write_text(path, "\xde\xad\nvolume=12");
+	settings_load();
+	CHECK(settings.volume == 12 && settings.brightness == 50,
+	      "corrupt config file: defaults plus what parses");
+
+	rom_settings_load("Some Game (USA).gba");
+	CHECK(rom_settings.color == COLOR_OFF, "rom without file");
+	rom_settings.color = COLOR_SP101;
+	rom_settings_save();
+	snprintf(path, sizeof(path), "%s/config/roms/Some Game (USA).txt", base);
+	CHECK(access(path, F_OK) == 0, "per ROM file name");
+	rom_settings_load(NULL);
+	CHECK(rom_settings.color == COLOR_OFF, "no game");
+	rom_settings_load("Some Game (USA).gba");
+	CHECK(rom_settings.color == COLOR_SP101, "per ROM round trip");
+	rom_settings_load("Other.gba");
+	CHECK(rom_settings.color == COLOR_OFF, "other ROM unaffected");
+	rom_settings_load(NULL);
+	settings = keep;
+}
+
+static void put(const char *dir, const char *name, const char *val)
+{
+	char path[400];
+
+	snprintf(path, sizeof(path), "%s/%s", dir, name);
+	write_text(path, val);
+}
+
+/* A fake /sys/class/power_supply as the RK817 driver lays it out. */
+static void test_battery(const char *base)
+{
+	char ps[300], bat[350], chg[350], label[16], line[128];
+	struct battery b;
+
+	snprintf(ps, sizeof(ps), "%s/power_supply", base);
+	snprintf(bat, sizeof(bat), "%s/rk817-battery", ps);
+	snprintf(chg, sizeof(chg), "%s/rk817-charger", ps);
+	mkdir(ps, 0755);
+	mkdir(bat, 0755);
+	mkdir(chg, 0755);
+	put(bat, "type", "Battery\n");
+	put(bat, "capacity", "87\n");
+	put(bat, "status", "Discharging\n");
+	put(bat, "voltage_avg", "3912000\n");
+	put(bat, "current_avg", "-412000\n");
+	put(bat, "uevent", "POWER_SUPPLY_NAME=rk817-battery\n"
+	    "POWER_SUPPLY_TYPE=Battery\nPOWER_SUPPLY_CAPACITY=87\n");
+	put(chg, "type", "USB\n");
+	put(chg, "online", "0\n");
+
+	battery_init(ps);
+	CHECK(battery_read(&b) == 0, "battery read");
+	CHECK(b.capacity == 87 && b.status == BAT_DISCHARGING &&
+	      b.uv == 3912000 && b.ua == -412000 && !b.online,
+	      "battery values %d %d %ld %ld %d", b.capacity, b.status, b.uv,
+	      b.ua, b.online);
+	battery_label(&b, label, sizeof(label));
+	CHECK(!strcmp(label, "87%"), "label %s", label);
+	battery_format(&b, line, sizeof(line));
+	log_msg("selftest: battery %s", line);
+
+	put(bat, "capacity", "5\n");
+	battery_poll(1000000000000000LL);
+	CHECK(battery_low(), "5%% discharging is low");
+	put(bat, "status", "Charging\n");
+	put(chg, "online", "1\n");
+	battery_poll(2000000000000000LL);
+	CHECK(!battery_low(), "charging is not low");
+	battery_label(battery_get(), label, sizeof(label));
+	CHECK(!strcmp(label, "+5%"), "charging label %s", label);
+	put(bat, "capacity", "100\n");
+	put(bat, "status", "Full\n");
+	battery_poll(3000000000000000LL);
+	CHECK(battery_get()->status == BAT_FULL, "full");
+	put(bat, "capacity", "64\n");
+	put(bat, "status", "Discharging\n");
+	put(chg, "online", "0\n");
+	battery_poll(4000000000000000LL);
+
+	battery_init("/nonexistent/power_supply");
+	CHECK(battery_read(&b) != 0 && !b.valid, "no battery");
+	battery_init(ps);  /* back, for the UI renders */
+	battery_poll(5000000000000000LL);
+}
+
 static void touch(const char *dir, const char *name)
 {
 	char path[400];
@@ -222,7 +522,6 @@ static void test_files(const char *base)
 {
 	static uint8_t data[70000], back[80000];
 	char path[300], tmp[310];
-	struct settings s = { 255, 50 };
 
 	for (size_t i = 0; i < sizeof(data); i++)
 		data[i] = (uint8_t)(i * 7);
@@ -236,12 +535,6 @@ static void test_files(const char *base)
 	CHECK(read_file(path, back, sizeof(back)) == 512, "shrunk");
 	snprintf(path, sizeof(path), "%s/nodir/x.sav", base);
 	CHECK(write_file_atomic(path, data, 16) != 0, "write into missing dir");
-
-	CHECK(settings_parse(&s, "volume=200\nbrightness=70\nbogus=1\n") == 2,
-	      "settings parse");
-	CHECK(s.volume == 200 && s.brightness == 70, "settings values");
-	settings_parse(&s, "volume=999\nbrightness=1");
-	CHECK(s.volume == 200 && s.brightness == 70, "settings range check");
 }
 
 /* Render the menus to <dir>/ui-*.raw (480x320 RGB565) for a visual check. */
@@ -263,6 +556,36 @@ static void test_ui(const char *dir)
 	ingame_menu_draw(&cv, game, 240, 240, 160);
 	snprintf(path, sizeof(path), "%s/ui-ingame.raw", dir);
 	write_file_atomic(path, px, sizeof(px));
+
+	settings_menu_enter(0);
+	settings_menu_update(1u << 5);
+	settings_menu_draw(&cv, NULL, 0, 0, 0);
+	snprintf(path, sizeof(path), "%s/ui-settings.raw", dir);
+	write_file_atomic(path, px, sizeof(px));
+	settings.grid = 1;
+	settings_menu_update(1u << 5);
+	settings_menu_update(1u << 5);
+	fx_update();
+	settings_menu_draw(&cv, NULL, 0, 0, 0);
+	snprintf(path, sizeof(path), "%s/ui-settings-grid.raw", dir);
+	write_file_atomic(path, px, sizeof(px));
+
+	/* In game: a picture with detail, GBA colors and the grid. */
+	for (int y = 0; y < 160; y++)
+		for (int x = 0; x < 240; x++) {
+			int r = x * 31 / 239, g = y * 31 / 159, b = (x ^ y) & 31;
+
+			game[y * 240 + x] = (uint16_t)(r << 11 | g << 6 | b);
+		}
+	rom_settings.color = COLOR_GBA;
+	fx_update();
+	settings_menu_enter(1);
+	settings_menu_draw(&cv, game, 240, 240, 160);
+	snprintf(path, sizeof(path), "%s/ui-settings-ingame.raw", dir);
+	write_file_atomic(path, px, sizeof(px));
+	settings = settings_defaults;
+	rom_settings.color = COLOR_OFF;
+	fx_update();
 	message_draw(&cv, "No GBA partition", "Could not mount /dev/mmcblk0p3 "
 		     "(FAT). ROMs, saves and logs live there.", COL_ERR);
 	snprintf(path, sizeof(path), "%s/ui-fatal.raw", dir);
@@ -280,8 +603,12 @@ int selftest(const char *dir)
 	test_drc(-0.0005);
 	test_drc(0.003);
 	test_drc(-0.003);
+	test_fx_tables();
+	test_grid_pattern();
 	test_romlist(dir);
 	test_files(dir);
+	test_settings(dir);
+	test_battery(dir);
 	test_ui(dir);
 	log_msg("selftest: %s (%d failures)", failures ? "FAILED" : "passed",
 		failures);

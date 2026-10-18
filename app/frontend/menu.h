@@ -12,6 +12,8 @@ enum ui_action {
 	UI_RESUME,
 	UI_QUIT,
 	UI_POWEROFF,
+	UI_SETTINGS,  /* open the settings screen */
+	UI_BACK,      /* leave the settings screen */
 };
 
 /* Button edges with key repeat for the d-pad. */
@@ -26,6 +28,13 @@ void ingame_menu_enter(const char *rom_name);
 int ingame_menu_update(uint32_t pressed);
 void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 		      int w, int h);
+
+/* Settings: global ones from the ROM list, grid and the game's color
+ * correction in game (drawn over the game picture as a live preview). */
+void settings_menu_enter(int ingame);
+int settings_menu_update(uint32_t pressed);
+void settings_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
+			int w, int h);
 
 void message_draw(struct canvas *c, const char *title, const char *body,
 		  uint16_t col);

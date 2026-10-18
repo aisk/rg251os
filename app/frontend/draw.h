@@ -12,6 +12,7 @@
 #define COL_SEL    RGB(0x30, 0x50, 0x90)
 #define COL_ERR    RGB(0xff, 0x50, 0x50)
 #define COL_BOX    RGB(0x18, 0x20, 0x38)
+#define COL_OK     RGB(0x60, 0xe0, 0x60)
 
 /* A logical (landscape) RGB565 canvas for menus. */
 struct canvas {
@@ -29,5 +30,11 @@ int draw_textf(struct canvas *c, int x, int y, int scale, uint16_t col,
 /* Scale an image 2x into the canvas, centered and darkened. */
 void draw_image_dim(struct canvas *c, const uint16_t *src, int spitch,
 		    int sw, int sh);
+
+struct blit_fx;
+/* Scale an image 2x into the canvas at (x0, y0) with effects (or NULL),
+ * the same pixels blit_rotate() would produce. Clipped. */
+void draw_image_fx(struct canvas *c, int x0, int y0, const uint16_t *src,
+		   int spitch, int sw, int sh, const struct blit_fx *fx);
 
 #endif

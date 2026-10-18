@@ -16,7 +16,8 @@ FRONTEND_CORE ?= $(if $(MGBA_LIBS),mgba,stub)
 LIBRETRO_INCLUDE := $(if $(MGBA_INCLUDE),$(MGBA_INCLUDE),$(EXTERNAL)/mgba/src/platform/libretro)
 
 FRONTEND_SRCS := main.c log.c sys.c display.c blit.c draw.c audio.c \
-	resample.c input.c romlist.c core.c menu.c perf.c selftest.c
+	resample.c input.c romlist.c core.c menu.c perf.c selftest.c \
+	settings.c fx.c battery.c
 FRONTEND_OBJS := $(addprefix $(FRONTEND_BUILD)/obj/,$(FRONTEND_SRCS:.c=.o))
 FRONTEND_STUB_OBJ := $(FRONTEND_BUILD)/obj/stub_core.o
 
@@ -74,5 +75,17 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	$(QEMU_AARCH64) $(FRONTEND_STUB_ELF) --headless $(FRONTEND_TEST_DIR)/stub \
 		$(FRONTEND_TEST_ROM) 3000
 	test -s $(FRONTEND_TEST_DIR)/stub/saves/test.sav
+	# Repeated background saves are all collected and logged, and the
+	# next run loads the save back.
+	test $$(grep -c 'save: wrote' $(FRONTEND_TEST_DIR)/stub/log/frontend.txt) -ge 3
+	grep -q 'core: unloaded ([1-9][0-9]* save writes)' \
+		$(FRONTEND_TEST_DIR)/stub/log/frontend.txt
+	printf 'grid=on\ngrid_dim=50\ngrid_boost=15\n' > \
+		$(FRONTEND_TEST_DIR)/stub/config/settings.txt
+	printf 'color=gba\n' > $(FRONTEND_TEST_DIR)/stub/config/roms/test.txt
+	$(QEMU_AARCH64) $(FRONTEND_STUB_ELF) --headless $(FRONTEND_TEST_DIR)/stub \
+		$(FRONTEND_TEST_ROM) 600
+	grep -q 'save: loaded' $(FRONTEND_TEST_DIR)/stub/log/frontend.txt
+	grep -q 'fx: color gba, grid on' $(FRONTEND_TEST_DIR)/stub/log/frontend.txt
 	$(QEMU_AARCH64) $(FRONTEND_ELF) --headless $(FRONTEND_TEST_DIR)/core \
 		$(FRONTEND_TEST_ROM) 3000

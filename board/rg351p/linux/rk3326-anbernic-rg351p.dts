@@ -66,3 +66,51 @@
 &vpu_mmu {
 	status = "disabled";
 };
+
+/*
+ * Battery and charger (RK817). Mainline dropped the charger when the
+ * RG351M was split from the Odroid Go Advance, so nothing bound to
+ * CONFIG_CHARGER_RK817; this restores it as rk3326-odroid-go.dtsi has it.
+ *
+ * Sense resistor: the vendor BSP DTS for the RG351P (AmberELEC
+ * rk3326-rg351p-linux.dts) says sample_res = <10> (10 mOhm), like the OGA
+ * schematic. ROCKNIX's RG351M/V DTs say "no current sense resistor" but
+ * still end up with 10 mOhm (inherited, or <0>, which the driver treats
+ * like 10000: it only distinguishes 20000). The RK817 needs the resistor
+ * to regulate the charge current, so 10 mOhm it is.
+ *
+ * Battery: 3500 mAh per Anbernic and ROCKNIX (BSP: design_capacity 3450,
+ * KPL605475 cell, 4.2 V charge, 180 mOhm). Charge current 2 A and
+ * termination 300 mA as in the BSP charger node and the OGA DT. The OCV
+ * table is the one mainline uses for the OGA (rk3326-odroid-go2.dts),
+ * which ROCKNIX also ships for the RG351M/V. Voltage limits as there.
+ */
+/ {
+	battery: battery {
+		compatible = "simple-battery";
+		charge-full-design-microamp-hours = <3500000>;
+		charge-term-current-microamp = <300000>;
+		constant-charge-current-max-microamp = <2000000>;
+		constant-charge-voltage-max-microvolt = <4200000>;
+		factory-internal-resistance-micro-ohms = <180000>;
+		voltage-max-design-microvolt = <4100000>;
+		voltage-min-design-microvolt = <3500000>;
+
+		ocv-capacity-celsius = <20>;
+		ocv-capacity-table-0 =  <4046950 100>, <4001920 95>, <3967900 90>, <3919950 85>,
+					<3888450 80>, <3861850 75>, <3831540 70>, <3799130 65>,
+					<3768190 60>, <3745650 55>, <3726610 50>, <3711630 45>,
+					<3696720 40>, <3685660 35>, <3674950 30>, <3663050 25>,
+					<3649470 20>, <3635260 15>, <3616920 10>, <3592440 5>,
+					<3574170 0>;
+	};
+};
+
+&rk817 {
+	rk817_charger: charger {
+		monitored-battery = <&battery>;
+		rockchip,resistor-sense-micro-ohms = <10000>;
+		rockchip,sleep-enter-current-microamp = <300000>;
+		rockchip,sleep-filter-current-microamp = <100000>;
+	};
+};

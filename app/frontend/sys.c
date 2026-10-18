@@ -1,7 +1,7 @@
 /*
  * PID 1 duties and small system helpers: mounts, status LED, kernel log
  * dumps, child reaping, power off, sysfs access, atomic file writes,
- * backlight, CPU frequency and temperature, persistent settings.
+ * backlight, CPU frequency and temperature.
  */
 #include <dirent.h>
 #include <errno.h>
@@ -21,7 +21,6 @@
 
 int fe_is_init;
 char fe_data_dir[256] = "/mnt/data";
-struct settings settings = { .volume = 255, .brightness = 50 };
 
 static void on_sigchld(int sig)
 {
@@ -90,7 +89,9 @@ int sys_mount_data(void)
 
 void sys_make_dirs(void)
 {
-	static const char *const dirs[] = { "log", "roms", "saves" };
+	static const char *const dirs[] = {
+		"log", "roms", "saves", "config", "config/roms",
+	};
 	char path[300];
 
 	for (size_t i = 0; i < ARRAY_SIZE(dirs); i++) {
@@ -418,63 +419,4 @@ long cpu_freq_khz(void)
 long soc_temp_mc(void)
 {
 	return read_sysfs_long("/sys/class/thermal/thermal_zone0/temp", -1);
-}
-
-/* ------------------------------------------------------------- settings */
-
-int settings_parse(struct settings *s, const char *text)
-{
-	int n = 0;
-
-	while (*text) {
-		char key[32];
-		long v;
-		int len = 0;
-
-		if (sscanf(text, "%31[a-z_]=%ld%n", key, &v, &len) == 2 && len) {
-			if (!strcmp(key, "volume") && v >= 0 && v <= 255) {
-				s->volume = (int)v;
-				n++;
-			} else if (!strcmp(key, "brightness") && v >= 5 && v <= 100) {
-				s->brightness = (int)v;
-				n++;
-			}
-		}
-		text = strchr(text, '\n');
-		if (!text)
-			break;
-		text++;
-	}
-	return n;
-}
-
-static void settings_path(char *buf, size_t size)
-{
-	snprintf(buf, size, "%s/settings.txt", fe_data_dir);
-}
-
-void settings_load(void)
-{
-	char path[300], buf[512];
-	int n;
-
-	settings_path(path, sizeof(path));
-	n = read_file(path, buf, sizeof(buf) - 1);
-	if (n < 0)
-		return;
-	buf[n] = 0;
-	settings_parse(&settings, buf);
-	log_msg("settings: volume %d, brightness %d%%", settings.volume,
-		settings.brightness);
-}
-
-void settings_save(void)
-{
-	char path[300], buf[128];
-	int n;
-
-	settings_path(path, sizeof(path));
-	n = snprintf(buf, sizeof(buf), "volume=%d\nbrightness=%d\n",
-		     settings.volume, settings.brightness);
-	write_file_atomic(path, buf, n);
 }

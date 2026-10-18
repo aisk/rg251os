@@ -12,6 +12,8 @@
  *   red steady      starting up (set as soon as PID 1 runs)
  *   green steady    up: first frame on screen and the startup log written
  *                   to <data>/log/frontend.txt
+ *   green, short red flash every 2 s
+ *                   battery low (below 10% and not charging)
  *   red/green blink fatal error, shown on screen if possible and logged;
  *                   waiting for the power key
  *   red steady      powering off (saving)
@@ -23,7 +25,12 @@
  *
  * Keys: SELECT+START in game opens the in-game menu (the RG351P has no
  * menu/function button; SELECT is also the hotkey enabler in AmberELEC
- * and ROCKNIX). The power key saves and powers off at any time.
+ * and ROCKNIX). SELECT in the ROM list opens the settings. The power key
+ * saves and powers off at any time. See menu.c for the menus.
+ *
+ * Settings (settings.c) are saved when leaving the settings screen in the
+ * ROM list, on resume, quit and power off, whenever they differ from what
+ * was last loaded or saved.
  *
  * Not PID 1 (testing on a PC or under qemu-user):
  *   frontend --selftest DIR            unit tests, using DIR as scratch
@@ -41,11 +48,13 @@
 #include <unistd.h>
 
 #include "audio.h"
+#include "battery.h"
 #include "blit.h"
 #include "core.h"
 #include "display.h"
 #include "draw.h"
 #include "fe.h"
+#include "fx.h"
 #include "input.h"
 #include "libretro.h"
 #include "menu.h"
@@ -58,7 +67,9 @@
 
 int selftest(const char *dir);
 
-enum state { ST_ROMLIST, ST_GAME, ST_MENU, ST_FATAL, ST_POWEROFF };
+enum state {
+	ST_ROMLIST, ST_GAME, ST_MENU, ST_SETTINGS, ST_FATAL, ST_POWEROFF
+};
 
 static struct {
 	enum state st;
@@ -68,13 +79,16 @@ static struct {
 	char rom_name[128];
 	uint32_t suppress;     /* held buttons hidden until released */
 	uint32_t prev;
-	int led_green;
+	int led_green, led_red;
 	int dumped5, dumped20;
 	int64_t poweroff_at;
 	int64_t next_rescan, next_drm_try, next_blink, next_perf;
 	int blink;
 	char fatal_title[64], fatal_msg[256];
-	struct settings menu_settings;
+	enum state settings_from;  /* ST_ROMLIST or ST_MENU */
+	/* As last loaded or saved, to save only what changed. */
+	struct settings saved;
+	struct rom_settings saved_rom;
 	struct perf_series p_run, p_blit, p_audio;
 	uint64_t perf_frames;
 	unsigned missed;
@@ -111,6 +125,18 @@ void on_jack(int inserted)
 
 /* -------------------------------------------------------------- states */
 
+static void save_settings(void)
+{
+	if (memcmp(&settings, &m.saved, sizeof(settings))) {
+		settings_save();
+		m.saved = settings;
+	}
+	if (memcmp(&rom_settings, &m.saved_rom, sizeof(rom_settings))) {
+		rom_settings_save();
+		m.saved_rom = rom_settings;
+	}
+}
+
 static void fatal(const char *title, const char *msg)
 {
 	snprintf(m.fatal_title, sizeof(m.fatal_title), "%s", title);
@@ -128,8 +154,7 @@ static void do_poweroff(void)
 	led_set_red(1);
 	audio_pause();
 	core_unload();
-	if (memcmp(&settings, &m.menu_settings, sizeof(settings)))
-		settings_save();
+	save_settings();
 	log_msg("uptime %lld ms, dumping dmesg", (long long)boot_ms());
 	log_sync();
 	klog_dump("dmesg-poweroff.txt");
@@ -154,9 +179,11 @@ static void start_game(const char *path)
 	audio_init();
 	audio_set_source(core_info()->sample_rate, core_info()->fps,
 			 display_ready() ? di->refresh_hz : 60.0);
+	rom_settings_load(m.rom_name);
+	m.saved_rom = rom_settings;
+	fx_update();
 	m.st = ST_GAME;
 	m.suppress = input_buttons();
-	m.menu_settings = settings;
 	display_take_missed();
 	m.next_perf = now_ns() + PERF_INTERVAL_NS;
 	log_sync();
@@ -166,8 +193,10 @@ static void quit_game(void)
 {
 	audio_pause();
 	core_unload();
-	if (memcmp(&settings, &m.menu_settings, sizeof(settings)))
-		settings_save();
+	save_settings();
+	rom_settings_load(NULL);
+	m.saved_rom = rom_settings;
+	fx_update();
 	romlist_menu_enter();
 	m.st = ST_ROMLIST;
 	m.suppress = input_buttons();
@@ -179,7 +208,6 @@ static void open_menu(uint32_t buttons)
 	audio_pause();
 	core_save_sync();
 	ingame_menu_enter(m.rom_name);
-	m.menu_settings = settings;
 	m.suppress = buttons;
 	m.st = ST_MENU;
 	log_msg("in-game menu");
@@ -188,13 +216,26 @@ static void open_menu(uint32_t buttons)
 
 static void resume_game(uint32_t buttons)
 {
-	if (memcmp(&settings, &m.menu_settings, sizeof(settings))) {
-		settings_save();
-		m.menu_settings = settings;
-	}
+	save_settings();
 	m.suppress = buttons;
 	m.st = ST_GAME;
 	display_take_missed();
+}
+
+static void open_settings(uint32_t buttons)
+{
+	m.settings_from = m.st;
+	settings_menu_enter(m.st == ST_MENU);
+	m.suppress = buttons;
+	m.st = ST_SETTINGS;
+}
+
+static void close_settings(uint32_t buttons)
+{
+	if (m.settings_from == ST_ROMLIST)
+		save_settings();
+	m.suppress = buttons;
+	m.st = m.settings_from;
 }
 
 /* ------------------------------------------------------------- frames */
@@ -208,13 +249,16 @@ static int menu_hotkey(uint32_t buttons)
 
 static void perf_report(void)
 {
-	char run[48], blit[48], aud[48];
+	char run[48], blit[48], aud[48], bat[24] = "n/a";
+	const struct battery *b = battery_get();
 	struct audio_stats as;
 	long khz = cpu_freq_khz(), mc = soc_temp_mc();
 	char temp[24] = "n/a";
 
 	if (mc != -1)
 		snprintf(temp, sizeof(temp), "%.1f C", mc / 1000.0);
+	if (b->valid)
+		snprintf(bat, sizeof(bat), "%d%% %.3f V", b->capacity, b->uv / 1e6);
 
 	audio_take_stats(&as);
 	m.xrun_total += as.xruns;
@@ -224,10 +268,10 @@ static void perf_report(void)
 	perf_format(&m.p_audio, aud, sizeof(aud));
 	log_msg("perf: %llu frames, ms avg/p99/max: run %s blit %s audio %s; "
 		"missed vblanks %u, underruns %u, overflow %u frames, fill %d..%d, "
-		"drc %.4f, codec %.0f Hz, cpu0 %ld MHz, temp %s",
+		"drc %.4f, codec %.0f Hz, cpu0 %ld MHz, temp %s, bat %s",
 		(unsigned long long)m.perf_frames, run, blit, aud, m.missed,
 		as.xruns, as.overflows, as.fill_min, as.fill_max, as.adj,
-		as.hw_rate, khz > 0 ? khz / 1000 : -1, temp);
+		as.hw_rate, khz > 0 ? khz / 1000 : -1, temp, bat);
 	m.perf_frames = 0;
 	m.missed = 0;
 	if (++m.reports % 6 == 0 && fe_is_init)
@@ -242,7 +286,7 @@ static void blit_canvas(void)
 
 	dst = display_backbuf(&pitch);
 	blit_rotate(dst, pitch, di->native_w, di->native_h, di->rotation,
-		    m.cv.px, m.cv.w, m.cv.w, m.cv.h, 1);
+		    m.cv.px, m.cv.w, m.cv.w, m.cv.h, 1, NULL);
 	display_present();
 }
 
@@ -272,7 +316,8 @@ static void game_frame(uint32_t buttons, int64_t now)
 			scale = di->logical_w / fw < di->logical_h / fh ?
 				di->logical_w / fw : di->logical_h / fh;
 			blit_rotate(dst, pitch, di->native_w, di->native_h,
-				    di->rotation, fr, fp, fw, fh, scale < 1 ? 1 : scale);
+				    di->rotation, fr, fp, fw, fh, scale < 1 ? 1 : scale,
+				    fx_current());
 		}
 		t3 = now_ns();
 		display_present();
@@ -306,8 +351,14 @@ static void frame(int64_t now)
 		break;
 	case ST_ROMLIST:
 		pressed = ui_repeat(buttons & ~m.suppress, now);
-		if (romlist_menu_update(pressed, path, sizeof(path)) == UI_START_ROM)
+		switch (romlist_menu_update(pressed, path, sizeof(path))) {
+		case UI_START_ROM:
 			start_game(path);
+			break;
+		case UI_SETTINGS:
+			open_settings(buttons);
+			break;
+		}
 		if (m.st == ST_ROMLIST) {
 			romlist_menu_draw(&m.cv);
 			blit_canvas();
@@ -323,6 +374,9 @@ static void frame(int64_t now)
 		case UI_RESUME:
 			resume_game(buttons);
 			break;
+		case UI_SETTINGS:
+			open_settings(buttons);
+			break;
 		case UI_QUIT:
 			quit_game();
 			break;
@@ -330,8 +384,30 @@ static void frame(int64_t now)
 			on_power_key();
 			break;
 		}
+		if (m.st != ST_MENU)
+			break;
 		fr = core_frame(&fw, &fh, &fp);
 		ingame_menu_draw(&m.cv, fr, fp, fw, fh);
+		blit_canvas();
+		break;
+	case ST_SETTINGS:
+		pressed = ui_repeat(buttons & ~m.suppress, now);
+		if (m.settings_from == ST_MENU && menu_hotkey(buttons)) {
+			resume_game(buttons);
+			break;
+		}
+		if (settings_menu_update(pressed) == UI_BACK)
+			close_settings(buttons);
+		fr = NULL;
+		fw = fh = fp = 0;
+		if (m.settings_from == ST_MENU)
+			fr = core_frame(&fw, &fh, &fp);
+		if (m.st == ST_SETTINGS)
+			settings_menu_draw(&m.cv, fr, fp, fw, fh);
+		else if (m.st == ST_MENU)
+			ingame_menu_draw(&m.cv, fr, fp, fw, fh);
+		else
+			romlist_menu_draw(&m.cv);
 		blit_canvas();
 		break;
 	case ST_FATAL:
@@ -370,9 +446,13 @@ static void startup(void)
 		log_open_file(path);
 	}
 	settings_load();
-	m.menu_settings = settings;
+	m.saved = settings;
+	rom_settings_load(NULL);
+	m.saved_rom = rom_settings;
+	fx_update();
 	backlight_init(settings.brightness);
 	cpu_info_log();
+	battery_init("/sys/class/power_supply");
 	if (display_init())
 		m.next_drm_try = now_ns() + 200000000LL;
 	input_init();
@@ -415,11 +495,21 @@ static void timers(int64_t now)
 		audio_init();
 		m.next_rescan = now + 2000000000LL;
 	}
+	battery_poll(now);
 	if (!m.led_green && m.st != ST_FATAL && display_frames() > 0) {
 		log_msg("up: first frame shown at %lld ms", (long long)up);
 		log_sync();
 		led_set_red(0);
 		m.led_green = 1;
+	}
+	if (m.led_green && m.st != ST_FATAL && m.st != ST_POWEROFF) {
+		/* Low battery: a 250 ms red flash every 2 s. */
+		int red = battery_low() && now / 1000000 % 2000 < 250;
+
+		if (red != m.led_red) {
+			led_set_red(red);
+			m.led_red = red;
+		}
 	}
 	if (m.st == ST_FATAL && now >= m.next_blink) {
 		m.blink ^= 1;
@@ -483,6 +573,10 @@ static int headless(const char *data, const char *rom, long frames)
 	snprintf(path, sizeof(path), "%s/log/frontend.txt", fe_data_dir);
 	log_open_file(path);
 	audio_init_null(48000, 0.001);
+	/* Settings from DATA, so effects can be exercised too. */
+	settings_load();
+	rom_settings_load(strrchr(rom, '/') ? strrchr(rom, '/') + 1 : rom);
+	fx_update();
 	if (core_load(rom, err, sizeof(err))) {
 		log_msg("headless: %s", err);
 		return 1;
@@ -500,7 +594,8 @@ static int headless(const char *data, const char *rom, long frames)
 		fr = core_frame(&fw, &fh, &fp);
 		t2 = now_ns();
 		if (fr)
-			blit_rotate(native, 320, 320, 480, 270, fr, fp, fw, fh, 2);
+			blit_rotate(native, 320, 320, 480, 270, fr, fp, fw, fh, 2,
+				    fx_current());
 		perf_add(&m.p_run, t1 - t0 - push);
 		perf_add(&m.p_audio, audio_take_time_ns() + push);
 		perf_add(&m.p_blit, now_ns() - t2);

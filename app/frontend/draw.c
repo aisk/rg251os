@@ -4,6 +4,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 
+#include "blit.h"
 #include "draw.h"
 #include "font8x8.h"
 
@@ -89,6 +90,41 @@ void draw_image_dim(struct canvas *c, const uint16_t *src, int spitch,
 
 			d0[2 * x] = d0[2 * x + 1] = v;
 			d1[2 * x] = d1[2 * x + 1] = v;
+		}
+	}
+}
+
+void draw_image_fx(struct canvas *c, int x0, int y0, const uint16_t *src,
+		   int spitch, int sw, int sh, const struct blit_fx *fx)
+{
+	if (fx && !fx->lit)
+		fx = NULL;
+	for (int y = 0; y < sh; y++) {
+		const uint16_t *s = src + (long)y * spitch;
+		int dy = y0 + 2 * y;
+		uint16_t *d0, *d1;
+
+		if (dy < 0 || dy + 1 >= c->h)
+			continue;
+		d0 = c->px + (long)dy * c->w;
+		d1 = d0 + c->w;
+		for (int x = 0; x < sw; x++) {
+			int dx = x0 + 2 * x;
+			uint16_t a = s[x], b;
+
+			if (dx < 0 || dx + 1 >= c->w)
+				continue;
+			if (fx) {
+				unsigned i = FX_INDEX(a);
+
+				a = fx->lit[i];
+				b = fx->dark ? fx->dark[i] : a;
+			} else {
+				b = a;
+			}
+			/* Lit pixel top-left, as in blit_rotate(). */
+			d0[dx] = a;
+			d0[dx + 1] = d1[dx] = d1[dx + 1] = b;
 		}
 	}
 }
