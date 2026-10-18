@@ -12,7 +12,7 @@
 
 ## 已在真机验证
 
-启动、显示、按键、关机、电量读数（RK817 库仑计，读到过 78%、3.8V）、耳机检测、喇叭和耳机出声（simple 和 adaptive 两种模式）、存档、uclamp 调频、两个核心。超级马里奥 GBA 在 50% 背光下整机约 1.5 到 1.7W。mGBA 跑马里奥已经接近满负荷，所以默认核心改成了 gpSP。
+启动、显示、按键、关机、电量读数（RK817 库仑计，读到过 78%、3.8V）、耳机检测、喇叭和耳机出声（simple 和 adaptive 两种模式）、存档、uclamp 调频、两个核心。超级马里奥 GBA 在 50% 背光下整机约 1.5 到 1.7W。mGBA 跑马里奥已经接近满负荷，所以默认核心改成了 gpSP。龙珠大冒险（Dragon Ball Advanced Adventure）在 mGBA 下屏幕上有敌人就卡，切到 gpSP 后目测不卡了。
 
 ## 待实机验证
 
@@ -20,7 +20,6 @@
 - 首次开机扩展 GBA 分区：`sdgrow:` 日志，扩展后 Windows 和 macOS 能否读写。
 - ROM 名称识别：名字是否正确，冷缓存下扫描耗时（`romdb: scanned N ROMs in X ms`），大 ROM 首次算 CRC 的耗时。
 - `color=auto` 的效果是否合适。现在是 2004 年及以前用 `gba`，2005 年以后用 `sp101`，年份未知用 `off`。按 2005 年分界是推断出来的，没有出处。例外表 `color_exceptions[]` 是空的，遇到不合适的游戏再加。
-- gpSP 跑龙珠大冒险（Dragon Ball Advanced Adventure）的帧率。mGBA 下屏幕上有敌人就会卡，`cpu=max` 也没用。
 - Frame blend 开启后的实际开销（用 perf.csv 对比开关时的 `work_avg`）。
 - adaptive 音频去掉开机校准以后，第一局开头有没有爆音或 underrun。
 - 开机时 LED 心跳闪烁，前端起来后接管。
@@ -46,7 +45,7 @@
 - zip 格式 ROM。
 - 震动卡带（`gpsp_rumble`），需要前端驱动 pwm-vibrator。
 - mGBA 的性能：多线程视频、LTO、PGO。
-- 开机速度优化，见 hardware-research.md 里“对精简和快速开机的初步判断”。
+- 开机速度优化，见 hardware-research.md 里“对精简和快速开机的初步判断”。2026-10-18 的一次实机日志（debug 开着）：内核启动后 0.81 s 进入前端，0.86 s 挂好 GBA 分区，2.43 s 才打开日志，2.49 s 出 ROM 列表。挂载后到打开日志之间这 1.5 s 还没分析。bootloader 阶段的耗时没量过，要接串口或者用高速摄像来测。
 - 接上 UART2 以后再查主线 U-Boot。
 - 把 RG351P 的 DTS 整理后提交到主线内核。
 - hwtest 已经基本不用了，可以删掉，前提是先把 `font8x8.h` 挪进 `app/frontend`。
