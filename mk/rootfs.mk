@@ -1,5 +1,6 @@
-# Root filesystem: a single static hwtest binary as /sbin/init, packed into
-# a small read-only ext4 image.
+# Root filesystem: the static frontend as /sbin/init plus the hwtest
+# binary as /sbin/hwtest (boot it with init=/sbin/hwtest on the kernel
+# command line), packed into a small read-only ext4 image.
 
 HWTEST_SRC := $(TOP)/app/hwtest/hwtest.c
 HWTEST_DEPS := $(HWTEST_SRC) $(TOP)/app/hwtest/font8x8.h
@@ -20,11 +21,12 @@ $(HWTEST_BIN): $(HWTEST_DEPS) $(TOOLCHAIN_STAMP)
 
 # The journal is dropped: the root is mounted read-only and this saves a
 # little work at mount time. fakeroot makes every file owned by root.
-$(ROOTFS_IMG): $(HWTEST_BIN) $(TOP)/mk/rootfs.mk
+$(ROOTFS_IMG): $(FRONTEND_BIN) $(HWTEST_BIN) $(TOP)/mk/rootfs.mk
 	rm -rf $(ROOTFS_DIR) $@
 	mkdir -p $(addprefix $(ROOTFS_DIR)/,dev proc sys tmp sbin mnt/data)
 	chmod 1777 $(ROOTFS_DIR)/tmp
-	install -m 0755 $(HWTEST_BIN) $(ROOTFS_DIR)/sbin/init
+	install -m 0755 $(FRONTEND_BIN) $(ROOTFS_DIR)/sbin/init
+	install -m 0755 $(HWTEST_BIN) $(ROOTFS_DIR)/sbin/hwtest
 	$(FAKEROOT) -- sh -c 'chown -R 0:0 $(ROOTFS_DIR) && \
 		$(MKE2FS) -q -F -t ext4 -O ^has_journal -L rootfs \
 		-d $(ROOTFS_DIR) $@ $(ROOTFS_SIZE)'
