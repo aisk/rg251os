@@ -15,7 +15,7 @@ GENIMAGE ?= genimage
 # mkdosfs and friends live in /usr/sbin, which may not be in PATH.
 IMAGE_PATH := /usr/sbin:/sbin:$(PATH)
 
-$(SDCARD_IMG): $(LINUX_IMAGE) $(LINUX_DTB) $(BOOT_BLOB) $(ROOTFS_IMG) \
+$(SDCARD_IMG): $(LINUX_IMAGE) $(LINUX_DTB) $(BOOT_BLOB) $(BOOT_BLOB_STAMP) $(ROOTFS_IMG) \
 		$(GENIMAGE_CFG) $(EXTLINUX_CONF) $(BOOT_INI)
 	@if [ -z "$(LINUX_IMAGE)" ] || [ -z "$(LINUX_DTB)" ] || [ -z "$(BOOT_BLOB)" ]; then \
 		echo "error: LINUX_IMAGE, LINUX_DTB or BOOT_BLOB undefined (mk/linux.mk, mk/bootloader.mk)" >&2; \

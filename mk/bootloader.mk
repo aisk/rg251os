@@ -151,9 +151,16 @@ bootloader-clean:
 
 include $(TOP)/mk/bootloader-legacy.mk
 
-# What mk/image.mk writes at sector 64
+# What mk/image.mk writes at sector 64. The marker makes the image
+# repack when BOOTLOADER changes, even if the blob itself is older.
 ifeq ($(BOOTLOADER),legacy)
 BOOT_BLOB := $(LEGACY_BIN)
 else
 BOOT_BLOB := $(UBOOT_BIN)
 endif
+BOOT_BLOB_STAMP := $(BUILD)/.bootloader-$(BOOTLOADER)
+
+$(BUILD)/.bootloader-%:
+	mkdir -p $(BUILD)
+	rm -f $(BUILD)/.bootloader-*
+	touch $@
