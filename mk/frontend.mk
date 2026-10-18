@@ -181,12 +181,27 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 		$(QEMU_AARCH64) $(FRONTEND_ELF) --headless $$d $$r 1200; \
 		grep -q 'core: gpSP .* loaded test.gba' $$d/log/frontend.txt; \
 		grep -q 'core: options gpsp_drc=enabled' $$d/log/frontend.txt; \
+		grep -q 'core: options .*gpsp_frame_mixing=disabled' $$d/log/frontend.txt; \
 		grep -q 'headless: 1200 frames, frame 240x160' $$d/log/frontend.txt; \
 		! grep -q 'Failed to map the JIT' $$d/log/frontend.txt; \
 	done
-	# mGBA -> gpSP -> mGBA in one process on one save, and a .srm.
+	# Frame blending from the per ROM setting reaches gpSP.
+	mkdir -p $(FRONTEND_TEST_DIR)/blend/config/roms
+	printf 'core=gpsp\nblend=on\n' > $(FRONTEND_TEST_DIR)/blend/config/roms/test.txt
+	$(QEMU_AARCH64) $(FRONTEND_ELF) --headless $(FRONTEND_TEST_DIR)/blend \
+		$(FRONTEND_TEST_ROM) 1200
+	set -e; f=$(FRONTEND_TEST_DIR)/blend/log/frontend.txt; \
+	grep -q 'settings: test: loaded, .*core gpsp, blend on' $$f; \
+	grep -q 'core: options .*gpsp_frame_mixing=enabled' $$f; \
+	grep -q 'headless: 1200 frames, frame 240x160' $$f
+	# mGBA -> gpSP -> mGBA in one process on one save, a .srm, and
+	# frame blending switched on and off in game.
 	$(QEMU_AARCH64) $(FRONTEND_ELF) --core-switch $(FRONTEND_TEST_DIR)/switch 120
-	grep -q 'core switch: passed' $(FRONTEND_TEST_DIR)/switch/log/frontend.txt
+	set -e; f=$(FRONTEND_TEST_DIR)/switch/log/frontend.txt; \
+	grep -q 'core switch: passed' $$f; \
+	grep -q 'core: gpsp_frame_mixing=enabled, applied live' $$f; \
+	grep -q 'core: gpsp_frame_mixing=disabled, applied live' $$f; \
+	grep -q 'core: blend on kept for gpSP, mGBA has no frame blending' $$f
 	# The first boot's partition grow on card images, with mtools as the
 	# file system and fsck.fat on the result (see the script).
 	$(TOP)/mk/sdgrow-test.sh $(QEMU_AARCH64) $(FRONTEND_STUB_ELF) \

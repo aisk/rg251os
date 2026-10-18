@@ -6,14 +6,18 @@
  * Dot boost, Audio mode Simple/Adaptive, Audio test: A plays a 3 s
  * 440 Hz tone through the game's audio path, and Debug log on/off, see
  * log.c). In game, SELECT+START opens the in-game menu: Resume, Volume,
- * Brightness, CPU, Core, Settings, Quit to ROM list, Power off; B or
- * SELECT+START again resumes. CPU is the global CPU mode (Adaptive, Max
- * or a fixed frequency, see cpuctl.c); changed in game it applies as soon
- * as the game resumes. Core (this game: mGBA or gpSP) shows the running
- * core; left/right pick another one, the row then reads "Restart with"
- * and A saves and restarts the game with it (resuming instead keeps it
- * for the next start). The in-game Settings screen shows the game with
- * the effects applied (live preview) under a panel with Color (this
+ * Brightness, CPU, Core, Frame blend, Settings, Quit to ROM list, Power
+ * off; B or SELECT+START again resumes. CPU is the global CPU mode
+ * (Adaptive, Max or a fixed frequency, see cpuctl.c); changed in game it
+ * applies as soon as the game resumes. Core (this game: mGBA or gpSP)
+ * shows the running core; left/right pick another one, the row then
+ * reads "Restart with" and A saves and restarts the game with it
+ * (resuming instead keeps it for the next start). Frame blend (this
+ * game, gpSP's 50:50 mix of the current and the previous frame for games
+ * that rely on LCD ghosting) applies on the next frame; mGBA has none,
+ * so with mGBA the row reads "gpSP only" and cannot be changed, the
+ * setting is kept for gpSP. The in-game Settings screen shows the game
+ * with the effects applied (live preview) under a panel with Color (this
  * game), LCD grid, Grid darkness, Dot boost and Debug log. In menus,
  * up/down select, left/right change a value, A activates, B goes back.
  * The battery level is shown in the ROM list header and above the
@@ -243,9 +247,10 @@ void romlist_menu_draw(struct canvas *c)
 /* -------------------------------------------------------- in-game menu */
 
 enum {
-	IG_RESUME, IG_VOLUME, IG_BRIGHTNESS, IG_CPU, IG_CORE, IG_SETTINGS,
-	IG_QUIT, IG_POWEROFF, IG_COUNT
+	IG_RESUME, IG_VOLUME, IG_BRIGHTNESS, IG_CPU, IG_CORE, IG_BLEND,
+	IG_SETTINGS, IG_QUIT, IG_POWEROFF, IG_COUNT
 };
+#define IG_ROW_H 26
 
 /* The game's core setting, to the next core that is built in. */
 static void core_step(int d)
@@ -263,6 +268,22 @@ static void core_step(int d)
 static int core_pending(void)
 {
 	return core_loaded() && rom_settings.core != core_info()->core;
+}
+
+/* Frame blending exists in gpSP only: the running core or the one the
+ * game restarts with. */
+static int blend_available(void)
+{
+	return rom_settings.core == CORE_GPSP ||
+	       (core_loaded() && core_info()->core == CORE_GPSP);
+}
+
+static void blend_toggle(void)
+{
+	if (!blend_available())
+		return;
+	rom_settings.blend = !rom_settings.blend;
+	core_options_changed();
 }
 
 void ingame_menu_enter(const char *rom_name)
@@ -294,6 +315,8 @@ int ingame_menu_update(uint32_t pressed)
 		cpu_step(d);
 	if (d && ig.sel == IG_CORE)
 		core_step(d);
+	if (d && ig.sel == IG_BLEND)
+		blend_toggle();
 	if (pressed & (JOY_BIT(A) | JOY_BIT(START))) {
 		switch (ig.sel) {
 		case IG_RESUME:
@@ -302,6 +325,9 @@ int ingame_menu_update(uint32_t pressed)
 			if (core_pending())
 				return UI_RESTART;
 			core_step(1);
+			break;
+		case IG_BLEND:
+			blend_toggle();
 			break;
 		case IG_SETTINGS:
 			return UI_SETTINGS;
@@ -318,10 +344,10 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 		      int w, int h)
 {
 	static const char *const items[IG_COUNT] = {
-		"Resume", "Volume", "Brightness", "CPU", "Core", "Settings",
-		"Quit to ROM list", "Power off",
+		"Resume", "Volume", "Brightness", "CPU", "Core", "Frame blend",
+		"Settings", "Quit to ROM list", "Power off",
 	};
-	int bx = 56, by = 48, bw = c->w - 112, bh = 40 + IG_COUNT * 28;
+	int bx = 56, by = 36, bw = c->w - 112, bh = 40 + IG_COUNT * IG_ROW_H;
 
 	draw_image_dim(c, frame, pitch, w, h);
 	draw_battery(c, c->w - 8, 16);
@@ -329,11 +355,13 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 	draw_frame(c, bx, by, bw, bh, COL_SEL);
 	draw_name(c, bx + 12, by + 12, COL_HI, ig.name, (bw - 24) / 16);
 	for (int i = 0; i < IG_COUNT; i++) {
-		int y = by + 40 + i * 28;
+		int y = by + 40 + i * IG_ROW_H;
 		uint16_t col = i == ig.sel ? COL_FG : COL_DIM;
 
+		if (i == IG_BLEND && !blend_available())
+			col = i == ig.sel ? COL_DIM : COL_OFF;
 		if (i == ig.sel)
-			draw_fill(c, bx + 4, y - 5, bw - 8, 26, COL_SEL);
+			draw_fill(c, bx + 4, y - 5, bw - 8, IG_ROW_H, COL_SEL);
 		draw_text(c, bx + 16, y, 2, col, i == IG_CORE && core_pending() ?
 			  "Restart with" : items[i]);
 		if (i == IG_VOLUME) {
@@ -354,6 +382,11 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 
 			draw_text(c, bx + bw - 16 - 16 * (int)strlen(v), y, 2,
 				  core_pending() ? COL_HI : col, v);
+		} else if (i == IG_BLEND) {
+			const char *v = !blend_available() ? "gpSP only" :
+					rom_settings.blend ? "On" : "Off";
+
+			draw_text(c, bx + bw - 16 - 16 * (int)strlen(v), y, 2, col, v);
 		}
 	}
 }

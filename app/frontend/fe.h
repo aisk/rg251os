@@ -117,6 +117,7 @@ struct rom_settings {
 	int color;       /* enum color_mode */
 	int cpu_start;   /* learned start OPP in MHz, 0: the top */
 	int core;        /* enum core_id, used when the game starts */
+	int blend;       /* gpSP frame blending (core.c), mGBA ignores it */
 };
 extern struct settings settings;
 extern struct rom_settings rom_settings;  /* for the running game */

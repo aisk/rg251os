@@ -7,8 +7,9 @@
  *                                audio path (audio=simple|adaptive),
  *                                debug logging (debug=on|off)
  *   config/roms/<rom name>.txt   per game: color correction, the
- *                                learned start OPP (cpu_start=<MHz>) and
- *                                the core (core=mgba|gpsp)
+ *                                learned start OPP (cpu_start=<MHz>),
+ *                                the core (core=mgba|gpsp) and gpSP's
+ *                                frame blending (blend=off|on)
  *
  * <rom name> is the ROM file name without ".gba". Unknown keys, bad values,
  * comments (#), blank lines and CRLF line ends are ignored, so a missing or
@@ -92,6 +93,7 @@ static const struct field rom_fields[] = {
 	F(rom_settings, color, 0, COLOR_COUNT - 1, color_mode_names),
 	F(rom_settings, cpu_start, 0, 5000, NULL),
 	F(rom_settings, core, 0, CORE_COUNT - 1, core_names),
+	F(rom_settings, blend, 0, 1, on_off),
 };
 
 static int field_nnames(const struct field *f)
@@ -272,6 +274,7 @@ void rom_settings_defaults(const char *rom_name, struct rom_settings *r)
 	r->color = COLOR_OFF;
 	r->cpu_start = 0;
 	r->core = CORE_GPSP;
+	r->blend = 0;
 }
 
 int rom_settings_parse(struct rom_settings *r, const char *text)
@@ -302,10 +305,10 @@ void rom_settings_load(const char *rom_name)
 	rom_path(path, sizeof(path));
 	n = load_file(path, &rom_settings, rom_fields, ARRAY_SIZE(rom_fields),
 		      &rom_in_file);
-	log_msg("settings: %s: %s, color %s, cpu_start %d MHz, core %s",
-		rom_base, n < 0 ? "defaults (no file)" : "loaded",
+	log_msg("settings: %s: %s, color %s, cpu_start %d MHz, core %s, "
+		"blend %s", rom_base, n < 0 ? "defaults (no file)" : "loaded",
 		color_mode_names[rom_settings.color], rom_settings.cpu_start,
-		core_names[rom_settings.core]);
+		core_names[rom_settings.core], on_off[rom_settings.blend]);
 }
 
 void rom_settings_save(void)

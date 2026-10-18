@@ -19,6 +19,9 @@ int core_loaded(void);
 const struct core_info *core_info(void);
 /* One retro_run with the given joypad bitmask. */
 void core_run(uint32_t buttons);
+/* rom_settings.blend changed: gpSP reads it again after the next
+ * retro_run (applied live), mGBA ignores it. */
+void core_options_changed(void);
 /* Last video frame (RGB565), or NULL before the first one. */
 const uint16_t *core_frame(int *w, int *h, int *pitch_px);
 

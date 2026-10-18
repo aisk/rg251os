@@ -424,6 +424,13 @@ static void test_settings(const char *base)
 	      "core parse");
 	CHECK(rom_settings_parse(&r, "core=vba\ncore=2\n") == 0 &&
 	      r.core == CORE_GPSP, "core parse range");
+	CHECK(r.blend == 0, "blend default off");
+	CHECK(rom_settings_parse(&r, "blend = On\r\n") == 1 && r.blend == 1,
+	      "blend parse");
+	CHECK(rom_settings_parse(&r, "blend=2\nblend=half\n") == 0 &&
+	      r.blend == 1, "blend parse range");
+	CHECK(rom_settings_parse(&r, "blend=no\n") == 1 && r.blend == 0,
+	      "blend parse no");
 
 	/* Files: missing, old location, config/, per ROM. */
 	sys_make_dirs();
@@ -504,8 +511,24 @@ static void test_settings(const char *base)
 	rom_settings_save();
 	rom_settings_load("Other.gba");
 	CHECK(rom_settings.core == CORE_MGBA, "explicit mgba after gpsp");
+	memset(buf, 0, sizeof(buf));
+	read_file(path, buf, sizeof(buf) - 1);
+	CHECK(!strstr(buf, "blend="), "default blend not written: %s", buf);
+	/* Blend: written once on, kept in the file when back off. */
+	rom_settings.blend = 1;
+	rom_settings_save();
+	rom_settings_load("Other.gba");
+	CHECK(rom_settings.blend == 1 && rom_settings.core == CORE_MGBA,
+	      "blend round trip");
+	rom_settings.blend = 0;
+	rom_settings_save();
+	memset(buf, 0, sizeof(buf));
+	read_file(path, buf, sizeof(buf) - 1);
+	CHECK(strstr(buf, "blend=off\n") != NULL, "blend in the file stays: %s",
+	      buf);
 	rom_settings_load(NULL);
 	CHECK(rom_settings.core == CORE_GPSP, "no game: default core");
+	CHECK(rom_settings.blend == 0, "no game: blend off");
 	settings = keep;
 	log_set_debug(1);
 }
@@ -916,6 +939,20 @@ static void test_ui(const char *dir)
 	ingame_menu_draw(&cv, game, 240, 240, 160);
 	snprintf(path, sizeof(path), "%s/ui-ingame.raw", dir);
 	write_file_atomic(path, px, sizeof(px));
+	/* With mGBA, Frame blend reads "gpSP only" and does not change. */
+	rom_settings.core = CORE_MGBA;
+	for (int i = 0; i < 4; i++)
+		ingame_menu_update(JOY_BIT(DOWN));
+	ingame_menu_update(JOY_BIT(A));
+	ingame_menu_update(JOY_BIT(RIGHT));
+	CHECK(rom_settings.blend == 0, "blend unchanged with mGBA");
+	ingame_menu_draw(&cv, game, 240, 240, 160);
+	snprintf(path, sizeof(path), "%s/ui-ingame-mgba.raw", dir);
+	write_file_atomic(path, px, sizeof(px));
+	rom_settings.core = CORE_GPSP;
+	ingame_menu_update(JOY_BIT(A));
+	CHECK(rom_settings.blend == 1, "blend toggled with gpSP");
+	rom_settings.blend = 0;
 
 	settings_menu_enter(0);
 	settings_menu_update(1u << 5);
@@ -1435,8 +1472,51 @@ static int switch_round(const char *rom, const char *sav, int core,
 }
 
 /*
+ * Frame blending switched in game: gpSP reads the option again after the
+ * next retro_run and then hands out its mixed buffer instead of the
+ * rendered one; mGBA keeps the setting without a change.
+ */
+static void blend_live(const char *rom)
+{
+	const uint16_t *f0, *f1, *f2;
+	char err[128];
+	int w, h, p;
+
+	rom_settings.blend = 0;
+	if (core_load(rom, CORE_GPSP, err, sizeof(err))) {
+		CHECK(0, "blend: %s", err);
+		return;
+	}
+	run_frames(2);
+	f0 = core_frame(&w, &h, &p);
+	rom_settings.blend = 1;
+	core_options_changed();
+	run_frames(2);  /* the first run reads the option, the next mixes */
+	f1 = core_frame(&w, &h, &p);
+	rom_settings.blend = 0;
+	core_options_changed();
+	run_frames(2);
+	f2 = core_frame(&w, &h, &p);
+	CHECK(f0 && f1 && f2 && f1 != f0 && f2 != f1,
+	      "blend live: frames %p %p %p", (const void *)f0, (const void *)f1,
+	      (const void *)f2);
+	core_unload();
+	rom_settings.blend = 1;
+	if (core_load(rom, CORE_MGBA, err, sizeof(err))) {
+		CHECK(0, "blend: %s", err);
+		return;
+	}
+	run_frames(2);
+	core_options_changed();
+	run_frames(2);
+	core_unload();
+	rom_settings.blend = 0;
+}
+
+/*
  * mGBA -> gpSP -> mGBA in one process on the same .sav, then a RetroArch
- * .srm picked up by gpSP when there is no .sav (and left untouched).
+ * .srm picked up by gpSP when there is no .sav (and left untouched), then
+ * frame blending switched live.
  */
 int selftest_core_switch(const char *data, long frames)
 {
@@ -1463,6 +1543,7 @@ int selftest_core_switch(const char *data, long frames)
 	switch_round(rom, sav, CORE_GPSP, 4, frames);
 	CHECK(read_file(srm, buf, sizeof(buf)) == sizeof(buf) && buf[0] == 3,
 	      ".srm left alone");
+	blend_live(rom);
 	log_msg("core switch: %s (%d failures)", failures ? "FAILED" : "passed",
 		failures);
 	return failures ? 1 : 0;

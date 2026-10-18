@@ -72,6 +72,7 @@ static struct {
 	unsigned bad_cmds;
 	unsigned info_lines, warn_lines, dropped_lines;
 	char options[512];   /* answered core options, logged after load */
+	int options_changed; /* for RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE */
 } c;
 
 /* ----------------------------------------------------------- callbacks */
@@ -107,7 +108,10 @@ static void core_log(enum retro_log_level level, const char *fmt, ...)
 /*
  * Core options. Keys are prefixed per core, so one table serves both;
  * keys not listed get the core's default. The BIOS options depend on
- * whether <data>/bios/gba_bios.bin exists.
+ * whether <data>/bios/gba_bios.bin exists, gpSP's frame mixing (a 50:50
+ * mix of this and the previous frame, for games that rely on the GBA
+ * LCD's ghosting) on the game's blend setting. mGBA's libretro port has
+ * no frame blending.
  */
 static const char *const options[][2] = {
 	{ "mgba_skip_bios", "OFF" },
@@ -124,7 +128,6 @@ static const char *const options[][2] = {
 	{ "gpsp_sound_rate", "32768" },
 	{ "gpsp_frameskip", "disabled" },
 	{ "gpsp_color_correction", "disabled" },  /* ours, see fx.c */
-	{ "gpsp_frame_mixing", "disabled" },
 };
 
 static const char *get_variable(const char *key)
@@ -136,6 +139,8 @@ static const char *get_variable(const char *key)
 		v = c.have_bios ? "ON" : "OFF";
 	else if (!strcmp(key, "gpsp_bios"))
 		v = c.have_bios ? "auto" : "builtin";
+	else if (!strcmp(key, "gpsp_frame_mixing"))
+		v = rom_settings.blend ? "enabled" : "disabled";
 	for (size_t i = 0; !v && i < ARRAY_SIZE(options); i++)
 		if (!strcmp(key, options[i][0]))
 			v = options[i][1];
@@ -145,6 +150,8 @@ static const char *get_variable(const char *key)
 	    n + strlen(key) + 16 < sizeof(c.options))
 		snprintf(c.options + n, sizeof(c.options) - n, "%s%s=%s",
 			 n ? " " : "", key, v ? v : "(default)");
+	if (c.loaded && !strcmp(key, "gpsp_frame_mixing"))
+		log_msg("core: %s=%s, applied live", key, v);
 	return v;
 }
 
@@ -172,7 +179,10 @@ static bool environment(unsigned cmd, void *data)
 		return v->value != NULL;
 	}
 	case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
-		*(bool *)data = false;
+		/* gpSP asks after every retro_run and then reads all its
+		 * options again; mGBA asks too and finds nothing it knows. */
+		*(bool *)data = c.options_changed;
+		c.options_changed = 0;
 		return true;
 	case RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION:
 		*(unsigned *)data = 0;  /* legacy SET_VARIABLES */
@@ -469,6 +479,7 @@ int core_load(const char *rom_path, int core, char *err, size_t errlen)
 	snprintf(c.save_path, sizeof(c.save_path), "%s/saves/%.*s.sav",
 		 fe_data_dir, (int)blen, base);
 	c.options[0] = 0;
+	c.options_changed = 0;
 	c.in_game = 0;
 	c.info_lines = c.warn_lines = c.dropped_lines = 0;
 	c.bad_cmds = 0;
@@ -573,6 +584,18 @@ void core_run(uint32_t buttons)
 		return;
 	c.buttons = buttons;
 	c.api->run();
+}
+
+void core_options_changed(void)
+{
+	if (!c.loaded)
+		return;
+	if (c.info.core == CORE_GPSP)
+		c.options_changed = 1;
+	else
+		log_msg("core: blend %s kept for gpSP, %s has no frame blending",
+			rom_settings.blend ? "on" : "off",
+			core_labels[c.info.core]);
 }
 
 const uint16_t *core_frame(int *w, int *h, int *pitch_px)
