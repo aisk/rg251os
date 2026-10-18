@@ -202,14 +202,19 @@ DDR blob 在两边是同一个文件，legacy 能启动，说明 DDR 初始化�
 
 ## 待确认
 
+已经确认的：Mali 和 VPU 的电源域在不加载驱动时会断电（genpd 显示 off-0）。按 10mΩ 配的库仑计能读出合理的电量和电压。
+
+还没确认的：
+
 - RG351P 和 RG351M 的屏幕是否完全一致，早期批次 RG351P 有没有换过屏
 - 主线 U-Boot 为什么停在 SPL 之前或之中，开源 TPL DDR 初始化能否工作
-- 到底有没有电流检测电阻（主线 commit 说没有，BSP DTS 写的是 10mΩ），这决定了电量能不能用库仑计来算
-- 主线内核上休眠唤醒后 dwc2 和 USB 手柄能不能正常恢复
+- 电流读数是否准确（电量和电压正常，电流没有专门核对）
+- 主线内核上深度睡眠能否正常进入和恢复，包括 dwc2 和 USB 手柄
 - PX30 VOP 是否支持硬件旋转
-- 不加载 GPU 驱动时 Mali 的电源域是否真的会被关掉
 - RG351P 主板上 UART2 测试点的位置
 - 机内 USB 手柄的具体芯片和枚举耗时
+
+待实机验证的功能和已知问题见 [roadmap.md](roadmap.md)。
 
 ## 当前状态
 
@@ -232,7 +237,9 @@ GBA 分区（下面写作 `<data>`）里的文件
 | `saves/<rom>.sav` | 存档，两个核心通用；没有 `.sav` 时会读同名的 RetroArch `.srm`，之后写回 `.sav` |
 | `bios/gba_bios.bin` | 可选的 GBA BIOS。没有的话 gpSP 用内置 BIOS，mGBA 用 HLE |
 | `config/settings.txt` | 全局设置：音量、亮度、LCD 网格、CPU 模式、音频模式、调试日志 |
-| `config/roms/<rom>.txt` | 单个游戏的设置：色彩校正、核心、学到的起始频率 |
+| `config/roms/<rom>.txt` | 单个游戏的设置：`color`（auto、off、gba、gba-light、sp101）、`core`、`blend`（gpSP 的帧混合）、学到的起始频率 `cpu_start`。只写和默认值不同的项 |
+| `config/romdb-cache.txt` | ROM 识别时算过的 CRC32 缓存，按文件名、大小和 mtime |
+| `mixer.txt` | 可选，开机时应用的 ALSA mixer 设置，行前可加 `speaker:` 或 `headphones:` |
 | `log/boot-NNNN/` | 每次开机一个目录，保留最近 20 个，有 `frontend.txt` 和各个时间点的 dmesg；`log/LATEST.txt` 指向最新的一个 |
 | `log/perf.csv` | 每局游戏的性能、功耗和音频统计，跨开机追加 |
 
@@ -246,13 +253,17 @@ GBA 分区（下面写作 `<data>`）里的文件
 - 音频默认 adaptive，48kHz 非阻塞写入加动态速率控制，跟屏幕的 60.02Hz 对齐。`audio=simple` 是固定比例加阻塞写入的简单路径。
 - CPU 调频用 schedutil，游戏中前端根据帧耗时通过 uclamp 设频率下限（`cpu=adaptive`，也可以选 `max` 或固定频率）。
 - 调试日志默认关闭。打开后（设置里的 debug，或 `debug=on`）会多记周期性的 perf 行、mixer、`/proc/asound`、ALSA xrun 报告、内核日志和休眠调试信息。这些依赖内核的 `debug.config`。
+- ROM 列表显示 No-Intro 标准名称（`romdb.c`，数据由 `make romdb` 从 libretro-database 的固定 commit 生成到 `romdb_data.c`）。先按 ROM 头的游戏代码查，同一代码有多条时用 CRC32 区分，代码对上但 CRC 对不上的名字后面加 `*`，查不到显示文件名。
+- 色彩校正默认 `auto`，按首次发行年份选：2004 年及以前 `gba`，2005 年以后 `sp101`，年份未知 `off`。
+- Frame blend（gpSP 的 50:50 帧混合）默认关，按游戏在菜单里开，切换立即生效。mGBA 的 libretro 接口没有这个功能。
+- LCD 网格效果每次开机随机选 2x2 里的一个像素当亮点。
 - 按键：ROM 列表里按 SELECT 进设置，游戏中 SELECT+START 打开菜单。
 - 电源键短按休眠，先尝试挂起到内存，内核挂不起来就退回浅睡眠（关背光和屏幕，CPU 降到最低频率），再按一次唤醒。长按 2 秒保存并关机。
 - 指示灯：内核阶段是 heartbeat 闪烁，前端启动时变红，第一帧出来后变绿，低电量时绿灯里隔 2 秒闪一下红，出错时红绿交替。
 
 ### 以后
 
-开机速度还没有优化。接上 UART2 串口后，再回头查主线 U-Boot。
+见 [roadmap.md](roadmap.md)。
 
 ## 参考资料
 
