@@ -49,3 +49,20 @@
 	linux,default-trigger = "heartbeat";
 	panic-indicator;
 };
+
+/*
+ * No GPU or video codec driver is built (frames are rendered by the CPU).
+ * Leaving the nodes enabled keeps their power domains on forever, since
+ * the PM domain driver waits in sync_state() for consumers that never bind.
+ */
+&gpu {
+	status = "disabled";
+};
+
+&vpu {
+	status = "disabled";
+};
+
+&vpu_mmu {
+	status = "disabled";
+};
