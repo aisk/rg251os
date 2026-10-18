@@ -95,7 +95,11 @@ GBA 原生分辨率 240×160，正好按 2 倍整数放大铺满 480×320 的屏
 
 已确定使用主线内核，dtb 以主线的 `rk3326-anbernic-rg351m.dts` 为基础，再按 RG351P 的实际情况修改（比如关掉 sfc 和 sdio）。
 
-### U-Boot（倾向主线，待实机验证）
+### U-Boot（暂用 legacy，主线待查）
+
+实机结果（2026-10-18）：主线 U-Boot v2026.10 在 RG351P 上没有任何反应，换 OGA 设备树、换 rkbin BL31 都一样，bootcmd 里的震动和指示灯都没出现，说明 U-Boot proper 没有跑起来。ROCKNIX PR #2120 提到主线 U-Boot 在 RK3326 上处理 SD 卡的 vmmc/vqmmc 有问题，部分卡初始化失败，这和现象吻合，修复已经加进 `rk3326-rg351p-u-boot.dtsi`，还没上机验证。
+
+目前默认用 ROCKNIX 的 legacy U-Boot 2017.09（`external/u-boot-legacy`，`BOOTLOADER=legacy`），从源码编译，配合 rkbin 的 DDR、miniloader 和 BL31，已经在实机上引导主线内核成功。它从 p1 读 `boot.ini`，再用 `sysboot` 转到 `extlinux.conf`。`BOOTLOADER=mainline` 保留，等有串口后继续查。
 
 主线 U-Boot 的现状
 
@@ -157,22 +161,33 @@ GBA 原生分辨率 240×160，正好按 2 倍整数放大铺满 480×320 的屏
 - 手柄挂在 USB 上，枚举要几百毫秒，可以和模拟器启动并行进行。
 - 模拟器：RK3326 跑 gpSP 绰绰有余（有 ARM64 动态重编译），跑 mGBA 也基本能全速，不需要 GPU 也行。
 
+## 实机验证结果
+
+2026-10-18，legacy U-Boot 加主线 6.18.57 内核加 hwtest：
+
+- 显示正常，DSI 面板、背光、fbcon 都工作，`fbcon=rotate:3` 和 hwtest 的 270° 旋转方向正确
+- VOP 支持 RGB565 扫描输出
+- 屏幕实际刷新率 60.02Hz
+- 内核启动到 hwtest 出第一帧约 2014ms（CLOCK_BOOTTIME，不含 bootloader）
+- 机内 USB 手柄在 dwc2 上工作，按键和摇杆都有事件
+- 按电源键能真正断电，`rk817` 的 `system-power-controller` 有效
+- 指示灯：GPIO2_B5 拉高红、拉低绿，上电默认是绿色
+
 ## 待确认
 
 - RG351P 和 RG351M 的屏幕是否完全一致，早期批次 RG351P 有没有换过屏
 - RG351P 有没有 SPI flash（BSP DTS 里是关掉的，大概率没有）
-- 主线 U-Boot 的开源 TPL DDR 初始化能不能在 RG351P 上正常工作
+- 主线 U-Boot 去掉 SD 卡供电后能否启动，开源 TPL DDR 初始化能否工作
 - 到底有没有电流检测电阻（主线 commit 说没有，BSP DTS 写的是 10mΩ），这决定了电量能不能用库仑计来算
 - 主线内核上休眠唤醒后 dwc2 和 USB 手柄能不能正常恢复
-- PX30 VOP 是否支持 RGB565 扫描输出，是否支持硬件旋转
+- PX30 VOP 是否支持硬件旋转
 - 不加载 GPU 驱动时 Mali 的电源域是否真的会被关掉
-- 屏幕的实际刷新率
 - RG351P 主板上 UART2 测试点的位置
 - 机内 USB 手柄的具体芯片和枚举耗时
 
 ## 下一步
 
-`make` 生成 `build/sdcard.img`，烧卡上机运行 `hwtest`，确认显示方向、刷新率、像素格式、手柄输入和关机断电。之后接上 UART2 串口，量一下各个启动阶段的耗时。
+根据 dmesg 分析内核启动耗时，压缩开机时间。之后选定模拟器核心，开始写前端。接上 UART2 串口后再回头查主线 U-Boot。
 
 ## 参考资料
 
