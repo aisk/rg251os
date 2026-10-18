@@ -1,0 +1,33 @@
+#ifndef DRAW_H
+#define DRAW_H
+
+#include <stdint.h>
+
+#define RGB(r, g, b) ((uint16_t)((((r) & 0xf8) << 8) | (((g) & 0xfc) << 3) | ((b) >> 3)))
+
+#define COL_BG     RGB(0x10, 0x18, 0x28)
+#define COL_FG     RGB(0xff, 0xff, 0xff)
+#define COL_DIM    RGB(0x90, 0x98, 0xa8)
+#define COL_HI     RGB(0xff, 0xd0, 0x40)
+#define COL_SEL    RGB(0x30, 0x50, 0x90)
+#define COL_ERR    RGB(0xff, 0x50, 0x50)
+#define COL_BOX    RGB(0x18, 0x20, 0x38)
+
+/* A logical (landscape) RGB565 canvas for menus. */
+struct canvas {
+	uint16_t *px;
+	int w, h;  /* pitch == w */
+};
+
+void draw_fill(struct canvas *c, int x, int y, int w, int h, uint16_t col);
+void draw_frame(struct canvas *c, int x, int y, int w, int h, uint16_t col);
+/* 8x8 font scaled by `scale`; returns the x after the text. */
+int draw_text(struct canvas *c, int x, int y, int scale, uint16_t col,
+	      const char *s);
+int draw_textf(struct canvas *c, int x, int y, int scale, uint16_t col,
+	       const char *fmt, ...) __attribute__((format(printf, 6, 7)));
+/* Scale an image 2x into the canvas, centered and darkened. */
+void draw_image_dim(struct canvas *c, const uint16_t *src, int spitch,
+		    int sw, int sh);
+
+#endif
