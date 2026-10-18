@@ -1,7 +1,9 @@
 /*
  * Menus on the 480x320 logical canvas, 8x8 font at 2x (30 columns).
  *
- * ROM list: up/down (left/right page), A or START starts, SELECT opens
+ * ROM list: the ROMs by their No-Intro names (romdb.c; the file name
+ * when unknown, " *" after the name of a modified ROM, long names cut
+ * with "~"), up/down (left/right page), A or START starts, SELECT opens
  * the global settings (Volume, Brightness, CPU, LCD grid, Grid darkness,
  * Dot boost, Audio mode Simple/Adaptive, Audio test: A plays a 3 s
  * 440 Hz tone through the game's audio path, and Debug log on/off, see
@@ -18,7 +20,8 @@
  * so with mGBA the row reads "gpSP only" and cannot be changed, the
  * setting is kept for gpSP. The in-game Settings screen shows the game
  * with the effects applied (live preview) under a panel with Color (this
- * game), LCD grid, Grid darkness, Dot boost and Debug log. In menus,
+ * game: Auto, showing what it resolved to as "Auto (GBA)", Off, GBA, GBA
+ * light or SP101), LCD grid, Grid darkness, Dot boost and Debug log. In menus,
  * up/down select, left/right change a value, A activates, B goes back.
  * The battery level is shown in the ROM list header and above the
  * in-game menus.
@@ -50,7 +53,7 @@ static char message[96];
 
 static struct {
 	int sel;
-	char name[64];
+	char name[ROMDB_NAME_MAX + 2];
 } ig;
 
 uint32_t ui_repeat(uint32_t held, int64_t now)
@@ -168,8 +171,26 @@ void romlist_menu_enter(void)
 		sel = roms.count ? roms.count - 1 : 0;
 }
 
+/* Missing CRCs, 8 ms per frame; the selection stays on its ROM when the
+ * list is sorted again. */
+static void romlist_work(void)
+{
+	const char *cur = roms.count ? roms.roms[sel].file : NULL;
+
+	if (!roms.pending || !romlist_step(&roms, 8000000))
+		return;
+	for (int i = 0; i < roms.count; i++)
+		if (roms.roms[i].file == cur)
+			sel = i;
+	if (sel < top)
+		top = sel;
+	if (sel >= top + LIST_ROWS)
+		top = sel - LIST_ROWS + 1;
+}
+
 int romlist_menu_update(uint32_t pressed, char *path, size_t size)
 {
+	romlist_work();
 	if (!roms.count)
 		pressed &= JOY_BIT(SELECT);
 	if (pressed & JOY_BIT(UP))
@@ -189,13 +210,15 @@ int romlist_menu_update(uint32_t pressed, char *path, size_t size)
 		return UI_SETTINGS;
 	}
 	if (pressed & (JOY_BIT(A) | JOY_BIT(START))) {
-		snprintf(path, size, "%s/roms/%s", fe_data_dir, roms.names[sel]);
+		snprintf(path, size, "%s/roms/%s", fe_data_dir,
+			 roms.roms[sel].file);
 		message[0] = 0;
 		return UI_START_ROM;
 	}
 	return UI_NONE;
 }
 
+/* A ROM name in cols columns: cut with "~", a modified ROM's " *" kept. */
 static void draw_name(struct canvas *c, int x, int y, uint16_t col,
 		      const char *name, int cols)
 {
@@ -204,7 +227,11 @@ static void draw_name(struct canvas *c, int x, int y, uint16_t col,
 
 	if (n > 4 && !strcasecmp(name + n - 4, ".gba"))
 		n -= 4;
-	if ((int)n > cols) {
+	if (cols > (int)sizeof(buf) - 1)
+		cols = sizeof(buf) - 1;
+	if ((int)n > cols && n > 2 && !strcmp(name + n - 2, " *")) {
+		snprintf(buf, sizeof(buf), "%.*s~*", cols - 2, name);
+	} else if ((int)n > cols) {
 		snprintf(buf, sizeof(buf), "%.*s~", cols - 1, name);
 	} else {
 		snprintf(buf, sizeof(buf), "%.*s", (int)n, name);
@@ -234,7 +261,7 @@ void romlist_menu_draw(struct canvas *c)
 		if (top + i == sel)
 			draw_fill(c, 0, y - 1, c->w, ROW_H, COL_SEL);
 		draw_name(c, 8, y, top + i == sel ? COL_FG : COL_DIM,
-			  roms.names[top + i], COLS);
+			  roms.roms[top + i].id.title, COLS);
 	}
 	if (message[0])
 		draw_text(c, 8, c->h - 18, 2, COL_ERR, message);
@@ -504,7 +531,7 @@ static void settings_value(int item, char *buf, size_t size)
 		cpuctl_mode_label(settings.cpu, buf, size);
 		break;
 	case SI_COLOR:
-		snprintf(buf, size, "%s", color_mode_labels[rom_settings.color]);
+		rom_color_label(buf, size);
 		break;
 	case SI_GRID:
 		snprintf(buf, size, "%s", settings.grid ? "On" : "Off");
@@ -545,10 +572,13 @@ static void settings_rows(struct canvas *c, int x, int y, int w, int row_h)
 		if (i == st.sel)
 			draw_fill(c, x + 4, y - 4, w - 8, row_h, COL_SEL);
 		draw_text(c, x + 12, y, 2, col, si_names[item]);
-		if (item == SI_COLOR)
+		settings_value(item, v, sizeof(v));
+		/* "(game)" unless a long value like "Auto (GBA light)" needs
+		 * the room. */
+		if (item == SI_COLOR && 12 + 16 * 12 <=
+		    w - 12 - 16 * ((int)strlen(v) + (i == st.sel ? 2 : 1)))
 			draw_text(c, x + 12 + 16 * 6, y, 2,
 				  i == st.sel ? COL_DIM : COL_OFF, "(game)");
-		settings_value(item, v, sizeof(v));
 		if (v[0]) {
 			if (i == st.sel)
 				draw_textf(c, x + w - 12 - 16 * ((int)strlen(v) + 2),

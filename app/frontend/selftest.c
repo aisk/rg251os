@@ -254,7 +254,7 @@ static void test_fx_tables(void)
 	CHECK(dark[FX_INDEX(0xffdf)] == (8 << 11 | 16 << 5 | 8),
 	      "dim 75%% of white: %04x", dark[FX_INDEX(0xffdf)]);
 
-	for (int mode = COLOR_GBA; mode < COLOR_COUNT; mode++) {
+	for (int mode = COLOR_GBA; mode < COLOR_MODES; mode++) {
 		int prev = -1, mono = 1;
 
 		bad = 0;
@@ -414,7 +414,9 @@ static void test_settings(const char *base)
 	      !memcmp(&t, &settings_defaults, sizeof(t)), "garbage");
 
 	rom_settings_defaults("x.gba", &r);
-	CHECK(r.color == COLOR_OFF, "rom default");
+	CHECK(r.color == COLOR_AUTO, "rom default auto");
+	CHECK(rom_settings_parse(&r, "color=Auto\n") == 1 && r.color == COLOR_AUTO,
+	      "color=auto parse");
 	CHECK(rom_settings_parse(&r, "color=GBA-light\r\n") == 1 &&
 	      r.color == COLOR_GBA_LIGHT, "rom parse");
 	CHECK(rom_settings_parse(&r, "color=7\ncolor=sepia\n") == 0 &&
@@ -456,17 +458,27 @@ static void test_settings(const char *base)
 	      "corrupt config file: defaults plus what parses");
 
 	rom_settings_load("Some Game (USA).gba");
-	CHECK(rom_settings.color == COLOR_OFF, "rom without file");
+	CHECK(rom_settings.color == COLOR_AUTO, "rom without file");
+	CHECK(rom_settings_color() == COLOR_OFF, "auto before resolving: off");
+	rom_settings_set_auto(COLOR_GBA, "test");
+	CHECK(rom_settings_color() == COLOR_GBA, "auto resolved");
+	rom_color_label(buf, sizeof(buf));
+	CHECK(!strcmp(buf, "Auto (GBA)"), "auto label: %s", buf);
 	rom_settings.color = COLOR_SP101;
 	rom_settings_save();
 	snprintf(path, sizeof(path), "%s/config/roms/Some Game (USA).txt", base);
 	CHECK(access(path, F_OK) == 0, "per ROM file name");
 	rom_settings_load(NULL);
-	CHECK(rom_settings.color == COLOR_OFF, "no game");
+	CHECK(rom_settings.color == COLOR_AUTO && rom_settings_color() == COLOR_OFF,
+	      "no game");
 	rom_settings_load("Some Game (USA).gba");
 	CHECK(rom_settings.color == COLOR_SP101, "per ROM round trip");
+	rom_settings_set_auto(COLOR_GBA, "test");
+	CHECK(rom_settings_color() == COLOR_SP101, "explicit mode beats auto");
+	rom_color_label(buf, sizeof(buf));
+	CHECK(!strcmp(buf, "SP101"), "explicit label: %s", buf);
 	rom_settings_load("Other.gba");
-	CHECK(rom_settings.color == COLOR_OFF, "other ROM unaffected");
+	CHECK(rom_settings.color == COLOR_AUTO, "other ROM unaffected");
 	/* A learned cpu_start alone does not pin the color default. */
 	rom_settings.cpu_start = 816;
 	rom_settings_save();
@@ -487,6 +499,19 @@ static void test_settings(const char *base)
 	read_file(path, buf, sizeof(buf) - 1);
 	CHECK(strstr(buf, "color=off") != NULL, "color in the file stays: %s",
 	      buf);
+	/* An explicit off from before auto existed stays off. */
+	rom_settings_load("Other.gba");
+	rom_settings_set_auto(COLOR_GBA, "test");
+	CHECK(rom_settings.color == COLOR_OFF && rom_settings_color() == COLOR_OFF,
+	      "old color=off kept");
+	/* Back to auto: written as auto since the key is in the file. */
+	rom_settings.color = COLOR_AUTO;
+	rom_settings_save();
+	memset(buf, 0, sizeof(buf));
+	read_file(path, buf, sizeof(buf) - 1);
+	CHECK(strstr(buf, "color=auto\n") != NULL, "color=auto written: %s", buf);
+	rom_settings.color = COLOR_OFF;
+	rom_settings_save();
 	CHECK(!strstr(buf, "core="), "default core not written: %s", buf);
 	rom_settings.core = CORE_MGBA;
 	rom_settings_save();
@@ -688,15 +713,347 @@ static void test_romlist(const char *base)
 		touch(dir, files[i]);
 	CHECK(romlist_scan(&rl, dir) == 3, "romlist found %d", rl.count);
 	if (rl.count == 3) {
-		CHECK(!strcmp(rl.names[0], "A.GBA"), "order 0: %s", rl.names[0]);
-		CHECK(!strcmp(rl.names[1], "b.gba"), "order 1: %s", rl.names[1]);
-		CHECK(!strcmp(rl.names[2], "z.Gba"), "order 2: %s", rl.names[2]);
+		CHECK(!strcmp(rl.roms[0].file, "A.GBA"), "order 0: %s", rl.roms[0].file);
+		CHECK(!strcmp(rl.roms[1].file, "b.gba"), "order 1: %s", rl.roms[1].file);
+		CHECK(!strcmp(rl.roms[2].file, "z.Gba"), "order 2: %s", rl.roms[2].file);
+		CHECK(!strcmp(rl.roms[0].id.title, "A") &&
+		      rl.roms[0].id.how == ROMDB_UNKNOWN, "empty file: %s",
+		      rl.roms[0].id.title);
 	}
 	romlist_free(&rl);
 	snprintf(dir, sizeof(dir), "%s/empty-roms", base);
 	mkdir(dir, 0755);
 	CHECK(romlist_scan(&rl, dir) == 0, "empty dir");
 	CHECK(romlist_scan(&rl, "/nonexistent/roms") < 0, "missing dir");
+}
+
+/* ------------------------------------------------------------- romdb */
+
+static uint32_t crc_tab[256];
+
+/* Four bytes at p (the end of a buffer of len bytes, CRC so far crc0)
+ * that make the CRC of the whole target: the reflected CRC's steps
+ * backwards (the top byte of each table entry is unique). */
+static void crc_force(uint8_t *p, uint32_t crc0, uint32_t target)
+{
+	uint32_t s = ~target, st = ~crc0;
+	int k[4];
+
+	if (!crc_tab[1])
+		for (uint32_t i = 0; i < 256; i++) {
+			uint32_t c = i;
+
+			for (int j = 0; j < 8; j++)
+				c = c & 1 ? 0xedb88320u ^ (c >> 1) : c >> 1;
+			crc_tab[i] = c;
+		}
+	for (int i = 3; i >= 0; i--) {
+		for (k[i] = 0; k[i] < 256; k[i]++)
+			if (crc_tab[k[i]] >> 24 == s >> 24)
+				break;
+		s = (s ^ crc_tab[k[i]]) << 8;
+	}
+	for (int i = 0; i < 4; i++) {
+		p[i] = (uint8_t)(k[i] ^ (st & 0xff));
+		st = crc_tab[k[i]] ^ (st >> 8);
+	}
+}
+
+static void make_header(uint8_t *rom, const char *title, const char *code,
+			int version)
+{
+	memset(rom, 0, 0xc0);
+	memcpy(rom + 0xa0, title, strlen(title) < 12 ? strlen(title) : 12);
+	if (code)
+		memcpy(rom + 0xac, code, 4);
+	memcpy(rom + 0xb0, "01", 2);
+	rom[0xb2] = 0x96;
+	rom[0xbc] = (uint8_t)version;
+}
+
+static const struct romdb_entry *entry_named(const char *name)
+{
+	for (int i = 0; i < romdb_count; i++)
+		if (!strcmp(romdb_name(&romdb_entries[i]), name))
+			return &romdb_entries[i];
+	return NULL;
+}
+
+/* Entries of a code with this version. */
+static int code_count(const char *code, int version)
+{
+	int n = 0;
+
+	for (int i = 0; i < romdb_count; i++)
+		n += !strcmp(romdb_entries[i].code, code) &&
+		     romdb_entries[i].version == version;
+	return n;
+}
+
+/* A dummy ROM: header, then bytes so that the file's CRC is crc (if not
+ * 0) or not any entry's. */
+static void write_rom(const char *path, const char *code, int version,
+		      uint32_t crc, uint32_t salt)
+{
+	static uint8_t rom[4096];
+
+	make_header(rom, "DUMMY", code, version);
+	memcpy(rom + 0x100, &salt, 4);
+	memset(rom + 0x104, 0, sizeof(rom) - 0x104);
+	if (crc)
+		crc_force(rom + sizeof(rom) - 4, romdb_crc32(0, rom, sizeof(rom) - 4),
+			  crc);
+	CHECK(write_file_atomic(path, rom, sizeof(rom)) == 0, "write %s", path);
+}
+
+static void test_romdb(const char *base)
+{
+	static const struct color_exception ex[] = {
+		{ "BJB", COLOR_GBA_LIGHT, "test" },
+	};
+	const struct romdb_entry *e, *vc, *rev;
+	struct gba_header h;
+	struct rom_id id;
+	uint8_t hdr[0xc0];
+	uint32_t crc, bad = 0x12345678;
+	char why[96], dir[300], path[400];
+	struct romlist rl = { 0 };
+	int64_t t0, t_scan, t_crc, t_cached;
+	int n_code = 0, n_crc = 0, n_mod = 0, n_unk = 0, steps = 0, sorted = 1;
+
+	/* Header */
+	make_header(hdr, "POKEMON RUBY", "AXVE", 1);
+	CHECK(romdb_parse_header(hdr, sizeof(hdr), &h) == 0, "header");
+	CHECK(!strcmp(h.title, "POKEMON RUBY") && !strcmp(h.code, "AXVE") &&
+	      !strcmp(h.maker, "01") && h.version == 1, "header fields: %s %s %s %d",
+	      h.title, h.code, h.maker, h.version);
+	make_header(hdr, "SHORT", "AB c", 0);
+	CHECK(romdb_parse_header(hdr, sizeof(hdr), &h) == 0 &&
+	      !strcmp(h.title, "SHORT") && !h.code[0], "bad code: %s", h.code);
+	hdr[0xb2] = 0;
+	CHECK(romdb_parse_header(hdr, sizeof(hdr), &h) < 0 && !h.code[0],
+	      "no fixed byte");
+	CHECK(romdb_parse_header(hdr, 0x80, &h) < 0, "short header");
+
+	/* CRC32 */
+	CHECK(romdb_crc32(0, "123456789", 9) == 0xcbf43926, "crc32 check value");
+	crc = romdb_crc32(romdb_crc32(0, "12345", 5), "6789", 4);
+	CHECK(crc == 0xcbf43926, "crc32 incremental: %08x", crc);
+	CHECK(romdb_crc32(0, "x", 0) == 0, "crc32 empty");
+
+	/* The table: sorted for code_range, names ASCII. */
+	CHECK(romdb_count > 3000, "database entries %d", romdb_count);
+	for (int i = 1; i < romdb_count; i++)
+		if (strcmp(romdb_entries[i - 1].code, romdb_entries[i].code) > 0)
+			sorted = 0;
+	CHECK(sorted, "database not sorted by code");
+
+	/* By code: a single entry. */
+	e = entry_named("007 - Everything or Nothing (Japan)");
+	CHECK(e && !strcmp(e->code, "BJBJ") && romdb_year(e) == 2004,
+	      "BJBJ entry");
+	strcpy(h.code, "BJBJ");
+	h.version = 0;
+	romdb_match("x.gba", &h, 8 << 20, NULL, &id);
+	CHECK(id.how == ROMDB_CODE && !strcmp(id.title,
+	      "007 - Everything or Nothing (Japan)"), "by code: %s", id.title);
+	CHECK(romdb_auto_color(&id, why, sizeof(why)) == COLOR_GBA,
+	      "auto 2004: gba (%s)", why);
+	CHECK(strstr(why, "2004") != NULL, "auto reason: %s", why);
+	CHECK(romdb_auto_color_with(&id, ex, 1, why, sizeof(why)) ==
+	      COLOR_GBA_LIGHT && !strcmp(why, "exception: test"), "exception: %s",
+	      why);
+
+	h.version = 2;
+	romdb_match("x.gba", &h, 8 << 20, NULL, &id);
+	CHECK(id.how == ROMDB_PENDING, "single entry, other version: pending");
+	romdb_match("x.gba", &h, 8 << 20, &bad, &id);
+	CHECK(id.how == ROMDB_MODIFIED && !strcmp(id.title,
+	      "007 - Everything or Nothing (Japan) *"), "other version: %s",
+	      id.title);
+
+	/* Revisions: the version picks Rev 1; the original and its Virtual
+	 * Console build share code and version and need the CRC. */
+	e = entry_named("Advance Wars (USA)");
+	rev = entry_named("Advance Wars (USA) (Rev 1)");
+	vc = entry_named("Advance Wars (USA) (Virtual Console)");
+	CHECK(e && rev && vc && rev->version == 1 && code_count("AWRE", 0) == 2,
+	      "AWRE entries");
+	if (e && rev && vc) {
+		strcpy(h.code, "AWRE");
+		h.version = 1;
+		romdb_match("aw.gba", &h, rev->size, NULL, &id);
+		CHECK(id.how == ROMDB_CODE && id.e == rev, "rev 1 by version: %s",
+		      id.title);
+		h.version = 0;
+		romdb_match("aw.gba", &h, e->size, NULL, &id);
+		CHECK(id.how == ROMDB_PENDING && !strcmp(id.title,
+		      "Advance Wars (USA)"), "pending: %s", id.title);
+		romdb_match("aw.gba", &h, e->size, &vc->crc, &id);
+		CHECK(id.how == ROMDB_CRC && id.e == vc, "by crc: %s", id.title);
+		romdb_match("aw.gba", &h, e->size, &bad, &id);
+		CHECK(id.how == ROMDB_MODIFIED && !strcmp(id.title,
+		      "Advance Wars (USA) *"), "modified: %s", id.title);
+		/* A version No-Intro does not list needs the CRC. */
+		h.version = 7;
+		romdb_match("aw.gba", &h, e->size, NULL, &id);
+		CHECK(id.how == ROMDB_PENDING, "unlisted version: pending");
+		romdb_match("aw.gba", &h, e->size, &bad, &id);
+		CHECK(id.how == ROMDB_MODIFIED, "unlisted version: modified");
+		h.version = 0;
+		/* Rev 1's CRC with a version 0 header is still that ROM. */
+		romdb_match("aw.gba", &h, e->size, &rev->crc, &id);
+		CHECK(id.how == ROMDB_CRC && id.e == rev, "crc over version");
+		CHECK(romdb_auto_color(&id, why, sizeof(why)) == COLOR_GBA,
+		      "Advance Wars 2001: %s", why);
+	}
+	/* Regions sharing the start of a name: the common words. */
+	strcpy(h.code, "AAMJ");
+	h.version = 0;
+	romdb_match("cotm.gba", &h, 8 << 20, NULL, &id);
+	CHECK(id.how == ROMDB_PENDING && !strcmp(id.title,
+	      "Akumajou Dracula - Circle of the Moon"), "common title: %s",
+	      id.title);
+
+	/* Unknown code, and one only the CRC can find. */
+	strcpy(h.code, "ZZZZ");
+	romdb_match("My Hack.gba", &h, 1234, NULL, &id);
+	CHECK(id.how == ROMDB_UNKNOWN && !strcmp(id.title, "My Hack") && !id.e,
+	      "unknown: %s", id.title);
+	CHECK(romdb_auto_color(&id, why, sizeof(why)) == COLOR_OFF &&
+	      strstr(why, "unknown"), "auto unknown: %s", why);
+	e = entry_named("Apotris (World) (v4.1.0)");
+	CHECK(e && !e->code[0], "Apotris entry");
+	if (e) {
+		romdb_match("apotris.gba", &h, e->size, NULL, &id);
+		CHECK(id.how == ROMDB_PENDING, "codeless by size: pending");
+		romdb_match("apotris.gba", &h, e->size, &e->crc, &id);
+		CHECK(id.how == ROMDB_CRC && id.e == e, "codeless by crc");
+		romdb_match("apotris.gba", &h, e->size, &bad, &id);
+		CHECK(id.how == ROMDB_UNKNOWN && !strcmp(id.title, "apotris"),
+		      "codeless, other crc: %s", id.title);
+	}
+	/* A 2005+ title gets SP101. */
+	for (int i = 0; i < romdb_count; i++)
+		if (romdb_year(&romdb_entries[i]) >= 2006 &&
+		    romdb_entries[i].code[0] &&
+		    code_count(romdb_entries[i].code,
+			       romdb_entries[i].version) == 1) {
+			strcpy(h.code, romdb_entries[i].code);
+			h.version = romdb_entries[i].version;
+			break;
+		}
+	romdb_match("late.gba", &h, 1, NULL, &id);
+	CHECK(id.how == ROMDB_CODE &&
+	      romdb_auto_color(&id, why, sizeof(why)) == COLOR_SP101,
+	      "auto 2006: sp101 (%s)", why);
+
+	/* Cache: keyed by name, size and time; pruned after a full scan. */
+	snprintf(path, sizeof(path), "%s/config", base);
+	mkdir(path, 0755);
+	romdb_cache_load();
+	romdb_cache_put("a.gba", 100, 5, 0xdeadbeef);
+	romdb_cache_put("b c.gba", 200, 6, 0x00000001);
+	romdb_cache_save(0);
+	romdb_cache_reset();
+	CHECK(romdb_cache_get("a.gba", 100, 5, &crc) == 0 && crc == 0xdeadbeef,
+	      "cache round trip");
+	CHECK(romdb_cache_get("b c.gba", 200, 6, &crc) == 0 && crc == 1,
+	      "cache name with a space");
+	CHECK(romdb_cache_get("a.gba", 100, 7, &crc) < 0, "cache: new mtime");
+	CHECK(romdb_cache_get("a.gba", 101, 5, &crc) < 0, "cache: new size");
+	CHECK(romdb_cache_get("c.gba", 100, 5, &crc) < 0, "cache: other file");
+	romdb_cache_load();
+	romdb_cache_get("b c.gba", 200, 6, &crc);
+	romdb_cache_save(1);
+	romdb_cache_reset();
+	CHECK(romdb_cache_get("a.gba", 100, 5, &crc) < 0 &&
+	      romdb_cache_get("b c.gba", 200, 6, &crc) == 0, "cache pruned");
+
+	/* 200 dummy ROMs: 120 by code, 30 needing the CRC (20 of them a
+	 * real entry's, 10 modified), 50 unknown. */
+	snprintf(dir, sizeof(dir), "%s/romdb-roms", base);
+	mkdir(dir, 0755);
+	for (int i = 0, made = 0, amb = 0; i < romdb_count && made + amb < 150;
+	     i++) {
+		const struct romdb_entry *x = &romdb_entries[i];
+		int n;
+
+		if (!x->code[0] || (i && !strcmp(romdb_entries[i - 1].code, x->code)))
+			continue;
+		n = code_count(x->code, x->version);
+		snprintf(path, sizeof(path), "%s/%s-%d.gba", dir, x->code, i);
+		if (n == 1 && made < 120) {
+			write_rom(path, x->code, x->version, 0, i);
+			made++;
+		} else if (n > 1 && amb < 30) {
+			write_rom(path, x->code, x->version, amb < 20 ?
+				  x[amb & 1].crc : 0, i);
+			amb++;
+		}
+	}
+	for (int i = 0; i < 50; i++) {
+		char code[8];
+
+		snprintf(code, sizeof(code), "Z%03d", i);
+		snprintf(path, sizeof(path), "%s/homebrew %02d.gba", dir, i);
+		write_rom(path, code, 0, 0, i);
+	}
+	snprintf(path, sizeof(path), "%s/config/romdb-cache.txt", base);
+	unlink(path);
+	romdb_cache_reset();
+	t0 = now_ns();
+	CHECK(romlist_scan(&rl, dir) == 200, "200 ROMs: %d", rl.count);
+	t_scan = now_ns() - t0;
+	CHECK(rl.pending == 30, "pending %d", rl.pending);
+	t0 = now_ns();
+	while (rl.pending && steps < 10000)
+		steps += romlist_step(&rl, 8000000) ? 1 : 0;
+	t_crc = now_ns() - t0;
+	CHECK(steps == 30, "steps %d", steps);
+	for (int i = 0; i < rl.count; i++) {
+		n_code += rl.roms[i].id.how == ROMDB_CODE;
+		n_crc += rl.roms[i].id.how == ROMDB_CRC;
+		n_mod += rl.roms[i].id.how == ROMDB_MODIFIED;
+		n_unk += rl.roms[i].id.how == ROMDB_UNKNOWN;
+		if (i && strcasecmp(rl.roms[i - 1].id.title, rl.roms[i].id.title) > 0)
+			sorted = 0;
+	}
+	CHECK(n_code == 120 && n_crc == 20 && n_mod == 10 && n_unk == 50,
+	      "counts: code %d crc %d modified %d unknown %d", n_code, n_crc,
+	      n_mod, n_unk);
+	CHECK(sorted, "ROM list not sorted by title");
+	/* Again, with the cache: no CRC to compute. */
+	romdb_cache_reset();
+	t0 = now_ns();
+	romlist_scan(&rl, dir);
+	t_cached = now_ns() - t0;
+	CHECK(rl.pending == 0, "cached: pending %d", rl.pending);
+	for (int i = 0; i < rl.count; i++)
+		if (rl.roms[i].id.how == ROMDB_CRC || rl.roms[i].id.how == ROMDB_MODIFIED)
+			CHECK(rl.roms[i].id.have_crc, "cached crc %s", rl.roms[i].file);
+	log_msg("selftest: romdb: 200 ROMs scanned in %.1f ms (30 CRCs pending), "
+		"CRCs in %.1f ms, scanned again with the cache in %.1f ms",
+		t_scan / 1e6, t_crc / 1e6, t_cached / 1e6);
+	fprintf(stderr, "romdb: 200 ROMs scanned in %.1f ms, 30 CRCs in %.1f "
+		"ms, cached scan %.1f ms\n", t_scan / 1e6, t_crc / 1e6,
+		t_cached / 1e6);
+	romlist_free(&rl);
+
+	/* A game start computes a missing CRC itself and caches it. */
+	romdb_cache_reset();
+	unlink(path);
+	snprintf(path, sizeof(path), "%s/aw.gba", dir);
+	write_rom(path, "AWRE", 0, vc ? vc->crc : 0, 1);
+	romdb_identify(path, 0, &id);
+	CHECK(id.how == ROMDB_PENDING, "identify without crc: pending");
+	romdb_identify(path, 1, &id);
+	CHECK(id.how == ROMDB_CRC && id.e == vc, "identify with crc: %s",
+	      id.title);
+	romdb_cache_reset();
+	romdb_identify(path, 0, &id);
+	CHECK(id.how == ROMDB_CRC && id.have_crc, "identify from cache");
+	romdb_cache_reset();
 }
 
 static void test_files(const char *base)
@@ -1386,6 +1743,7 @@ int selftest(const char *dir)
 	test_grid_phases();
 	test_pwrkey();
 	test_romlist(dir);
+	test_romdb(dir);
 	test_files(dir);
 	test_settings(dir);
 	test_battery(dir);

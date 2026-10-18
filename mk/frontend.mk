@@ -24,7 +24,7 @@ LIBRETRO_INCLUDE := $(if $(MGBA_INCLUDE),$(MGBA_INCLUDE),$(EXTERNAL)/mgba/src/pl
 
 FRONTEND_SRCS := main.c log.c sys.c display.c blit.c draw.c audio.c \
 	resample.c input.c romlist.c core.c menu.c perf.c selftest.c \
-	settings.c fx.c battery.c cpuctl.c sleep.c sdgrow.c
+	settings.c fx.c battery.c cpuctl.c sleep.c sdgrow.c romdb.c romdb_data.c
 FRONTEND_OBJS := $(addprefix $(FRONTEND_BUILD)/obj/,$(FRONTEND_SRCS:.c=.o))
 FRONTEND_STUB_OBJ := $(FRONTEND_BUILD)/obj/stub_core.o
 FRONTEND_STUB_LIB := $(FRONTEND_BUILD)/libstub_core.a
@@ -108,6 +108,11 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 		$(FRONTEND_TEST_DIR)/stub/log/frontend.txt
 	# Defaults: gpSP for a ROM without a choice.
 	grep -q 'settings: test: defaults (no file), .*core gpsp' \
+		$(FRONTEND_TEST_DIR)/stub/log/frontend.txt
+	# An unknown ROM keeps its file name; auto color falls back to off.
+	grep -q 'romdb: test.gba is "test" (unknown' \
+		$(FRONTEND_TEST_DIR)/stub/log/frontend.txt
+	grep -q 'color: auto is off for test (release year unknown)' \
 		$(FRONTEND_TEST_DIR)/stub/log/frontend.txt
 	# Game statistics: one CSV header, a summary row per game, and the
 	# simulated cpufreq floor was applied.

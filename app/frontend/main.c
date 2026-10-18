@@ -88,6 +88,7 @@
 #include "input.h"
 #include "menu.h"
 #include "perf.h"
+#include "romdb.h"
 #include "sdgrow.h"
 #include "sleep.h"
 
@@ -110,6 +111,7 @@ static struct {
 	struct canvas cv;
 	char rom_path[512];
 	char rom_name[128];
+	struct rom_id rom_id;  /* the game's name and database entry */
 	uint32_t suppress;     /* held buttons hidden until released */
 	uint32_t prev;
 	int led_green, led_red;
@@ -265,6 +267,22 @@ static void do_poweroff(void)
 	sys_poweroff();
 }
 
+/* The game's name (CRC computed if needed) and what color=auto means
+ * for it; after rom_settings_load. */
+static void identify_game(const char *path)
+{
+	int64_t t0 = now_ns();
+	char why[96];
+	int color;
+
+	romdb_identify(path, 1, &m.rom_id);
+	romdb_log(m.rom_name, &m.rom_id);
+	log_msg("romdb: %s is \"%s\" (%s, %.1f ms)", m.rom_name, m.rom_id.title,
+		romdb_how_names[m.rom_id.how], (now_ns() - t0) / 1e6);
+	color = romdb_auto_color(&m.rom_id, why, sizeof(why));
+	rom_settings_set_auto(color, why);
+}
+
 static void start_game(const char *path)
 {
 	double hz = display_ready() ? display_info()->refresh_hz : 60.0;
@@ -277,6 +295,7 @@ static void start_game(const char *path)
 	/* The ROM's settings first: they pick the core. */
 	rom_settings_load(m.rom_name);
 	m.saved_rom = rom_settings;
+	identify_game(path);
 	log_msg("starting %s with %s", path, core_names[rom_settings.core]);
 	if (core_load(path, rom_settings.core, err, sizeof(err))) {
 		rom_settings_load(NULL);
@@ -334,7 +353,7 @@ static void open_menu(uint32_t buttons)
 	audio_pause();
 	cpuctl_game_pause();
 	core_save_sync();
-	ingame_menu_enter(m.rom_name);
+	ingame_menu_enter(m.rom_id.title);
 	m.suppress = buttons;
 	m.st = ST_MENU;
 	log_msg("in-game menu");
@@ -944,6 +963,8 @@ static int headless(const char *data, const char *rom, long frames)
 	/* Settings from DATA, so effects can be exercised too. */
 	settings_load();
 	rom_settings_load(base);
+	snprintf(m.rom_name, sizeof(m.rom_name), "%.127s", base);
+	identify_game(rom);
 	fx_update();
 	/* FE_AUDIO=simple: the simple path with a realistic 50 ppm codec
 	 * drift (it has no rate control); otherwise adaptive with 0.1%. */

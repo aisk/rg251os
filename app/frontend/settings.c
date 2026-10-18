@@ -6,7 +6,9 @@
  *                                CPU mode (cpu=adaptive|max|<MHz>),
  *                                audio path (audio=simple|adaptive),
  *                                debug logging (debug=on|off)
- *   config/roms/<rom name>.txt   per game: color correction, the
+ *   config/roms/<rom name>.txt   per game: color correction
+ *                                (color=auto|off|gba|gba-light|sp101,
+ *                                auto by default, see romdb.c), the
  *                                learned start OPP (cpu_start=<MHz>),
  *                                the core (core=mgba|gpsp) and gpSP's
  *                                frame blending (blend=off|on)
@@ -22,7 +24,9 @@
  * defaults (rom_settings_defaults()), so a changed default still reaches
  * every game the user has not touched: core= appears only once a core
  * other than the default was picked for that game (files from before
- * gpSP became the default contain no core= at all).
+ * gpSP became the default contain no core= at all). Likewise color= is
+ * only there for games where a mode was picked (or that had one in their
+ * file before auto became the default, which keep it).
  */
 #include <ctype.h>
 #include <stdio.h>
@@ -33,10 +37,10 @@
 #include "fe.h"
 
 const char *const color_mode_names[COLOR_COUNT] = {
-	"off", "gba", "gba-light", "sp101",
+	"off", "gba", "gba-light", "sp101", "auto",
 };
 const char *const color_mode_labels[COLOR_COUNT] = {
-	"Off", "GBA", "GBA light", "SP101",
+	"Off", "GBA", "GBA light", "SP101", "Auto",
 };
 const char *const core_names[CORE_COUNT] = { "mgba", "gpsp" };
 const char *const core_labels[CORE_COUNT] = { "mGBA", "gpSP" };
@@ -56,6 +60,7 @@ struct rom_settings rom_settings;
 
 static char rom_base[128];  /* current game, "" when none */
 static unsigned rom_in_file;  /* fields present in the ROM's file */
+static int rom_auto = COLOR_OFF;  /* what auto means for this game */
 
 static const char *const on_off[] = { "off", "on" };
 static const char *const cpu_modes[] = { "adaptive", "max" };
@@ -271,7 +276,7 @@ void rom_settings_defaults(const char *rom_name, struct rom_settings *r)
 	/* The same for every game today. gpSP is the default core: mGBA
 	 * barely keeps up with demanding games on the RK3326. */
 	(void)rom_name;
-	r->color = COLOR_OFF;
+	r->color = COLOR_AUTO;
 	r->cpu_start = 0;
 	r->core = CORE_GPSP;
 	r->blend = 0;
@@ -295,6 +300,7 @@ void rom_settings_load(const char *rom_name)
 
 	rom_base[0] = 0;
 	rom_in_file = 0;
+	rom_auto = COLOR_OFF;
 	rom_settings_defaults(rom_name, &rom_settings);
 	if (!rom_name)
 		return;
@@ -309,6 +315,31 @@ void rom_settings_load(const char *rom_name)
 		"blend %s", rom_base, n < 0 ? "defaults (no file)" : "loaded",
 		color_mode_names[rom_settings.color], rom_settings.cpu_start,
 		core_names[rom_settings.core], on_off[rom_settings.blend]);
+}
+
+void rom_settings_set_auto(int color, const char *why)
+{
+	rom_auto = color >= 0 && color < COLOR_MODES ? color : COLOR_OFF;
+	log_msg("color: auto is %s for %s (%s)%s", color_mode_names[rom_auto],
+		rom_base[0] ? rom_base : "no game", why,
+		rom_settings.color == COLOR_AUTO ? "" : ", not used: the game "
+		"has an explicit mode");
+}
+
+int rom_settings_color(void)
+{
+	int c = rom_settings.color;
+
+	return c == COLOR_AUTO ? rom_auto : c >= 0 && c < COLOR_MODES ? c :
+	       COLOR_OFF;
+}
+
+void rom_color_label(char *buf, size_t size)
+{
+	if (rom_settings.color == COLOR_AUTO)
+		snprintf(buf, size, "Auto (%s)", color_mode_labels[rom_auto]);
+	else
+		snprintf(buf, size, "%s", color_mode_labels[rom_settings.color]);
 }
 
 void rom_settings_save(void)

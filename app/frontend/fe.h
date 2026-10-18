@@ -80,6 +80,10 @@ enum color_mode {
 	COLOR_GBA,        /* original GBA, unlit reflective screen */
 	COLOR_GBA_LIGHT,  /* same colors without the extra gamma darkening */
 	COLOR_SP101,      /* backlit GBA SP (AGS-101) */
+	COLOR_MODES,      /* the modes fx.c builds */
+	/* Per game only: one of the above from the release year (romdb.c),
+	 * resolved when the game starts (rom_settings_set_auto). */
+	COLOR_AUTO = COLOR_MODES,
 	COLOR_COUNT
 };
 extern const char *const color_mode_names[COLOR_COUNT];   /* in files */
@@ -114,7 +118,7 @@ struct settings {
 };
 /* Per game, in config/roms/<rom name>.txt. */
 struct rom_settings {
-	int color;       /* enum color_mode */
+	int color;       /* enum color_mode, COLOR_AUTO by default */
 	int cpu_start;   /* learned start OPP in MHz, 0: the top */
 	int core;        /* enum core_id, used when the game starts */
 	int blend;       /* gpSP frame blending (core.c), mGBA ignores it */
@@ -130,6 +134,13 @@ int settings_format(const struct settings *s, char *buf, size_t size);
 /* Defaults for a ROM, then its file. NULL: no game (defaults only). */
 void rom_settings_load(const char *rom_name);
 void rom_settings_save(void);
+/* The game's automatic color mode and its reason (romdb_auto_color),
+ * logged; rom_settings_load resets it to off. */
+void rom_settings_set_auto(int color, const char *why);
+/* The mode in effect: rom_settings.color with auto resolved. */
+int rom_settings_color(void);
+/* The menu label: "GBA", or "Auto (GBA)" for auto. */
+void rom_color_label(char *buf, size_t size);
 /* The defaults for a ROM (today the same for every ROM). */
 void rom_settings_defaults(const char *rom_name, struct rom_settings *r);
 int rom_settings_parse(struct rom_settings *r, const char *text);

@@ -52,7 +52,7 @@ struct color_model {
 	float lum, darken;
 };
 
-static const struct color_model models[COLOR_COUNT] = {
+static const struct color_model models[COLOR_MODES] = {
 	[COLOR_GBA] = {
 		{ { 0.905f, 0.195f, -0.100f },
 		  { 0.100f, 0.650f, 0.250f },
@@ -85,7 +85,7 @@ static inline uint16_t pack(const float c[3])
 
 void fx_build(uint16_t *lit, uint16_t *dark, int color, int dim, int boost)
 {
-	const struct color_model *cm = color > COLOR_OFF && color < COLOR_COUNT ?
+	const struct color_model *cm = color > COLOR_OFF && color < COLOR_MODES ?
 				       &models[color] : NULL;
 	float klit = 1 + boost / 100.0f, kdark = 1 - dim / 100.0f;
 	float lin[32], enc = 0;
@@ -190,7 +190,7 @@ int fx_grid_phase(void)
 
 void fx_update(void)
 {
-	int color = rom_settings.color, grid = settings.grid;
+	int color = rom_settings_color(), grid = settings.grid;
 	int dim = grid ? settings.grid_dim : 0;
 	int boost = grid ? settings.grid_boost : 0;
 	int64_t t0;
