@@ -4,11 +4,13 @@
  */
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "audio.h"
@@ -23,6 +25,7 @@
 #include "input.h"
 #include "resample.h"
 #include "romlist.h"
+#include "sdgrow.h"
 #include "sleep.h"
 
 static int failures;
@@ -1181,6 +1184,150 @@ static void test_sleep_sysfs(const char *base)
 	      !strncmp(stats, "mem", 3), "mem written");
 }
 
+/* ------------------------------------------------------ partition grow */
+
+static void mbr_entry(uint8_t *mbr, int i, uint8_t type, uint32_t start,
+		      uint32_t size)
+{
+	uint8_t *e = mbr + 446 + 16 * i;
+
+	e[4] = type;
+	for (int k = 0; k < 4; k++) {
+		e[8 + k] = start >> (8 * k);
+		e[12 + k] = size >> (8 * k);
+	}
+}
+
+static void write_bytes(const char *path, size_t n, int seed, time_t mtime)
+{
+	struct timespec ts[2] = { { mtime, 0 }, { mtime, 0 } };
+	FILE *f = fopen(path, "w");
+
+	for (size_t i = 0; f && i < n; i++)
+		fputc((int)((i * 31 + seed) & 0xff), f);
+	if (f)
+		fclose(f);
+	utimensat(AT_FDCWD, path, ts, 0);
+}
+
+static void test_sdgrow(const char *base)
+{
+	static uint8_t mbr[512];
+	static const struct { uint64_t card; uint32_t spc; } geo[] = {
+		{ 2097152, 8 },          /* 1 GiB: 4 KiB clusters */
+		{ 15523840, 8 },         /* "8 GB" */
+		{ 31116288, 16 },        /* "16 GB": 8 KiB */
+		{ 62521344, 32 },        /* "32 GB": 16 KiB */
+		{ 124735488, 64 },       /* "64 GB": 32 KiB */
+		{ 4294967295u, 64 },     /* 2 TiB */
+	};
+	struct sdgrow_plan p;
+	struct fat32_geom g;
+	struct sdgrow_tree t;
+	char why[64], a[300], b[300], path[400];
+	struct stat st;
+
+	CHECK(sdgrow_crc32(0, "123456789", 9) == 0xcbf43926, "crc32");
+	CHECK(sdgrow_crc32(sdgrow_crc32(0, "1234", 4), "56789", 5) == 0xcbf43926,
+	      "crc32 in parts");
+
+	/* The image's layout (genimage.cfg) on a 32 GB card. */
+	mbr[510] = 0x55;
+	mbr[511] = 0xaa;
+	mbr_entry(mbr, 0, 0x0c, 32768, 65536);
+	mbr_entry(mbr, 1, 0x83, 98304, 32768);
+	mbr_entry(mbr, 2, 0x0c, 131072, 131072);
+	CHECK(sdgrow_plan(mbr, 62521344, &p, why, sizeof(why)) == 0, "plan: %s",
+	      why);
+	CHECK(p.start == 131072 && p.size == 131072 && p.end == 62521344 / 8192 * 8192 &&
+	      p.hdr_lba == p.end - 8, "plan: end %u", p.end);
+	CHECK(sdgrow_plan(mbr, 8ull << 32, &p, why, sizeof(why)) == 0 &&
+	      p.end == 0xffffe000u, "plan: 2 TiB limit, end %u", p.end);
+	CHECK(sdgrow_plan(mbr, 200000, &p, why, sizeof(why)) < 0,
+	      "plan: p3 beyond the card");
+	mbr_entry(mbr, 3, 0x83, 300000, 1000);
+	CHECK(sdgrow_plan(mbr, 62521344, &p, why, sizeof(why)) < 0, "plan: p4");
+	mbr_entry(mbr, 3, 0, 0, 0);
+	mbr_entry(mbr, 2, 0x83, 131072, 131072);
+	CHECK(sdgrow_plan(mbr, 62521344, &p, why, sizeof(why)) < 0, "plan: type");
+	mbr_entry(mbr, 2, 0x0c, 65536, 131072);
+	CHECK(sdgrow_plan(mbr, 62521344, &p, why, sizeof(why)) < 0,
+	      "plan: p3 before p2's end");
+	mbr[511] = 0;
+	CHECK(sdgrow_plan(mbr, 62521344, &p, why, sizeof(why)) < 0, "plan: sig");
+
+	for (size_t i = 0; i < ARRAY_SIZE(geo); i++) {
+		uint32_t end = geo[i].card / 8192 * 8192, size = end - 131072;
+		uint64_t fat_need;
+
+		CHECK(fat32_geometry(131072, size, &g) == 0, "geometry %zu", i);
+		fat_need = ((uint64_t)g.clusters + 2) * 4;
+		CHECK(g.spc == geo[i].spc, "geometry %zu: spc %u", i, g.spc);
+		CHECK(g.clusters >= 65541 && g.clusters <= 0x0fffffe5 &&
+		      fat_need <= (uint64_t)g.fat_sectors * 512 &&
+		      (uint64_t)g.data + (uint64_t)g.clusters * g.spc <= size &&
+		      (uint64_t)g.data + (uint64_t)(g.clusters + 1) * g.spc > size &&
+		      g.data == g.reserved + 2 * g.fat_sectors && g.reserved >= 32 &&
+		      g.reserved <= 0xffff, "geometry %zu: layout", i);
+		CHECK((131072 + g.data) % 8192 == 0, "geometry %zu: alignment", i);
+	}
+	/* 40 MiB: only 512 byte clusters give a FAT32, 20 MiB none. */
+	CHECK(fat32_geometry(131072, 40 << 11, &g) == 0 && g.spc == 1,
+	      "geometry 40 MiB: spc %u", g.spc);
+	CHECK(fat32_geometry(131072, 20 << 11, &g) < 0, "geometry 20 MiB");
+
+	/* Trees: nested directories, empty ones, an empty, a big and a
+	 * read-only file, times kept. */
+	snprintf(a, sizeof(a), "%s/grow-a", base);
+	snprintf(b, sizeof(b), "%s/grow-b", base);
+	mkdir(a, 0755);
+	mkdir(b, 0755);
+	snprintf(path, sizeof(path), "%s/roms", a);
+	mkdir(path, 0755);
+	snprintf(path, sizeof(path), "%s/roms/deep", a);
+	mkdir(path, 0755);
+	snprintf(path, sizeof(path), "%s/empty", a);
+	mkdir(path, 0755);
+	snprintf(path, sizeof(path), "%s/roms/Game (USA).gba", a);
+	write_bytes(path, 3 << 20 | 17, 1, 1700000000);
+	snprintf(path, sizeof(path), "%s/roms/deep/x.sav", a);
+	write_bytes(path, 1000, 2, 1700000002);
+	chmod(path, 0444);
+	snprintf(path, sizeof(path), "%s/zero", a);
+	write_bytes(path, 0, 0, 1600000000);
+	snprintf(path, sizeof(path), "%s/roms/deep", a);
+	{
+		struct timespec ts[2] = { { 1500000000, 0 }, { 1500000000, 0 } };
+
+		utimensat(AT_FDCWD, path, ts, 0);
+	}
+	CHECK(sdgrow_copy_tree(a, b, &t) == 0, "copy tree");
+	CHECK(t.files == 3 && t.dirs == 3 && t.bytes == (3 << 20 | 17) + 1000,
+	      "copy tree: %u files %u dirs %llu bytes", t.files, t.dirs,
+	      (unsigned long long)t.bytes);
+	snprintf(path, sizeof(path), "%s/roms/Game (USA).gba", b);
+	CHECK(!stat(path, &st) && st.st_mtime == 1700000000, "copy: mtime");
+	snprintf(path, sizeof(path), "%s/roms/deep/x.sav", b);
+	CHECK(!stat(path, &st) && !(st.st_mode & 0222), "copy: read-only");
+	snprintf(path, sizeof(path), "%s/roms/deep", b);
+	CHECK(!stat(path, &st) && st.st_mtime == 1500000000, "copy: dir mtime");
+	CHECK(sdgrow_compare_tree(a, b, &t) == 0 && t.files == 3, "compare");
+	/* Differences are found: content, size, an extra file, mtime. */
+	snprintf(path, sizeof(path), "%s/roms/Game (USA).gba", b);
+	chmod(path, 0644);
+	write_bytes(path, 3 << 20 | 17, 9, 1700000000);
+	CHECK(sdgrow_compare_tree(a, b, &t) < 0, "compare: content");
+	write_bytes(path, 3 << 20, 1, 1700000000);
+	CHECK(sdgrow_compare_tree(a, b, &t) < 0, "compare: size");
+	write_bytes(path, 3 << 20 | 17, 1, 1700000010);
+	CHECK(sdgrow_compare_tree(a, b, &t) < 0, "compare: mtime");
+	write_bytes(path, 3 << 20 | 17, 1, 1700000000);
+	CHECK(sdgrow_compare_tree(a, b, &t) == 0, "compare: same again");
+	snprintf(path, sizeof(path), "%s/empty/new", b);
+	write_bytes(path, 1, 1, 1700000000);
+	CHECK(sdgrow_compare_tree(a, b, &t) < 0, "compare: extra file");
+}
+
 int selftest(const char *dir)
 {
 	mkdir(dir, 0755);
@@ -1206,6 +1353,7 @@ int selftest(const char *dir)
 	test_settings(dir);
 	test_battery(dir);
 	test_sleep_sysfs(dir);
+	test_sdgrow(dir);
 	test_cpuctl(dir);
 	test_ui(dir);
 	log_msg("selftest: %s (%d failures)", failures ? "FAILED" : "passed",

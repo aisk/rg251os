@@ -8,7 +8,9 @@
 # frontend-stub for tests.
 #
 #   make frontend          build/frontend/frontend (stripped, installed)
-#   make frontend-test     selftest and headless runs under qemu-aarch64
+#   make frontend-test     selftest and headless runs under qemu-aarch64,
+#                          the partition grow on card images (needs
+#                          mtools, dosfstools and sfdisk)
 
 FRONTEND_DIR := $(TOP)/app/frontend
 FRONTEND_BUILD := $(BUILD)/frontend
@@ -22,7 +24,7 @@ LIBRETRO_INCLUDE := $(if $(MGBA_INCLUDE),$(MGBA_INCLUDE),$(EXTERNAL)/mgba/src/pl
 
 FRONTEND_SRCS := main.c log.c sys.c display.c blit.c draw.c audio.c \
 	resample.c input.c romlist.c core.c menu.c perf.c selftest.c \
-	settings.c fx.c battery.c cpuctl.c sleep.c
+	settings.c fx.c battery.c cpuctl.c sleep.c sdgrow.c
 FRONTEND_OBJS := $(addprefix $(FRONTEND_BUILD)/obj/,$(FRONTEND_SRCS:.c=.o))
 FRONTEND_STUB_OBJ := $(FRONTEND_BUILD)/obj/stub_core.o
 FRONTEND_STUB_LIB := $(FRONTEND_BUILD)/libstub_core.a
@@ -185,3 +187,7 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	# mGBA -> gpSP -> mGBA in one process on one save, and a .srm.
 	$(QEMU_AARCH64) $(FRONTEND_ELF) --core-switch $(FRONTEND_TEST_DIR)/switch 120
 	grep -q 'core switch: passed' $(FRONTEND_TEST_DIR)/switch/log/frontend.txt
+	# The first boot's partition grow on card images, with mtools as the
+	# file system and fsck.fat on the result (see the script).
+	$(TOP)/mk/sdgrow-test.sh $(QEMU_AARCH64) $(FRONTEND_STUB_ELF) \
+		$(FRONTEND_TEST_DIR)/sdgrow

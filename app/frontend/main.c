@@ -49,6 +49,10 @@
  * the audio rate control and frame pacing start over and the waking press
  * is not taken as a new one. Every step is logged ("sleep #N: ...").
  *
+ * First boot: before the GBA partition is mounted, it is grown to fill
+ * the SD card (sdgrow.c), with a message on screen; later boots only
+ * check that there is nothing to do.
+ *
  * Settings (settings.c) are saved when leaving the settings screen in the
  * ROM list, on resume, quit and power off, whenever they differ from what
  * was last loaded or saved.
@@ -61,6 +65,8 @@
  *   frontend --core-switch DATA N      mGBA, gpSP, mGBA on one save in one
  *                                      process, N frames each
  *   frontend --data DIR                normal UI with DATA from DIR
+ *   frontend --sdgrow IMG DIR HOOK     the first boot's partition grow on
+ *                                      a card image (see sdgrow.h)
  */
 #include <poll.h>
 #include <stdio.h>
@@ -82,6 +88,7 @@
 #include "input.h"
 #include "menu.h"
 #include "perf.h"
+#include "sdgrow.h"
 #include "sleep.h"
 
 #define HOTKEY (JOY_BIT(SELECT) | JOY_BIT(START))
@@ -721,6 +728,44 @@ static void clock_log(void)
 		valid ? "" : " (RTC not set, perf.csv uses boot time)");
 }
 
+/*
+ * The first boot's partition grow (sdgrow.c) runs before anything else
+ * shows; its messages bring the display up early. Blocking: the next
+ * flip waits until the previous one is done.
+ */
+static void grow_show(const char *msg)
+{
+	static int tried_display;
+	struct pollfd pfd;
+
+	/* The panel may still be probing this early: wait up to 3 s once. */
+	for (int i = 0; !display_ready() && i < 30 && !tried_display; i++) {
+		if (!display_init()) {
+			backlight_init(settings_defaults.brightness);
+			break;
+		}
+		usleep(100000);
+	}
+	tried_display = 1;
+	if (!display_ready())
+		return;
+	/* Draw when a buffer is free, then let the flip complete. */
+	for (int i = 0; i < 2; i++) {
+		if (i || !display_can_draw()) {
+			pfd.fd = display_fd();
+			pfd.events = POLLIN;
+			if (poll(&pfd, 1, 200) > 0)
+				display_handle_events();
+		}
+		if (!i && display_can_draw()) {
+			message_draw(&m.cv, "Preparing SD card", msg, COL_HI);
+			/* No power key handling meanwhile. */
+			draw_fill(&m.cv, 0, m.cv.h - 32, m.cv.w, 32, COL_BG);
+			blit_canvas();
+		}
+	}
+}
+
 static void startup(void)
 {
 	struct utsname u;
@@ -734,6 +779,7 @@ static void startup(void)
 	log_msg("frontend started at %lld ms (CLOCK_BOOTTIME), pid %d, kernel %s",
 		(long long)boot_ms(), (int)getpid(), u.release);
 
+	sdgrow_boot(grow_show);
 	if (sys_mount_data()) {
 		fatal("No GBA partition",
 		      "Could not mount /dev/mmcblk0p3 (FAT). ROMs, saves and logs "
@@ -757,7 +803,7 @@ static void startup(void)
 	cpuctl_set_mode(settings.cpu);
 	clock_log();
 	battery_init("/sys/class/power_supply");
-	if (display_init())
+	if (!display_ready() && display_init())
 		m.next_drm_try = now_ns() + 200000000LL;
 	input_init();
 	audio_init();
@@ -986,6 +1032,8 @@ int main(int argc, char **argv)
 			return selftest(argv[2]);
 		if (argc == 5 && !strcmp(argv[1], "--headless"))
 			return headless(argv[2], argv[3], strtol(argv[4], NULL, 0));
+		if (argc == 5 && !strcmp(argv[1], "--sdgrow"))
+			return sdgrow_image(argv[2], argv[3], argv[4]);
 		if (argc == 4 && !strcmp(argv[1], "--core-switch"))
 			return selftest_core_switch(argv[2],
 						    strtol(argv[3], NULL, 0));
@@ -993,7 +1041,8 @@ int main(int argc, char **argv)
 			snprintf(fe_data_dir, sizeof(fe_data_dir), "%s", argv[2]);
 		} else if (argc != 1) {
 			fprintf(stderr, "usage: %s [--selftest DIR | --headless DATA "
-				"ROM FRAMES | --core-switch DATA FRAMES | --data DIR]\n",
+				"ROM FRAMES | --core-switch DATA FRAMES | --data DIR | "
+				"--sdgrow IMG DIR HOOK]\n",
 				argv[0]);
 			return 1;
 		}

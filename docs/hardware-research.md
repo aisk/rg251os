@@ -222,7 +222,7 @@ DDR blob 在两边是同一个文件，legacy 能启动，说明 DDR 初始化�
 | 32KiB 到 16MiB，分区表之外 | bootloader：legacy 是 idbloader（扇区 64）、`uboot.img`（8MiB）、`trust.img`（12MiB） |
 | p1，FAT，`BOOT`，从 16MiB 开始 | `Image`、`rk3326-anbernic-rg351p.dtb`、`boot.ini`、`extlinux/extlinux.conf` |
 | p2，ext4，只读 | rootfs：`/sbin/init`（前端）和 `/sbin/hwtest` |
-| p3，FAT，`GBA` | ROM、存档、设置和日志，前端挂在 `/mnt/data` |
+| p3，FAT，`GBA` | ROM、存档、设置和日志，前端挂在 `/mnt/data`。镜像里只有 64MiB，第一次开机时扩到整张卡并格式化成 FAT32（见下） |
 
 GBA 分区（下面写作 `<data>`）里的文件
 
@@ -237,6 +237,8 @@ GBA 分区（下面写作 `<data>`）里的文件
 | `log/perf.csv` | 每局游戏的性能、功耗和音频统计，跨开机追加 |
 
 `roms/` 和 `saves/` 在镜像里就有，其余目录前端第一次启动时创建。
+
+第一次开机时前端在挂载 GBA 分区之前把它扩到卡的末尾（`app/frontend/sdgrow.c`，4MiB 对齐，MBR 最多 2TiB）：文件先拷进 tmpfs，旧分区原样备份到卡末尾的空闲区，改 MBR 里 p3 的大小，格式化成 FAT32（卷标 `GBA`，簇大小按 Windows 默认），再把文件拷回去并逐个比对。屏幕上显示 "Preparing SD card"。中途断电的话下次开机从备份恢复再重来，连续中断 3 次或者当次出错就恢复原样不再尝试。日志在那次开机的 `frontend.txt` 里，都以 `sdgrow:` 开头。之后的开机只读 MBR 和分区末尾 4KiB，记一行 `nothing to do`。
 
 ### 默认行为
 
