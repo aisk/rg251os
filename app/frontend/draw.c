@@ -36,8 +36,9 @@ void draw_frame(struct canvas *c, int x, int y, int w, int h, uint16_t col)
 	draw_fill(c, x + w - 2, y, 2, h, col);
 }
 
+/* One glyph, only its columns in [x0, x1). */
 static void draw_char(struct canvas *c, int x, int y, int scale, uint16_t col,
-		      unsigned char ch)
+		      unsigned char ch, int x0, int x1)
 {
 	const uint8_t *g;
 
@@ -45,17 +46,32 @@ static void draw_char(struct canvas *c, int x, int y, int scale, uint16_t col,
 		ch = '?';
 	g = font8x8[ch - FONT_FIRST];
 	for (int r = 0; r < 8; r++)
-		for (int b = 0; b < 8; b++)
-			if (g[r] & (1u << b))
-				draw_fill(c, x + b * scale, y + r * scale, scale,
-					  scale, col);
+		for (int b = 0; b < 8; b++) {
+			int l = x + b * scale, rt = l + scale;
+
+			if (!(g[r] & (1u << b)))
+				continue;
+			if (l < x0)
+				l = x0;
+			if (rt > x1)
+				rt = x1;
+			if (rt > l)
+				draw_fill(c, l, y + r * scale, rt - l, scale, col);
+		}
 }
 
 int draw_text(struct canvas *c, int x, int y, int scale, uint16_t col,
 	      const char *s)
 {
+	return draw_text_clip(c, x, y, scale, col, s, 0, c->w);
+}
+
+int draw_text_clip(struct canvas *c, int x, int y, int scale, uint16_t col,
+		   const char *s, int x0, int x1)
+{
 	for (; *s; s++, x += 8 * scale)
-		draw_char(c, x, y, scale, col, (unsigned char)*s);
+		if (x + 8 * scale > x0 && x < x1)
+			draw_char(c, x, y, scale, col, (unsigned char)*s, x0, x1);
 	return x;
 }
 

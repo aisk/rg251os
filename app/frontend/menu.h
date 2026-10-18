@@ -37,6 +37,14 @@ int settings_menu_update(uint32_t pressed);
 void settings_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 			int w, int h);
 
+/* A ROM name in cols columns at 2x: cut with "~" (" *" kept as "~*"),
+ * or scrolled offset pixels to the left and clipped to the columns. */
+void draw_rom_name(struct canvas *c, int x, int y, uint16_t col,
+		   const char *name, int cols, int offset);
+/* The scroll offset in pixels of the selected name, excess pixels wider
+ * than its row, frames after it was selected (see menu.c). */
+int marquee_offset(int excess, unsigned frames);
+
 void message_draw(struct canvas *c, const char *title, const char *body,
 		  uint16_t col);
 

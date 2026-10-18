@@ -25,6 +25,9 @@ void draw_frame(struct canvas *c, int x, int y, int w, int h, uint16_t col);
 /* 8x8 font scaled by `scale`; returns the x after the text. */
 int draw_text(struct canvas *c, int x, int y, int scale, uint16_t col,
 	      const char *s);
+/* The same, drawing only the pixels in columns [x0, x1). */
+int draw_text_clip(struct canvas *c, int x, int y, int scale, uint16_t col,
+		   const char *s, int x0, int x1);
 int draw_textf(struct canvas *c, int x, int y, int scale, uint16_t col,
 	       const char *fmt, ...) __attribute__((format(printf, 6, 7)));
 /* Scale an image 2x into the canvas, centered and darkened. */

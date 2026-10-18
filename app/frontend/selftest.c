@@ -1277,6 +1277,72 @@ static void test_cpuctl(const char *base)
 	CHECK(csv_field(csv, ",fixed,816000,", 5) >= 1200, "fixed mode row");
 }
 
+/* Long ROM names: the marquee timing and a scrolled, clipped row. */
+static void test_marquee(void)
+{
+	static uint16_t px[480 * 24], ref[480 * 24];
+	struct canvas cv = { px, 480, 24 }, rc = { ref, 480, 24 };
+	const char *name = "ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghij *";
+	int n = strlen(name), excess = 16 * (n - 29), prev = 0, bad = 0;
+
+	for (unsigned f = 0; f < 1000; f++) {
+		int o = marquee_offset(excess, f);
+
+		CHECK(marquee_offset(0, f) == 0 && marquee_offset(-16, f) == 0,
+		      "marquee: a short name scrolls at frame %u", f);
+		if (o != prev && o != prev + 1 && !(o == 0 && prev == excess))
+			bad++;
+		prev = o;
+	}
+	CHECK(!bad, "marquee: %d steps other than one pixel or the wrap", bad);
+	CHECK(marquee_offset(excess, 0) == 0 && marquee_offset(excess, 60) == 0,
+	      "marquee: 1 s pause first");
+	CHECK(marquee_offset(excess, 61) == 1 && marquee_offset(excess, 70) == 10,
+	      "marquee: one pixel per frame");
+	CHECK(marquee_offset(excess, 60 + excess) == excess &&
+	      marquee_offset(excess, 60 + excess + 59) == excess,
+	      "marquee: 1 s at the end");
+	CHECK(marquee_offset(excess, 120 + excess) == 0 &&
+	      marquee_offset(excess, 120 + excess + 60) == 0 &&
+	      marquee_offset(excess, 120 + excess + 61) == 1,
+	      "marquee: back to the start, paused again");
+
+	/* Not scrolled: cut with "~*"; a name that fits ignores the offset. */
+	draw_fill(&cv, 0, 0, 480, 24, 0);
+	draw_rom_name(&cv, 8, 4, COL_FG, name, 29, 0);
+	draw_fill(&rc, 0, 0, 480, 24, 0);
+	draw_text(&rc, 8, 4, 2, COL_FG, "ABCDEFGHIJKLMNOPQRSTUVWXYZ ~*");
+	CHECK(!memcmp(px, ref, sizeof(px)), "marquee: cut row");
+	draw_fill(&cv, 0, 0, 480, 24, 0);
+	draw_rom_name(&cv, 8, 4, COL_FG, "Short (USA) *", 29, 40);
+	draw_fill(&rc, 0, 0, 480, 24, 0);
+	draw_text(&rc, 8, 4, 2, COL_FG, "Short (USA) *");
+	CHECK(!memcmp(px, ref, sizeof(px)), "marquee: a short name moved");
+
+	/* Scrolled by 37 and to the end: all of the name, " *" included,
+	 * shifted and clipped to the 29 columns. */
+	for (int k = 0; k < 2; k++) {
+		int off = k ? excess : 37;
+
+		draw_fill(&cv, 0, 0, 480, 24, 0);
+		draw_rom_name(&cv, 8, 4, COL_FG, name, 29, off);
+		draw_fill(&rc, 0, 0, 480, 24, 0);
+		draw_text(&rc, 8 - off, 4, 2, COL_FG, name);
+		draw_fill(&rc, 0, 0, 8, 24, 0);
+		draw_fill(&rc, 8 + 16 * 29, 0, 480, 24, 0);
+		CHECK(!memcmp(px, ref, sizeof(px)), "marquee: row scrolled by %d",
+		      off);
+	}
+	/* At the end the last column holds the "*". */
+	draw_fill(&rc, 0, 0, 480, 24, 0);
+	draw_text(&rc, 8 + 16 * 28, 4, 2, COL_FG, "*");
+	bad = 0;
+	for (int y = 0; y < 24; y++)
+		bad += !!memcmp(px + y * 480 + 8 + 16 * 28,
+				ref + y * 480 + 8 + 16 * 28, 16 * 2);
+	CHECK(!bad, "marquee: no \"*\" at the end (%d rows differ)", bad);
+}
+
 /* Render the menus to <dir>/ui-*.raw (480x320 RGB565) for a visual check. */
 static void test_ui(const char *dir)
 {
@@ -1750,6 +1816,7 @@ int selftest(const char *dir)
 	test_sleep_sysfs(dir);
 	test_sdgrow(dir);
 	test_cpuctl(dir);
+	test_marquee();
 	test_ui(dir);
 	log_msg("selftest: %s (%d failures)", failures ? "FAILED" : "passed",
 		failures);

@@ -3,7 +3,9 @@
  *
  * ROM list: the ROMs by their No-Intro names (romdb.c; the file name
  * when unknown, " *" after the name of a modified ROM, long names cut
- * with "~"), up/down (left/right page), A or START starts, SELECT opens
+ * with "~"; the selected one, and the game's name above the in-game
+ * menu, scroll after 1 s to show the rest, see marquee_offset), up/down
+ * (left/right page), A or START starts, SELECT opens
  * the global settings (Volume, Brightness, CPU, LCD grid, Grid darkness,
  * Dot boost, Audio mode Simple/Adaptive, Audio test: A plays a 3 s
  * 440 Hz tone through the game's audio path, and Debug log on/off, see
@@ -47,13 +49,22 @@
 #define COLS 29
 #define COL_OFF RGB(0x50, 0x58, 0x68)
 
+/* A scrolling name: frames drawn since it was selected. */
+struct marquee {
+	int sel;  /* -1: start over */
+	unsigned frames;
+	char name[ROMDB_NAME_MAX + 2];
+};
+
 static struct romlist roms;
 static int sel, top;
 static char message[96];
+static struct marquee list_mq = { .sel = -1 };
 
 static struct {
 	int sel;
 	char name[ROMDB_NAME_MAX + 2];
+	struct marquee mq;
 } ig;
 
 uint32_t ui_repeat(uint32_t held, int64_t now)
@@ -169,6 +180,7 @@ void romlist_menu_enter(void)
 	log_msg("roms: %d in %s", n, dir);
 	if (sel >= roms.count)
 		sel = roms.count ? roms.count - 1 : 0;
+	list_mq.sel = -1;
 }
 
 /* Missing CRCs, 8 ms per frame; the selection stays on its ROM when the
@@ -207,6 +219,7 @@ int romlist_menu_update(uint32_t pressed, char *path, size_t size)
 		top = sel - LIST_ROWS + 1;
 	if (pressed & JOY_BIT(SELECT)) {
 		message[0] = 0;
+		list_mq.sel = -1;  /* not drawn meanwhile */
 		return UI_SETTINGS;
 	}
 	if (pressed & (JOY_BIT(A) | JOY_BIT(START))) {
@@ -218,23 +231,82 @@ int romlist_menu_update(uint32_t pressed, char *path, size_t size)
 	return UI_NONE;
 }
 
-/* A ROM name in cols columns: cut with "~", a modified ROM's " *" kept. */
-static void draw_name(struct canvas *c, int x, int y, uint16_t col,
-		      const char *name, int cols)
+/* A name's length as shown, without a file name's ".gba". */
+static int name_len(const char *name)
 {
-	char buf[64];
 	size_t n = strlen(name);
 
 	if (n > 4 && !strcasecmp(name + n - 4, ".gba"))
 		n -= 4;
+	return n;
+}
+
+/*
+ * The scroll offset of a name excess pixels wider than its row, frames
+ * after it was selected: 0 (cut with "~") for MQ_PAUSE frames, then one
+ * pixel per frame (60 px/s, about 4 characters a second, smooth on the
+ * 60 Hz panel) until its end shows, held MQ_PAUSE frames, then from the
+ * start again. Counted in frames drawn (the menus are drawn on every
+ * vblank) rather than in time, so every frame moves by exactly one pixel.
+ */
+#define MQ_PAUSE 60
+
+int marquee_offset(int excess, unsigned frames)
+{
+	unsigned t;
+
+	if (excess <= 0)
+		return 0;
+	t = frames % (2 * MQ_PAUSE + (unsigned)excess);
+	if (t < MQ_PAUSE)
+		return 0;
+	t -= MQ_PAUSE;
+	return t < (unsigned)excess ? (int)t : excess;
+}
+
+/* Frames drawn since this name was selected, counting this one. */
+static unsigned marquee_tick(struct marquee *mq, int idx, const char *name)
+{
+	if (mq->sel != idx || strcmp(mq->name, name)) {
+		mq->sel = idx;
+		snprintf(mq->name, sizeof(mq->name), "%s", name);
+		mq->frames = 0;
+	} else {
+		mq->frames++;
+	}
+	return mq->frames;
+}
+
+/* The scroll offset of name in cols columns, shown in this frame. */
+static int marquee_step(struct marquee *mq, int idx, const char *name,
+			int cols)
+{
+	return marquee_offset(16 * (name_len(name) - cols),
+			      marquee_tick(mq, idx, name));
+}
+
+/* A ROM name in cols columns: cut with "~", a modified ROM's " *" kept;
+ * or with offset > 0 all of it, offset pixels to the left, clipped to
+ * the columns. */
+void draw_rom_name(struct canvas *c, int x, int y, uint16_t col,
+		   const char *name, int cols, int offset)
+{
+	char buf[ROMDB_NAME_MAX + 2];
+	int n = name_len(name);
+
+	if (offset > 0 && n > cols) {
+		snprintf(buf, sizeof(buf), "%.*s", n, name);
+		draw_text_clip(c, x - offset, y, 2, col, buf, x, x + 16 * cols);
+		return;
+	}
 	if (cols > (int)sizeof(buf) - 1)
 		cols = sizeof(buf) - 1;
-	if ((int)n > cols && n > 2 && !strcmp(name + n - 2, " *")) {
+	if (n > cols && n > 2 && !strcmp(name + n - 2, " *")) {
 		snprintf(buf, sizeof(buf), "%.*s~*", cols - 2, name);
-	} else if ((int)n > cols) {
+	} else if (n > cols) {
 		snprintf(buf, sizeof(buf), "%.*s~", cols - 1, name);
 	} else {
-		snprintf(buf, sizeof(buf), "%.*s", (int)n, name);
+		snprintf(buf, sizeof(buf), "%.*s", n, name);
 	}
 	draw_text(c, x, y, 2, col, buf);
 }
@@ -256,12 +328,17 @@ void romlist_menu_draw(struct canvas *c)
 		draw_text(c, 16, 168, 2, COL_DIM, "partition of the card.");
 	}
 	for (int i = 0; i < LIST_ROWS && top + i < roms.count; i++) {
-		int y = LIST_Y + i * ROW_H;
+		const char *name = roms.roms[top + i].id.title;
+		int y = LIST_Y + i * ROW_H, offset = 0;
 
-		if (top + i == sel)
+		if (top + i == sel) {
 			draw_fill(c, 0, y - 1, c->w, ROW_H, COL_SEL);
-		draw_name(c, 8, y, top + i == sel ? COL_FG : COL_DIM,
-			  roms.roms[top + i].id.title, COLS);
+			/* A new selection, or the selected ROM getting
+			 * its final name, starts over. */
+			offset = marquee_step(&list_mq, sel, name, COLS);
+		}
+		draw_rom_name(c, 8, y, top + i == sel ? COL_FG : COL_DIM, name,
+			      COLS, offset);
 	}
 	if (message[0])
 		draw_text(c, 8, c->h - 18, 2, COL_ERR, message);
@@ -317,6 +394,7 @@ void ingame_menu_enter(const char *rom_name)
 {
 	ig.sel = 0;
 	snprintf(ig.name, sizeof(ig.name), "%s", rom_name);
+	ig.mq.sel = -1;
 }
 
 int ingame_menu_update(uint32_t pressed)
@@ -375,12 +453,14 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 		"Settings", "Quit to ROM list", "Power off",
 	};
 	int bx = 56, by = 36, bw = c->w - 112, bh = 40 + IG_COUNT * IG_ROW_H;
+	int cols = (bw - 24) / 16;
 
 	draw_image_dim(c, frame, pitch, w, h);
 	draw_battery(c, c->w - 8, 16);
 	draw_fill(c, bx, by, bw, bh, COL_BOX);
 	draw_frame(c, bx, by, bw, bh, COL_SEL);
-	draw_name(c, bx + 12, by + 12, COL_HI, ig.name, (bw - 24) / 16);
+	draw_rom_name(c, bx + 12, by + 12, COL_HI, ig.name, cols,
+		      marquee_step(&ig.mq, 0, ig.name, cols));
 	for (int i = 0; i < IG_COUNT; i++) {
 		int y = by + 40 + i * IG_ROW_H;
 		uint16_t col = i == ig.sel ? COL_FG : COL_DIM;
