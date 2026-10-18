@@ -21,3 +21,12 @@
 	url = https://github.com/ROCKNIX/hardkernel-uboot.git
 	branch = RK3326
 	shallow = true
+[submodule "external/mgba"]
+	path = external/mgba
+	url = https://github.com/mgba-emu/mgba.git
+	branch = 0.10
+	shallow = true
+[submodule "external/tinyalsa"]
+	path = external/tinyalsa
+	url = https://github.com/tinyalsa/tinyalsa.git
+	shallow = true
