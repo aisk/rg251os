@@ -39,6 +39,8 @@ void cpuctl_game_frame(int64_t work_ns, unsigned missed, int64_t now);
  * OPP in MHz to remember for this ROM (0: the top). */
 int cpuctl_game_end(void);
 int cpuctl_in_game(void);
+/* Light sleep: clock capped at the lowest OPP until called with 0. */
+void cpuctl_sleep(int on);
 
 /* State for the perf line. */
 void cpuctl_format(char *buf, int size);

@@ -257,6 +257,47 @@ void klog_dump(const char *name)
 	free(buf);
 }
 
+/*
+ * Like klog_dump, but only from the last line containing marker on (the
+ * whole buffer if it is gone), e.g. what a suspend and resume logged.
+ */
+void klog_dump_since(const char *name, const char *marker)
+{
+	int size = klogctl(10 /* SYSLOG_ACTION_SIZE_BUFFER */, NULL, 0);
+	char path[400], *buf, *from, *p;
+	int n, fd;
+
+	if (!fe_is_init)
+		return;
+	if (size <= 0)
+		size = 1 << 17;
+	buf = malloc(size + 1);
+	if (!buf)
+		return;
+	n = klogctl(3 /* SYSLOG_ACTION_READ_ALL */, buf, size);
+	if (n <= 0) {
+		free(buf);
+		return;
+	}
+	buf[n] = 0;
+	from = buf;
+	for (p = buf; (p = strstr(p, marker)); p++)
+		from = p;
+	while (from > buf && from[-1] != '\n')
+		from--;
+	snprintf(path, sizeof(path), "%s/%s", fe_log_dir, name);
+	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+	if (fd >= 0) {
+		ssize_t len = buf + n - from;
+
+		if (write(fd, from, len) != len)
+			log_msg("write %s: %s", path, strerror(errno));
+		fsync(fd);
+		close(fd);
+	}
+	free(buf);
+}
+
 /* In a child, so a slow card never stalls a frame. */
 void klog_dump_async(const char *name)
 {
@@ -459,6 +500,18 @@ void backlight_set(int percent)
 	snprintf(val, sizeof(val), "%ld", v);
 	write_str(path, val);
 	log_verbose("backlight %d%% = %ld/%ld", percent, v, bl_max);
+}
+
+/* Backlight fully off (sleep); backlight_set() turns it back on. */
+void backlight_off(void)
+{
+	char path[400];
+
+	if (!bl_dir[0] || !fe_is_init)
+		return;
+	snprintf(path, sizeof(path), "%s/brightness", bl_dir);
+	write_str(path, "0");
+	log_verbose("backlight off");
 }
 
 /* ---------------------------------------------------- CPU and thermals */

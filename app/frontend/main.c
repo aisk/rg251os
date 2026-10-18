@@ -17,6 +17,8 @@
  *   red/green blink fatal error, shown on screen if possible and logged;
  *                   waiting for the power key
  *   red steady      powering off (saving)
+ *   green steady    asleep (light sleep; in suspend to RAM whatever the
+ *                   hardware does with the LED pin unpowered)
  * Before PID 1 starts the kernel shows its heartbeat trigger (see dts).
  *
  * Logs on the GBA partition: log/boot-NNNN/ per boot (the last 20 are
@@ -32,8 +34,18 @@
  *
  * Keys: SELECT+START in game opens the in-game menu (the RG351P has no
  * menu/function button; SELECT is also the hotkey enabler in AmberELEC
- * and ROCKNIX). SELECT in the ROM list opens the settings. The power key
- * saves and powers off at any time. See menu.c for the menus.
+ * and ROCKNIX). SELECT in the ROM list opens the settings. See menu.c for
+ * the menus.
+ *
+ * Power key (input.c has the timing): a short press sleeps, in the ROM
+ * list, the menus or in game; the next press wakes. Holding it 2 s saves
+ * and powers off. Sleep: the game is paused and its save written, the PCM
+ * closed, backlight and panel (DPMS) off, then suspend to RAM (sleep.c).
+ * If the kernel does not suspend, a light sleep instead: the same, plus
+ * the CPU capped at its lowest OPP, blocked in poll() on the input
+ * devices until the power key goes down. On wake everything is restored,
+ * the audio rate control and frame pacing start over and the waking press
+ * is not taken as a new one. Every step is logged ("sleep #N: ...").
  *
  * Settings (settings.c) are saved when leaving the settings screen in the
  * ROM list, on resume, quit and power off, whenever they differ from what
@@ -71,6 +83,7 @@
 #include "libretro.h"
 #include "menu.h"
 #include "perf.h"
+#include "sleep.h"
 
 #define BIT(id) (1u << RETRO_DEVICE_ID_JOYPAD_##id)
 #define HOTKEY (BIT(SELECT) | BIT(START))
@@ -111,18 +124,62 @@ static struct {
 	struct audio_stats last_as;
 	unsigned games;        /* started this boot, numbers the dmesg dumps */
 	uint64_t game_frames;  /* frames of the current game */
-} m = { .cv = { .w = 480, .h = 320 } };
+	/* Power key and sleep */
+	struct pwrkey pk;
+	int sleep_req;         /* short press seen, sleep from the main loop */
+	int sleeping;          /* in light sleep: a press wakes */
+	int wake, wake_key_down;
+	unsigned sleeps;
+	int wake_pending;      /* log the first frame after a wake */
+	uint64_t wake_frames;
+	int64_t wake_ms;
+	const char *power_dir;
+	int sleep_test;        /* headless: light sleep wakes by itself */
+} m = { .cv = { .w = 480, .h = 320 }, .power_dir = "/sys/power" };
 
 /* ------------------------------------------------------- input events */
 
-void on_power_key(void)
+static void request_poweroff(const char *why)
 {
 	if (m.poweroff_at)
 		return;
-	log_msg("power key pressed");
+	log_msg("power off: %s", why);
 	m.st = ST_POWEROFF;
 	/* Leave time for one frame with the message. */
 	m.poweroff_at = now_ns() + 150000000LL;
+}
+
+static void power_action(int act)
+{
+	switch (act) {
+	case PWR_SHORT:
+		if (m.st == ST_FATAL) {
+			request_poweroff("power key on the error screen");
+		} else if (m.st != ST_POWEROFF && !m.sleep_req) {
+			log_msg("power key: short press, going to sleep");
+			m.sleep_req = 1;
+		}
+		break;
+	case PWR_LONG:
+		request_poweroff("power key held 2 s");
+		break;
+	case PWR_WAKE_PRESS:
+		log_msg("power key: the press that woke the device, ignored");
+		break;
+	}
+}
+
+void on_power_key(int down)
+{
+	log_verbose("power key %s", down ? "down" : "up");
+	if (m.sleeping) {
+		/* Light sleep: going down wakes, nothing else counts. */
+		if (down && !m.wake)
+			m.wake = 1;
+		m.wake_key_down = down;
+		return;
+	}
+	power_action(pwrkey_event(&m.pk, down, now_ns()));
 }
 
 void on_volume_key(int dir)
@@ -314,6 +371,129 @@ static void close_settings(uint32_t buttons)
 	m.st = m.settings_from;
 }
 
+/* -------------------------------------------------------------- sleep */
+
+static void perf_report(void);
+
+static const char *const state_names[] = {
+	"ROM list", "game", "in-game menu", "settings", "error screen",
+	"power off",
+};
+
+/* Blocks until the power key goes down (or, in the headless test, after
+ * a simulated press). */
+static void light_sleep(void)
+{
+	int64_t t0 = now_ns();
+	unsigned polls = 0;
+
+	log_msg("sleep #%u: light sleep: emulation paused, audio closed, "
+		"backlight off, CPU at its lowest OPP, waiting for the power key",
+		m.sleeps);
+	cpuctl_sleep(1);
+	log_sync();
+	m.sleeping = 1;
+	m.wake = 0;
+	m.wake_key_down = 0;
+	while (!m.wake) {
+		struct pollfd pfd[MAX_POLL];
+		int n = input_pollfds(pfd, MAX_POLL);
+		pid_t pid;
+		int st;
+
+		polls++;
+		if (m.sleep_test && polls > 3) {
+			on_power_key(1);
+			on_power_key(0);
+			break;
+		}
+		/* The timeout only reaps children and catches hot plug. */
+		if (poll(pfd, n, m.sleep_test ? 10 : 2000) > 0)
+			input_dispatch(pfd, n);
+		else if (!m.sleep_test)
+			input_rescan();
+		while ((pid = sys_reap(&st)) > 0)
+			core_child_exited(pid, st);
+	}
+	m.sleeping = 0;
+	cpuctl_sleep(0);
+	log_msg("sleep #%u: light sleep woken by the power key after %lld ms "
+		"(%u polls)", m.sleeps, (long long)((now_ns() - t0) / 1000000),
+		polls);
+}
+
+static void do_sleep(void)
+{
+	char bat[96], marker[48];
+	struct sleep_result r;
+	struct battery b;
+	int in_game = m.st == ST_GAME, light;
+	int64_t t0 = boot_ms(), t1;
+
+	m.sleeps++;
+	snprintf(marker, sizeof(marker), "frontend: sleep #%u: entering", m.sleeps);
+	log_msg("sleep #%u: entering from %s at %lld ms", m.sleeps,
+		state_names[m.st], (long long)t0);
+	if (in_game) {
+		cpuctl_game_pause();
+		perf_report();
+	}
+	audio_suspend();
+	if (core_loaded())
+		core_save_sync();
+	save_settings();
+	if (m.led_green && m.led_red) {
+		led_set_red(0);
+		m.led_red = 0;
+	}
+	backlight_off();
+	if (display_ready())
+		display_set_power(0);
+	battery_read(&b);
+	battery_format(&b, bat, sizeof(bat));
+	log_msg("sleep #%u: battery before: %s", m.sleeps, bat);
+	log_msg("sleep #%u: prepared in %lld ms", m.sleeps,
+		(long long)(boot_ms() - t0));
+
+	sleep_suspend(m.power_dir, m.sleeps, &r);
+	light = !r.slept;
+	if (light)
+		light_sleep();
+	t1 = boot_ms();
+	m.wake_ms = t1;
+
+	/* The press that woke a suspend to RAM may still be reported. */
+	pwrkey_wake(&m.pk, light ? m.wake_key_down : -1, now_ns());
+	if (display_ready())
+		display_set_power(1);
+	backlight_set(settings.brightness);
+	battery_read(&b);
+	battery_format(&b, bat, sizeof(bat));
+	log_msg("sleep #%u: battery after: %s", m.sleeps, bat);
+	if (log_debug()) {
+		char name[48];
+
+		snprintf(name, sizeof(name), "dmesg-sleep%u.txt", m.sleeps);
+		klog_dump_since(name, marker);
+	}
+	audio_resume();
+	if (in_game) {
+		cpuctl_game_resume();
+		m.next_perf = now_ns() + PERF_INTERVAL_NS;
+	}
+	display_resync();
+	display_take_missed();
+	m.suppress = input_buttons();
+	m.prev = m.suppress;
+	m.wake_frames = display_frames();
+	m.wake_pending = display_ready();
+	log_msg("sleep #%u: awake (%s), %lld ms since entering, restored in "
+		"%lld ms, back to %s", m.sleeps,
+		light ? "light sleep" : r.method, (long long)(boot_ms() - t0),
+		(long long)(boot_ms() - t1), state_names[m.st]);
+	log_sync();
+}
+
 /* ------------------------------------------------------------- frames */
 
 /* SELECT+START (one of them newly pressed), or Esc/F1 on a keyboard. */
@@ -493,7 +673,7 @@ static void frame(int64_t now)
 			restart_game();
 			break;
 		case UI_POWEROFF:
-			on_power_key();
+			request_poweroff("in-game menu");
 			break;
 		}
 		if (m.st != ST_MENU)
@@ -573,6 +753,7 @@ static void startup(void)
 		snprintf(path, sizeof(path), "%s/frontend.txt", fe_log_dir);
 		log_open_file(path);
 		log_msg("log: boot %u, logging to %s", boot, fe_log_dir);
+		fx_init_grid_phase(boot);
 	}
 	settings_load();
 	m.saved = settings;
@@ -605,6 +786,13 @@ static void timers(int64_t now)
 
 	while ((pid = sys_reap(&st)) > 0)
 		core_child_exited(pid, st);
+
+	power_action(pwrkey_poll(&m.pk, now));
+	if (m.wake_pending && display_frames() > m.wake_frames) {
+		m.wake_pending = 0;
+		log_msg("sleep #%u: first frame on screen %lld ms after resume",
+			m.sleeps, (long long)(up - m.wake_ms));
+	}
 
 	if (!m.dumped5 && up >= 5000 && log_debug()) {
 		m.dumped5 = 1;
@@ -660,6 +848,11 @@ static void run(void)
 		int64_t now = now_ns();
 		int n = 0, timeout;
 
+		if (m.sleep_req) {
+			m.sleep_req = 0;
+			do_sleep();
+			continue;
+		}
 		timers(now);
 		if (display_can_draw())
 			frame(now);
@@ -687,10 +880,35 @@ static void run(void)
 
 /* --------------------------------------------------------- headless */
 
+/* A /sys/power without suspend support, for the sleep test. */
+static void fake_power_dir(const char *dir)
+{
+	static const char *const files[][2] = {
+		{ "state", "freeze mem\n" },
+		{ "mem_sleep", "s2idle [deep]\n" },
+		{ "wakeup_count", "7\n" },
+		{ "suspend_stats/success", "0\n" },
+		{ "suspend_stats/fail", "0\n" },
+		{ "suspend_stats/last_failed_dev", "\n" },
+	};
+	char path[400];
+
+	mkdir(dir, 0755);
+	snprintf(path, sizeof(path), "%s/suspend_stats", dir);
+	mkdir(path, 0755);
+	for (size_t i = 0; i < ARRAY_SIZE(files); i++) {
+		snprintf(path, sizeof(path), "%s/%s", dir, files[i][0]);
+		write_file_atomic(path, files[i][1], strlen(files[i][1]));
+	}
+}
+
 /*
  * Runs a ROM without display or sound device (for qemu-user): exercises
  * core glue, the scaler, the resampler and rate control against a
- * simulated codec running 0.1% fast, and the save path.
+ * simulated codec running 0.1% fast, and the save path. FE_SLEEP_AT=N
+ * also sleeps after frame N, through a fake /sys/power that cannot
+ * suspend, so the fallback light sleep and the wake path run (the light
+ * sleep wakes itself with a simulated power key press).
  */
 static int headless(const char *data, const char *rom, long frames)
 {
@@ -699,6 +917,9 @@ static int headless(const char *data, const char *rom, long frames)
 	const struct audio_stats *as = &m.last_as;
 	const uint16_t *fr;
 	int fw = 0, fh = 0, fp = 0, st;
+	const char *sleep_env = getenv("FE_SLEEP_AT");
+	long sleep_at = sleep_env ? strtol(sleep_env, NULL, 0) : -1;
+	static char power[320];
 	pid_t pid;
 
 	snprintf(fe_data_dir, sizeof(fe_data_dir), "%s", data);
@@ -709,8 +930,9 @@ static int headless(const char *data, const char *rom, long frames)
 	settings_load();
 	rom_settings_load(strrchr(rom, '/') ? strrchr(rom, '/') + 1 : rom);
 	fx_update();
-	/* FE_AUDIO=simple: the default path with a realistic 50 ppm codec
-	 * drift (it has no rate control); otherwise adaptive with 0.1%. */
+	/* FE_AUDIO=simple: the simple path with a realistic 50 ppm codec
+	 * drift (it has no rate control); otherwise adaptive (the default)
+	 * with 0.1%. */
 	{
 		const char *mode = getenv("FE_AUDIO");
 
@@ -731,6 +953,15 @@ static int headless(const char *data, const char *rom, long frames)
 	audio_set_source(core_info()->sample_rate, core_info()->fps, 60.0186);
 	cpuctl_game_start(strrchr(rom, '/') ? strrchr(rom, '/') + 1 : rom,
 			  60.0186, rom_settings.cpu_start, 0);
+	m.saved = settings;
+	m.saved_rom = rom_settings;
+	m.st = ST_GAME;
+	if (sleep_at >= 0) {
+		snprintf(power, sizeof(power), "%s/fake-power", fe_data_dir);
+		fake_power_dir(power);
+		m.power_dir = power;
+		m.sleep_test = 1;
+	}
 	for (long i = 0; i < frames; i++) {
 		/* Tap A for 10 frames every 2 s of emulated time. */
 		uint32_t b = i % 120 < 10 ? BIT(A) : 0;
@@ -754,6 +985,19 @@ static int headless(const char *data, const char *rom, long frames)
 		core_save_tick((int64_t)i * 16661000LL);
 		while ((pid = sys_reap(&st)) > 0)
 			core_child_exited(pid, st);
+		if (i == sleep_at) {
+			/* A short press, as the input layer reports it. */
+			on_power_key(1);
+			on_power_key(0);
+			if (m.sleep_req) {
+				m.sleep_req = 0;
+				do_sleep();
+			}
+			/* A stray release after the wake starts nothing. */
+			on_power_key(0);
+			log_msg("headless: after sleep, %s", m.sleep_req ?
+				"FAILED: sleep requested again" : "no new sleep request");
+		}
 		if (i % 600 == 599) {
 			perf_report();
 			/* The first 20 s are warmup for the rate control. */

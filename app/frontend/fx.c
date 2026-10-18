@@ -26,14 +26,18 @@
  * overall exponent of 1.4545, the same as the older glsl gba-color shader
  * (in ^ (2.2 + 1.0), out ^ (1/2.2)), the classic "GBA" look.
  *
- * LCD grid. Each GBA pixel is 2x2 panel pixels; with the grid only the
- * top-left one (as the player sees it) keeps the color, optionally
- * brightened by `boost` percent, and the other three are darkened by
- * `dim` percent, like the visible gaps between the GBA LCD's pixels.
- * Both are plain scale factors on the gamma encoded value, with clamping.
+ * LCD grid. Each GBA pixel is 2x2 panel pixels; with the grid only one
+ * of them keeps the color, optionally brightened by `boost` percent, and
+ * the other three are darkened by `dim` percent, like the visible gaps
+ * between the GBA LCD's pixels. Both are plain scale factors on the gamma
+ * encoded value, with clamping. Which of the four is lit (as the player
+ * sees it) is picked at random once per boot (fx_init_grid_phase), so the
+ * panel's subpixels age evenly; it never changes during a boot.
  */
 #include <math.h>
 #include <string.h>
+#include <time.h>
+#include <sys/random.h>
 
 #include "fe.h"
 #include "fx.h"
@@ -120,6 +124,26 @@ void fx_build(uint16_t *lit, uint16_t *dark, int color, int dim, int boost)
 	}
 }
 
+#ifndef GRND_INSECURE
+#define GRND_INSECURE 0x0004
+#endif
+
+const char *const grid_phase_names[4] = {
+	"top-left", "top-right", "bottom-left", "bottom-right",
+};
+
+/* splitmix64 finalizer: every input bit reaches the low two bits. */
+int fx_grid_phase_from_seed(uint64_t x)
+{
+	x += 0x9e3779b97f4a7c15ULL;
+	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+	x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+	x ^= x >> 31;
+	return (int)(x & 3);
+}
+
+static int grid_phase;
+
 static struct {
 	uint16_t lit[FX_LUT_SIZE], dark[FX_LUT_SIZE];
 	struct blit_fx fx;
@@ -128,6 +152,42 @@ static struct {
 	int built;
 } f;
 
+/*
+ * getrandom() never blocks with GRND_INSECURE (early boot, crng maybe not
+ * ready); the boot counter and the clocks are mixed in anyway, since the
+ * RTC may never have been set and a failed getrandom leaves only them.
+ */
+void fx_init_grid_phase(unsigned boot)
+{
+	uint64_t seed = 0, r = 0;
+	struct timespec bt, rt;
+	const char *src = "getrandom";
+
+	if (getrandom(&r, sizeof(r), GRND_INSECURE) != sizeof(r) &&
+	    getrandom(&r, sizeof(r), GRND_NONBLOCK) != sizeof(r)) {
+		r = 0;
+		src = "boot counter and clocks (getrandom failed)";
+	}
+	clock_gettime(CLOCK_BOOTTIME, &bt);
+	clock_gettime(CLOCK_REALTIME, &rt);
+	seed = r ^ (uint64_t)boot * 0x9e3779b97f4a7c15ULL ^
+	       (uint64_t)bt.tv_nsec << 20 ^ (uint64_t)rt.tv_sec ^
+	       (uint64_t)rt.tv_nsec << 32;
+	fx_set_grid_phase(fx_grid_phase_from_seed(seed));
+	log_msg("fx: grid lit pixel %s for this boot (seed from %s)",
+		grid_phase_names[grid_phase], src);
+}
+
+void fx_set_grid_phase(int phase)
+{
+	grid_phase = phase & 3;
+}
+
+int fx_grid_phase(void)
+{
+	return grid_phase;
+}
+
 void fx_update(void)
 {
 	int color = rom_settings.color, grid = settings.grid;
@@ -135,6 +195,8 @@ void fx_update(void)
 	int boost = grid ? settings.grid_boost : 0;
 	int64_t t0;
 
+	f.fx.lit_x = grid_phase & 1;
+	f.fx.lit_y = grid_phase >> 1;
 	f.active = color != COLOR_OFF || grid;
 	if (!f.active)
 		return;

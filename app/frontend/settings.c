@@ -20,7 +20,11 @@
  * game, and only with the fields that were in the file or differ from the
  * defaults, so a future default source (rom_settings_defaults(), e.g. a
  * ROM database turning color correction on for known titles) still
- * applies to every game whose color the user has not touched.
+ * applies to every game whose color the user has not touched. The same
+ * goes for the core: core= is only written once the user picked a core
+ * other than the default for that game (files written before gpSP became
+ * the default never contain core=mgba unless mGBA was picked after
+ * gpSP), so changing the default reaches every game without a choice.
  */
 #include <ctype.h>
 #include <stdio.h>
@@ -46,7 +50,7 @@ const struct settings settings_defaults = {
 	.grid_dim = 50,
 	.grid_boost = 0,
 	.cpu = CPU_MODE_ADAPTIVE,
-	.audio = AUDIO_SIMPLE,
+	.audio = AUDIO_ADAPTIVE,
 	.debug = 0,
 };
 struct settings settings = settings_defaults;
@@ -266,12 +270,13 @@ void settings_save(void)
 void rom_settings_defaults(const char *rom_name, struct rom_settings *r)
 {
 	/* Hook for per game defaults (e.g. color correction for titles
-	 * known to be authored for the unlit screen, or gpSP for games mGBA
-	 * cannot run at full speed); same for all today. */
+	 * known to be authored for the unlit screen, or mGBA for games gpSP
+	 * gets wrong); same for all today. gpSP is the default core: mGBA
+	 * barely keeps up with demanding games on the RK3326. */
 	(void)rom_name;
 	r->color = COLOR_OFF;
 	r->cpu_start = 0;
-	r->core = CORE_MGBA;
+	r->core = CORE_GPSP;
 }
 
 int rom_settings_parse(struct rom_settings *r, const char *text)

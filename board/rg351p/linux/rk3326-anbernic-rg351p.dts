@@ -42,6 +42,17 @@
 };
 
 /*
+ * Suspend to RAM: the BL31 turns the 24 MHz oscillator off in deep sleep
+ * (PMU osc_dis, as the open TF-A PX30 port does), so the arch timer
+ * counter stops. Tell the kernel, so it takes the time slept from the
+ * RK817 RTC and CLOCK_BOOTTIME stays right (rk3399 and rk356x carry the
+ * same property).
+ */
+&{/timer} {
+	arm,no-tick-in-suspend;
+};
+
+/*
  * Bring-up aid: heartbeat once the LED driver probes, steady blinking on
  * panic. Needs the LED triggers from debug.config, ignored otherwise.
  */

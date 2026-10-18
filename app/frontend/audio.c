@@ -35,11 +35,17 @@
  * adjusts it by up to +-0.5% to keep the ALSA buffer at its target fill,
  * which absorbs the remaining drift between the panel and codec clocks.
  *
- * Modes (settings.audio). Simple, the default: 48 kHz S16 512x8 with
+ * Modes (settings.audio). Adaptive, the default: the calibrated,
+ * nonblocking, rate controlled path below. Simple: 48 kHz S16 512x8 with
  * blocking writes, the stream starting by itself at half a buffer, a
  * fixed resampling ratio and half a buffer of silence after an underrun;
- * this is what pid351 runs on this board on mainline. Adaptive: the
- * calibrated, nonblocking, rate controlled path below.
+ * this is what pid351 runs on this board on mainline.
+ *
+ * Sleep (main.c): audio_suspend() drops the stream and closes the PCM,
+ * so nothing is running when the kernel suspends the sound card and the
+ * hw_params (I2S and codec clocks) are applied again on wake.
+ * audio_resume() reopens the same config and restarts the rate control
+ * from scratch, so the gap is not mistaken for a drifting device.
  *
  * Diagnostics in both modes: 3 s into each game the clock and I2S
  * registers (and once per boot clk_summary and /proc/asound) are logged;
@@ -144,6 +150,7 @@ static struct {
 	double dev_rate;    /* frames/s the device really plays */
 	int calibrated;
 	int started;
+	int suspended;      /* audio_suspend() closed the PCM */
 	double base_step, adj, fill_ema;
 	struct resampler rs;
 	int16_t out[OUT_MAX * 2];
@@ -1308,6 +1315,50 @@ void audio_pause(void)
 	a.started = 0;
 	a.out_n = 0;
 	a.prev_ok = 0;
+}
+
+static const char *mode_name(void);
+
+void audio_suspend(void)
+{
+	int was_open = a.pcm != NULL;
+
+	audio_pause();
+	close_pcm();
+	a.suspended = 1;
+	log_msg("audio: suspended (%s)", was_open ? "PCM closed" : "no PCM open");
+}
+
+void audio_resume(void)
+{
+	double dev_rate = a.dev_rate;
+	unsigned target = a.target;
+	int64_t t0 = now_ns();
+
+	if (!a.suspended)
+		return;
+	a.suspended = 0;
+	a.next_init_ns = 0;
+	if (audio_init()) {
+		log_msg("audio: resume: no PCM, retrying in the background");
+		return;
+	}
+	/* Keep what the game's audio_set_source chose; open_cand resets it. */
+	if (a.base_step > 0 && a.mode == settings.audio) {
+		a.dev_rate = dev_rate;
+		a.target = target;
+	}
+	a.adj = 1.0;
+	a.fill_ema = a.target;
+	if (a.base_step > 0)
+		rs_init(&a.rs, a.base_step);
+	a.out_n = 0;
+	a.started = 0;
+	a.prev_ok = 0;
+	a.rate_ns = 0;
+	a.rate_frames = 0;
+	log_msg("audio: resumed, %s %s mode reopened in %.1f ms, rate control "
+		"reset", cand_name(&a.cand), mode_name(), (now_ns() - t0) / 1e6);
 }
 
 /*

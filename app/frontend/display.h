@@ -29,5 +29,10 @@ int display_poll_timeout(int64_t now);
 /* Vblanks that passed without a new frame since the last call. */
 uint32_t display_take_missed(void);
 uint64_t display_frames(void);
+/* Panel and CRTC on/off (connector DPMS) around sleep; 0 on success.
+ * Waits for a pending flip first. */
+int display_set_power(int on);
+/* Forget the vblank sequence, so a gap is not counted as missed frames. */
+void display_resync(void);
 
 #endif

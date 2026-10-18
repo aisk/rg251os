@@ -789,7 +789,8 @@ void cpuctl_game_pause(void)
 		return;
 	c.s.active = 0;
 	apply();
-	log_msg("cpufreq: menu, no floor (game target %ld kHz kept)",
+	log_msg("cpufreq: paused (menu or sleep), no floor (game target %ld "
+		"kHz kept)",
 		c.khz[c.s.opp]);
 }
 
@@ -807,6 +808,26 @@ void cpuctl_game_resume(void)
 	window_reset();
 	apply();
 	log_msg("cpufreq: resume at %ld kHz", c.khz[c.s.opp]);
+}
+
+/*
+ * Light sleep (no suspend to RAM): no floor and scaling_max_freq at the
+ * lowest OPP, so whatever still runs does so at the cheapest clock.
+ */
+void cpuctl_sleep(int on)
+{
+	if (c.act == ACT_NONE || !cpuctl_opp_count())
+		return;
+	if (on) {
+		actuate(-1);
+		write_long("scaling_max_freq", c.khz[0]);
+	} else {
+		write_long("scaling_max_freq", c.khz[c.top]);
+		apply();
+	}
+	log_msg("cpufreq: %s, scaling_max_freq %ld kHz, cur %ld kHz",
+		on ? "light sleep" : "awake", read_long("scaling_max_freq", -1),
+		cpu_freq_khz());
 }
 
 int cpuctl_in_game(void)

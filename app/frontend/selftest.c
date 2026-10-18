@@ -20,8 +20,10 @@
 #include "menu.h"
 #include "fe.h"
 #include "fx.h"
+#include "input.h"
 #include "resample.h"
 #include "romlist.h"
+#include "sleep.h"
 
 static int failures;
 
@@ -78,7 +80,7 @@ static void test_blit(void)
 	/* Same with effects: random tables, color only and with the grid. */
 	{
 		static uint16_t lit[FX_LUT_SIZE], dark[FX_LUT_SIZE];
-		const struct blit_fx fxs[2] = { { lit, NULL }, { lit, dark } };
+		const struct blit_fx fxs[2] = { { lit, NULL, 0, 0 }, { lit, dark, 0, 0 } };
 
 		for (int i = 0; i < FX_LUT_SIZE; i++) {
 			lit[i] = rnd16();
@@ -309,7 +311,7 @@ static void test_grid_pattern(void)
 {
 	static uint16_t lit[FX_LUT_SIZE], dark[FX_LUT_SIZE];
 	static uint16_t frame[256 * 160], native[320 * 480];
-	const struct blit_fx fx = { lit, dark };
+	const struct blit_fx fx = { lit, dark, 0, 0 };
 	uint16_t w, d;
 	int bad = 0;
 	int64_t t0;
@@ -383,6 +385,13 @@ static void test_settings(const char *base)
 	CHECK(settings_parse(&t, buf) == 8, "parse back: %s", buf);
 	CHECK(strstr(buf, "debug=on\n") != NULL, "debug: %s", buf);
 	CHECK(settings_defaults.debug == 0, "debug log off by default");
+	CHECK(settings_defaults.audio == AUDIO_ADAPTIVE, "audio adaptive by default");
+	{
+		struct settings u = settings_defaults;
+
+		CHECK(settings_parse(&u, "audio=simple\n") == 1 &&
+		      u.audio == AUDIO_SIMPLE, "audio=simple still selectable");
+	}
 	CHECK(strstr(buf, "audio=adaptive\n") != NULL, "audio mode: %s", buf);
 	CHECK(!memcmp(&s, &t, sizeof(s)), "round trip: %s", buf);
 	CHECK(strstr(buf, "grid=on\n") != NULL, "grid written as on/off");
@@ -420,7 +429,7 @@ static void test_settings(const char *base)
 	      r.color == COLOR_GBA_LIGHT, "rom parse");
 	CHECK(rom_settings_parse(&r, "color=7\ncolor=sepia\n") == 0 &&
 	      r.color == COLOR_GBA_LIGHT, "rom parse range");
-	CHECK(r.core == CORE_MGBA, "core default mgba");
+	CHECK(r.core == CORE_GPSP, "core default gpsp");
 	CHECK(rom_settings_parse(&r, "core=gpSP\n") == 1 && r.core == CORE_GPSP,
 	      "core parse");
 	CHECK(rom_settings_parse(&r, "core=vba\ncore=2\n") == 0 &&
@@ -482,15 +491,31 @@ static void test_settings(const char *base)
 	CHECK(strstr(buf, "color=off") != NULL, "color in the file stays: %s",
 	      buf);
 	CHECK(!strstr(buf, "core="), "default core not written: %s", buf);
-	rom_settings.core = CORE_GPSP;
+	rom_settings.core = CORE_MGBA;
 	rom_settings_save();
 	rom_settings_load("Other.gba");
-	CHECK(rom_settings.core == CORE_GPSP, "core round trip");
+	CHECK(rom_settings.core == CORE_MGBA, "core round trip");
 	memset(buf, 0, sizeof(buf));
 	read_file(path, buf, sizeof(buf) - 1);
-	CHECK(strstr(buf, "core=gpsp\n") != NULL, "core in the file: %s", buf);
+	CHECK(strstr(buf, "core=mgba\n") != NULL, "core in the file: %s", buf);
+	/* A file from before (learned cpu_start, no core) gets the new
+	 * default; an explicit choice in the file stays. */
+	write_text(path, "cpu_start=816\n");
+	rom_settings_load("Other.gba");
+	CHECK(rom_settings.core == CORE_GPSP, "old file without core: gpsp");
+	rom_settings.cpu_start = 1008;
+	rom_settings_save();
+	memset(buf, 0, sizeof(buf));
+	read_file(path, buf, sizeof(buf) - 1);
+	CHECK(!strstr(buf, "core="), "default core still not written: %s", buf);
+	write_text(path, "core=gpsp\n");
+	rom_settings_load("Other.gba");
+	rom_settings.core = CORE_MGBA;
+	rom_settings_save();
+	rom_settings_load("Other.gba");
+	CHECK(rom_settings.core == CORE_MGBA, "explicit mgba after gpsp");
 	rom_settings_load(NULL);
-	CHECK(rom_settings.core == CORE_MGBA, "no game: default core");
+	CHECK(rom_settings.core == CORE_GPSP, "no game: default core");
 	settings = keep;
 	log_set_debug(1);
 }
@@ -972,6 +997,197 @@ static void test_log_dirs(const char *base)
 	snprintf(fe_log_dir, sizeof(fe_log_dir), "%s", keep_log);
 }
 
+
+/* Power key timing: short press sleeps, holding powers off, the press
+ * and release around a wake start nothing. */
+static void test_pwrkey(void)
+{
+	const int64_t ms = 1000000;
+	struct pwrkey k = { 0 };
+	int64_t t = 1000 * ms;
+
+	CHECK(pwrkey_event(&k, 1, t) == PWR_NONE, "press alone does nothing");
+	CHECK(pwrkey_poll(&k, t + 500 * ms) == PWR_NONE, "held 0.5 s");
+	CHECK(pwrkey_event(&k, 0, t + 600 * ms) == PWR_SHORT, "short press");
+	CHECK(pwrkey_event(&k, 0, t + 700 * ms) == PWR_NONE, "double release");
+
+	/* Long press fires while held, once; its release is nothing. */
+	t += 5000 * ms;
+	pwrkey_event(&k, 1, t);
+	CHECK(pwrkey_poll(&k, t + PWRKEY_LONG_NS - ms) == PWR_NONE,
+	      "just under the long press");
+	CHECK(pwrkey_poll(&k, t + PWRKEY_LONG_NS) == PWR_LONG, "long press");
+	CHECK(pwrkey_poll(&k, t + PWRKEY_LONG_NS + 500 * ms) == PWR_NONE,
+	      "long press fires once");
+	CHECK(pwrkey_event(&k, 0, t + 3000 * ms) == PWR_NONE,
+	      "release after a long press");
+	/* Without polls, the release still tells long from short. */
+	t += 5000 * ms;
+	pwrkey_event(&k, 1, t);
+	CHECK(pwrkey_event(&k, 0, t + 2500 * ms) == PWR_LONG,
+	      "long press seen on release");
+
+	/* Suspend to RAM: the waking press and its release are swallowed,
+	 * the next press works. */
+	t += 5000 * ms;
+	pwrkey_wake(&k, -1, t);
+	CHECK(pwrkey_event(&k, 1, t + 50 * ms) == PWR_WAKE_PRESS, "wake press");
+	CHECK(pwrkey_poll(&k, t + 2500 * ms) == PWR_NONE,
+	      "holding the wake press does not power off");
+	CHECK(pwrkey_event(&k, 0, t + 2600 * ms) == PWR_NONE, "wake release");
+	pwrkey_event(&k, 1, t + 3000 * ms);
+	CHECK(pwrkey_event(&k, 0, t + 3100 * ms) == PWR_SHORT,
+	      "next press after a wake");
+	/* The waking press never reported: a late press is a new one. */
+	t += 5000 * ms;
+	pwrkey_wake(&k, -1, t);
+	pwrkey_poll(&k, t + PWRKEY_WAKE_NS);
+	pwrkey_event(&k, 1, t + PWRKEY_WAKE_NS + 10 * ms);
+	CHECK(pwrkey_event(&k, 0, t + PWRKEY_WAKE_NS + 100 * ms) == PWR_SHORT,
+	      "press after the swallow window");
+	/* Only a release reported: it closes the window. */
+	t += 5000 * ms;
+	pwrkey_wake(&k, -1, t);
+	CHECK(pwrkey_event(&k, 0, t + 20 * ms) == PWR_NONE, "lone release");
+	pwrkey_event(&k, 1, t + 200 * ms);
+	CHECK(pwrkey_event(&k, 0, t + 300 * ms) == PWR_SHORT,
+	      "press after a lone wake release");
+
+	/* Light sleep, woken while the key is down: release is nothing,
+	 * holding on does not power off. */
+	t += 5000 * ms;
+	pwrkey_wake(&k, 1, t);
+	CHECK(pwrkey_poll(&k, t + 3000 * ms) == PWR_NONE, "held after light wake");
+	CHECK(pwrkey_event(&k, 0, t + 3100 * ms) == PWR_NONE,
+	      "release after light wake");
+	pwrkey_event(&k, 1, t + 3500 * ms);
+	CHECK(pwrkey_event(&k, 0, t + 3600 * ms) == PWR_SHORT,
+	      "press after light wake");
+	/* Light sleep, key already released: nothing swallowed. */
+	pwrkey_wake(&k, 0, t + 4000 * ms);
+	pwrkey_event(&k, 1, t + 4100 * ms);
+	CHECK(pwrkey_event(&k, 0, t + 4200 * ms) == PWR_SHORT,
+	      "quick press after light wake");
+	/* Well below the RK817's own long press power off (several
+	 * seconds, not measured on this board). */
+	CHECK(PWRKEY_LONG_NS <= 3000 * ms, "long press threshold");
+}
+
+/* The lit pixel of the grid at each of the four positions. */
+static void test_grid_phases(void)
+{
+	static uint16_t lit[FX_LUT_SIZE], dark[FX_LUT_SIZE];
+	static uint16_t frame[256 * 160], a[320 * 480], b[320 * 480];
+	static uint16_t px[480 * 320];
+	struct canvas cv = { px, 480, 320 };
+	int seen[4] = { 0 };
+	uint16_t w, d;
+
+	for (int i = 0; i < 256 * 160; i++)
+		frame[i] = 0xffdf;
+	fx_build(lit, dark, COLOR_OFF, 50, 0);
+	w = lit[FX_INDEX(0xffdf)];
+	d = dark[FX_INDEX(0xffdf)];
+	for (int ph = 0; ph < 4; ph++) {
+		const struct blit_fx fx = { lit, dark, ph & 1, ph >> 1 };
+		int bad = 0, bad_ref = 0, bad_cv = 0;
+		static const int rots[] = { 270, 90, 0 };
+
+		blit_rotate(a, 320, 320, 480, 270, frame, 256, 240, 160, 2, &fx);
+		for (int lx = 0; lx < 480; lx++)
+			for (int ly = 0; ly < 320; ly++) {
+				uint16_t want = lx % 2 == (ph & 1) &&
+						ly % 2 == (ph >> 1) ? w : d;
+
+				bad += a[(479 - lx) * 320 + ly] != want;
+			}
+		CHECK(!bad, "grid phase %d: %d pixels wrong", ph, bad);
+		draw_image_fx(&cv, 0, 0, frame, 256, 240, 160, &fx);
+		for (int ly = 0; ly < 320; ly++)
+			for (int lx = 0; lx < 480; lx++)
+				bad_cv += px[ly * 480 + lx] != a[(479 - lx) * 320 + ly];
+		CHECK(!bad_cv, "grid phase %d: canvas differs in %d pixels", ph,
+		      bad_cv);
+		/* Random content, all rotations, scale 2 and 3, against the
+		 * reference. */
+		for (int i = 0; i < 256 * 160; i++)
+			frame[i] = rnd16();
+		for (size_t r = 0; r < ARRAY_SIZE(rots); r++)
+			for (int sc = 2; sc <= 3; sc++) {
+				int nw = rots[r] ? 320 : 480, nh = rots[r] ? 480 : 320;
+				int sw = sc == 2 ? 240 : 160, sh = sc == 2 ? 160 : 106;
+
+				blit_rotate(a, nw, nw, nh, rots[r], frame, 256, sw, sh,
+					    sc, &fx);
+				blit_reference(b, nw, nw, nh, rots[r], frame, 256, sw,
+					       sh, sc, &fx);
+				bad_ref += memcmp(a, b, (size_t)nw * nh * 2) != 0;
+			}
+		CHECK(!bad_ref, "grid phase %d: %d cases differ from the "
+		      "reference", ph, bad_ref);
+		for (int i = 0; i < 256 * 160; i++)
+			frame[i] = 0xffdf;
+	}
+
+	/* The per boot choice: every position comes up, the active tables
+	 * follow it, and the settings still apply. */
+	for (uint64_t i = 0; i < 400; i++)
+		seen[fx_grid_phase_from_seed(i)]++;
+	for (int ph = 0; ph < 4; ph++)
+		CHECK(seen[ph] > 50, "grid phase %d picked %d/400 times", ph,
+		      seen[ph]);
+	fx_init_grid_phase(1);
+	CHECK(fx_grid_phase() >= 0 && fx_grid_phase() < 4, "phase range");
+	settings.grid = 1;
+	settings.grid_dim = 75;
+	settings.grid_boost = 30;
+	fx_set_grid_phase(3);
+	fx_update();
+	CHECK(fx_current() && fx_current()->dark && fx_current()->lit_x == 1 &&
+	      fx_current()->lit_y == 1, "phase 3 in the active effects");
+	CHECK(fx_current()->lit[FX_INDEX(0x8410)] != lit[FX_INDEX(0x8410)],
+	      "grid boost still applied");
+	fx_set_grid_phase(0);
+	settings = settings_defaults;
+	fx_update();
+}
+
+/* A /sys/power that cannot suspend: the caller must fall back. */
+static void test_sleep_sysfs(const char *base)
+{
+	char dir[300], path[400], stats[256];
+	struct sleep_result r;
+
+	sleep_suspend("/sys/power", 1, &r);
+	CHECK(!r.slept && r.err == EPERM, "real /sys/power untouched when not PID 1");
+
+	snprintf(dir, sizeof(dir), "%s/power", base);
+	mkdir(dir, 0755);
+	snprintf(path, sizeof(path), "%s/suspend_stats", dir);
+	mkdir(path, 0755);
+	put(dir, "state", "freeze\n");
+	sleep_suspend(dir, 2, &r);
+	CHECK(!r.slept && r.err == ENOTSUP, "no mem in state");
+
+	put(dir, "state", "freeze mem\n");
+	put(dir, "mem_sleep", "[s2idle] deep\n");
+	put(dir, "wakeup_count", "42\n");
+	put(path, "success", "3\n");
+	put(path, "fail", "1\n");
+	put(path, "last_failed_dev", "\n");
+	CHECK(sleep_stats(dir, stats, sizeof(stats)) == 3 &&
+	      !strcmp(stats, "fail=1 last_failed_dev=- success=3"),
+	      "suspend_stats: %s", stats);
+	sleep_suspend(dir, 3, &r);
+	CHECK(!r.slept && !r.err && r.success_delta == 0 && r.attempts == 1,
+	      "write returning at once is no suspend (slept %d err %d delta %ld)",
+	      r.slept, r.err, r.success_delta);
+	CHECK(!strcmp(r.method, "mem (deep)"), "deep selected: %s", r.method);
+	snprintf(path, sizeof(path), "%s/state", dir);
+	CHECK(read_file(path, stats, sizeof(stats)) == 3 &&
+	      !strncmp(stats, "mem", 3), "mem written");
+}
+
 int selftest(const char *dir)
 {
 	mkdir(dir, 0755);
@@ -992,10 +1208,13 @@ int selftest(const char *dir)
 	test_log_dirs(dir);
 	test_fx_tables();
 	test_grid_pattern();
+	test_grid_phases();
+	test_pwrkey();
 	test_romlist(dir);
 	test_files(dir);
 	test_settings(dir);
 	test_battery(dir);
+	test_sleep_sysfs(dir);
 	test_cpuctl(dir);
 	test_ui(dir);
 	log_msg("selftest: %s (%d failures)", failures ? "FAILED" : "passed",

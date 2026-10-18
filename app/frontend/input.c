@@ -315,8 +315,7 @@ static void handle_key(struct idev *dv, unsigned code, int value)
 	if (value == 2)  /* autorepeat */
 		return;
 	if (code == KEY_POWER) {
-		if (value == 1)
-			on_power_key();
+		on_power_key(value);
 		return;
 	}
 	if (code == KEY_VOLUMEUP || code == KEY_VOLUMEDOWN) {
@@ -424,6 +423,66 @@ void input_dispatch(const struct pollfd *p, int n)
 		if (k + i < n && i < ndevs &&
 		    (p[k + i].revents & (POLLIN | POLLERR | POLLHUP)))
 			read_dev(i);
+}
+
+/* ------------------------------------------------------------ power key */
+
+int pwrkey_event(struct pwrkey *k, int down, int64_t now)
+{
+	if (down) {
+		if (k->down)
+			return PWR_NONE;
+		k->down = 1;
+		k->fired = 0;
+		k->down_ns = now;
+		if (k->swallow && now < k->swallow_until) {
+			/* The press that woke the device. */
+			k->fired = 1;
+			k->swallow = 0;
+			return PWR_WAKE_PRESS;
+		}
+		k->swallow = 0;
+		return PWR_NONE;
+	}
+	/* A release ends a swallow window too: the wake press itself was
+	 * not reported. */
+	k->swallow = 0;
+	if (!k->down)
+		return PWR_NONE;
+	k->down = 0;
+	if (k->fired)
+		return PWR_NONE;
+	k->fired = 1;
+	return now - k->down_ns < PWRKEY_LONG_NS ? PWR_SHORT : PWR_LONG;
+}
+
+int pwrkey_poll(struct pwrkey *k, int64_t now)
+{
+	if (k->swallow && now >= k->swallow_until)
+		k->swallow = 0;
+	if (k->down && !k->fired && now - k->down_ns >= PWRKEY_LONG_NS) {
+		k->fired = 1;
+		return PWR_LONG;
+	}
+	return PWR_NONE;
+}
+
+void pwrkey_wake(struct pwrkey *k, int held, int64_t now)
+{
+	k->swallow = 0;
+	k->down = 0;
+	k->fired = 0;
+	if (held > 0) {
+		/* Seen going down: its release and hold are not new presses. */
+		k->down = 1;
+		k->fired = 1;
+		k->down_ns = now;
+	} else if (held < 0) {
+		/* Suspend to RAM: the press that woke us is reported after
+		 * resume, if at all. Swallow one press that comes soon. */
+		k->swallow = 1;
+		k->swallow_until = now + PWRKEY_WAKE_NS;
+	}
 }
 
 uint32_t input_buttons(void)

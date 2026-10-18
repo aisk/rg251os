@@ -22,7 +22,7 @@ LIBRETRO_INCLUDE := $(if $(MGBA_INCLUDE),$(MGBA_INCLUDE),$(EXTERNAL)/mgba/src/pl
 
 FRONTEND_SRCS := main.c log.c sys.c display.c blit.c draw.c audio.c \
 	resample.c input.c romlist.c core.c menu.c perf.c selftest.c \
-	settings.c fx.c battery.c cpuctl.c
+	settings.c fx.c battery.c cpuctl.c sleep.c
 FRONTEND_OBJS := $(addprefix $(FRONTEND_BUILD)/obj/,$(FRONTEND_SRCS:.c=.o))
 FRONTEND_STUB_OBJ := $(FRONTEND_BUILD)/obj/stub_core.o
 FRONTEND_STUB_LIB := $(FRONTEND_BUILD)/libstub_core.a
@@ -104,6 +104,9 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	test $$(grep -c 'save: wrote' $(FRONTEND_TEST_DIR)/stub/log/frontend.txt) -ge 3
 	grep -q 'core: unloaded ([1-9][0-9]* save writes)' \
 		$(FRONTEND_TEST_DIR)/stub/log/frontend.txt
+	# Defaults: gpSP for a ROM without a choice.
+	grep -q 'settings: test: defaults (no file), .*core gpsp' \
+		$(FRONTEND_TEST_DIR)/stub/log/frontend.txt
 	# Game statistics: one CSV header, a summary row per game, and the
 	# simulated cpufreq floor was applied.
 	test $$(grep -c '^time,' $(FRONTEND_TEST_DIR)/stub/log/perf.csv) -eq 1
@@ -133,14 +136,37 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	grep -q ',audio_lrck_hz$$' $(FRONTEND_TEST_DIR)/stub/log/perf.csv
 	grep -q ',adaptive,48000 Hz S16 512x8,48000,' \
 		$(FRONTEND_TEST_DIR)/stub/log/perf.csv
+	# Sleep through a /sys/power that cannot suspend: the light sleep
+	# fallback, audio and cpufreq restored, the waking press ignored,
+	# no underrun after the wake.
+	mkdir -p $(FRONTEND_TEST_DIR)/sleep
+	FE_SLEEP_AT=1500 $(QEMU_AARCH64) $(FRONTEND_STUB_ELF) --headless \
+		$(FRONTEND_TEST_DIR)/sleep $(FRONTEND_TEST_ROM) 3000
+	set -e; f=$(FRONTEND_TEST_DIR)/sleep/log/frontend.txt; \
+	grep -q 'power key: short press, going to sleep' $$f; \
+	grep -q 'sleep #1: state .freeze mem., mem_sleep .s2idle \[deep\].' $$f; \
+	grep -q 'sleep #1: wakeup_count 7 (armed)' $$f; \
+	grep -q 'sleep #1: state write returned ok (errno 0)' $$f; \
+	grep -q 'sleep #1: result: no suspend to RAM' $$f; \
+	grep -q 'sleep #1: light sleep woken by the power key' $$f; \
+	grep -q 'cpufreq: light sleep, scaling_max_freq 600000 kHz' $$f; \
+	grep -q 'cpufreq: awake, scaling_max_freq 1296000 kHz' $$f; \
+	grep -q 'audio: resumed, .* rate control reset' $$f; \
+	grep -q 'sleep #1: awake (light sleep)' $$f; \
+	grep -q 'headless: after sleep, no new sleep request' $$f; \
+	! grep -q 'sleep #2' $$f; \
+	grep -q 'underruns after warmup 0' $$f
 	# A perf.csv from an older build (other header) is moved aside.
-	mkdir -p $(FRONTEND_TEST_DIR)/core/log
+	mkdir -p $(FRONTEND_TEST_DIR)/core/log $(FRONTEND_TEST_DIR)/core/config/roms
 	printf 'time,old\n1,2\n' > $(FRONTEND_TEST_DIR)/core/log/perf.csv
-	# The real core on the default (simple) audio path.
+	# The real mGBA core (gpSP is the default, picked per ROM) on the
+	# simple audio path.
+	printf 'core=mgba\n' > $(FRONTEND_TEST_DIR)/core/config/roms/test.txt
 	FE_AUDIO=simple $(QEMU_AARCH64) $(FRONTEND_ELF) --headless \
 		$(FRONTEND_TEST_DIR)/core $(FRONTEND_TEST_ROM) 3000
 	grep -q 'audio summary (headless): simple mode, 48000 Hz S16 512x8' \
 		$(FRONTEND_TEST_DIR)/core/log/frontend.txt
+	grep -q 'core: mGBA .* loaded test.gba' $(FRONTEND_TEST_DIR)/core/log/frontend.txt
 	grep -q '^time,old' $(FRONTEND_TEST_DIR)/core/log/perf-old.csv
 	grep -q ',simple,48000 Hz S16 512x8,48000,' \
 		$(FRONTEND_TEST_DIR)/core/log/perf.csv

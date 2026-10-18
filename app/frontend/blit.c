@@ -31,12 +31,13 @@ static void reverse(uint16_t *line, int len)
 /*
  * One logical column (rotated) or row (rot 0) of source pixels, scaled,
  * into a line buffer, at offset `off`, with stride `step` in the source.
- * With the grid, `lit` gets the line through the top of the cells (lit
- * pixel then dark ones) and `dark` the other lines of the cells.
+ * With the grid, `lit` gets the line through the lit pixels of the cells
+ * (the lit one at `along` inside each cell, dark ones around it) and
+ * `dark` the other lines of the cells.
  */
 static void build_line(uint16_t *lit, uint16_t *dark, int len, int off,
 		       int rev, const uint16_t *src, long step, int n,
-		       int scale, const struct blit_fx *fx)
+		       int scale, int along, const struct blit_fx *fx)
 {
 	uint16_t *p = lit + off;
 
@@ -69,12 +70,14 @@ static void build_line(uint16_t *lit, uint16_t *dark, int len, int off,
 	} else if (scale == 2) {
 		const uint16_t *ll = fx->lit, *dl = fx->dark;
 		uint16_t *q = dark + off;
+		/* Little endian: the first pixel of the pair is the low half. */
+		int sl = along ? 16 : 0, sd = 16 - sl;
 
 		memset(dark, 0, (size_t)len * 2);
 		for (int i = 0; i < n; i++) {
 			unsigned x = FX_INDEX(src[i * step]);
 			uint32_t d = dl[x];
-			uint32_t a = ll[x] | d << 16, b = d | d << 16;
+			uint32_t a = (uint32_t)ll[x] << sl | d << sd, b = d | d << 16;
 
 			memcpy(p + 2 * i, &a, 4);
 			memcpy(q + 2 * i, &b, 4);
@@ -87,10 +90,8 @@ static void build_line(uint16_t *lit, uint16_t *dark, int len, int off,
 			unsigned x = FX_INDEX(src[i * step]);
 			uint16_t d = fx->dark[x];
 
-			*p++ = fx->lit[x];
-			*q++ = d;
-			for (int k = 1; k < scale; k++) {
-				*p++ = d;
+			for (int k = 0; k < scale; k++) {
+				*p++ = k == along ? fx->lit[x] : d;
 				*q++ = d;
 			}
 		}
@@ -109,11 +110,17 @@ void blit_rotate(uint16_t *dst, int dpitch, int nw, int nh, int rot,
 {
 	uint16_t line[MAX_LINE], dline[MAX_LINE];
 	int lw, lh, iw = sw * scale, ih = sh * scale, ox, oy;
-	int grid, built = -1;
+	int grid, built = -1, along, across;
 
 	if (fx && !fx->lit)
 		fx = NULL;
 	grid = fx && fx->dark;
+	/* Lit pixel of a cell: along the native row, and which row. */
+	along = across = 0;
+	if (grid && scale > 0) {
+		along = (rot == 0 ? fx->lit_x : fx->lit_y) % scale;
+		across = (rot == 0 ? fx->lit_y : fx->lit_x) % scale;
+	}
 	if (rot == 90 || rot == 270) {
 		lw = nh;
 		lh = nw;
@@ -153,14 +160,15 @@ void blit_rotate(uint16_t *dst, int dpitch, int nw, int nh, int rot,
 		if (s != built) {
 			if (rot == 0)
 				build_line(line, dline, nw, ox, 0,
-					   src + (long)s * spitch, 1, sw, scale, fx);
+					   src + (long)s * spitch, 1, sw, scale,
+					   along, fx);
 			else
 				build_line(line, dline, nw, oy, rot == 90, src + s,
-					   spitch, sh, scale, fx);
+					   spitch, sh, scale, along, fx);
 			built = s;
 		}
 		o = l - s * scale;
-		memcpy(row, grid && o ? dline : line, (size_t)nw * 2);
+		memcpy(row, grid && o != across ? dline : line, (size_t)nw * 2);
 	}
 }
 
@@ -199,10 +207,10 @@ void blit_reference(uint16_t *dst, int dpitch, int nw, int nh, int rot,
 					v = src[(long)sy * spitch + sx];
 				if (sx < sw && sy < sh && fx && fx->lit) {
 					unsigned x = FX_INDEX(v);
-					int top_left = lx % scale == 0 &&
-						       ly % scale == 0;
+					int is_lit = lx % scale == fx->lit_x % scale &&
+						     ly % scale == fx->lit_y % scale;
 
-					v = fx->dark && !top_left ? fx->dark[x] :
+					v = fx->dark && !is_lit ? fx->dark[x] :
 					    fx->lit[x];
 				}
 			}

@@ -97,8 +97,14 @@ void draw_image_dim(struct canvas *c, const uint16_t *src, int spitch,
 void draw_image_fx(struct canvas *c, int x0, int y0, const uint16_t *src,
 		   int spitch, int sw, int sh, const struct blit_fx *fx)
 {
+	int lx = 0, ly = 0;
+
 	if (fx && !fx->lit)
 		fx = NULL;
+	if (fx && fx->dark) {
+		lx = fx->lit_x & 1;
+		ly = fx->lit_y & 1;
+	}
 	for (int y = 0; y < sh; y++) {
 		const uint16_t *s = src + (long)y * spitch;
 		int dy = y0 + 2 * y;
@@ -122,9 +128,9 @@ void draw_image_fx(struct canvas *c, int x0, int y0, const uint16_t *src,
 			} else {
 				b = a;
 			}
-			/* Lit pixel top-left, as in blit_rotate(). */
-			d0[dx] = a;
-			d0[dx + 1] = d1[dx] = d1[dx + 1] = b;
+			/* Lit pixel at (lit_x, lit_y), as in blit_rotate(). */
+			d0[dx] = d0[dx + 1] = d1[dx] = d1[dx + 1] = b;
+			(ly ? d1 : d0)[dx + lx] = a;
 		}
 	}
 }

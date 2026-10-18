@@ -6,12 +6,15 @@
 /*
  * Per pixel effects, as lookup tables indexed by RGB555 (see FX_INDEX):
  * lit gives the output color (color correction), dark, when not NULL,
- * turns on the LCD grid: in each scale x scale cell only the top-left
- * pixel, in logical (game) orientation, uses lit and the others dark.
+ * turns on the LCD grid: in each scale x scale cell only the pixel at
+ * (lit_x, lit_y) inside the cell, in logical (game) orientation, uses lit
+ * and the others dark. 0, 0 is the top-left one; offsets are taken
+ * modulo the scale.
  */
 struct blit_fx {
 	const uint16_t *lit;
 	const uint16_t *dark;
+	int lit_x, lit_y;
 };
 
 /*

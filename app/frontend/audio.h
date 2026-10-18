@@ -34,6 +34,10 @@ void audio_push(const int16_t *samples, size_t frames);
 void audio_flush(void);
 /* Stop output (menus); the next flush restarts it. */
 void audio_pause(void);
+/* Sleep: stop and close the PCM; reopen it and restart the rate control
+ * (the gap must not look like drift). The next flush starts the stream. */
+void audio_suspend(void);
+void audio_resume(void);
 void audio_jack(int inserted);
 void audio_set_volume(int raw);
 void audio_take_stats(struct audio_stats *st);

@@ -47,6 +47,7 @@ unsigned sys_log_init(void);
 void led_set_red(int red);
 void klog_dump(const char *name);
 void klog_dump_async(const char *name);
+void klog_dump_since(const char *name, const char *marker);
 pid_t sys_reap(int *status);
 void sys_poweroff(void) __attribute__((noreturn));
 int read_file(const char *path, void *buf, size_t max);
@@ -55,6 +56,7 @@ long read_sysfs_long(const char *path, long fallback);
 int write_file_atomic(const char *path, const void *data, size_t len);
 void backlight_init(int percent);
 void backlight_set(int percent);
+void backlight_off(void);
 void cpu_info_log(void);
 long soc_temp_mc(void);
 /* pm_genpd_summary from debugfs into the log (best effort). */

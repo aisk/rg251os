@@ -5,6 +5,7 @@
  */
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -367,6 +368,89 @@ int display_poll_timeout(int64_t now)
 		return 0;
 	}
 	return FLIP_TIMEOUT_MS;
+}
+
+/* Connector property by name: its id (0 if none) and current value. */
+static uint32_t conn_prop(const char *name, uint64_t *value)
+{
+	struct drm_mode_obj_get_properties op = {
+		.obj_id = d.conn_id,
+		.obj_type = DRM_MODE_OBJECT_CONNECTOR,
+	};
+	uint32_t ids[32];
+	uint64_t vals[32];
+
+	if (xioctl(d.fd, DRM_IOCTL_MODE_OBJ_GETPROPERTIES, &op))
+		return 0;
+	if (op.count_props > ARRAY_SIZE(ids))
+		op.count_props = ARRAY_SIZE(ids);
+	op.props_ptr = (uintptr_t)ids;
+	op.prop_values_ptr = (uintptr_t)vals;
+	if (xioctl(d.fd, DRM_IOCTL_MODE_OBJ_GETPROPERTIES, &op))
+		return 0;
+	for (uint32_t i = 0; i < op.count_props && i < ARRAY_SIZE(ids); i++) {
+		struct drm_mode_get_property gp = { .prop_id = ids[i] };
+
+		if (xioctl(d.fd, DRM_IOCTL_MODE_GETPROPERTY, &gp))
+			continue;
+		if (!strcmp(gp.name, name)) {
+			*value = vals[i];
+			return ids[i];
+		}
+	}
+	return 0;
+}
+
+/* Wait (bounded) for a pending flip, so none is in flight while off. */
+static void wait_flip(int ms)
+{
+	int64_t end = now_ns() + ms * 1000000LL;
+
+	while (d.flip_pending && now_ns() < end) {
+		struct pollfd p = { .fd = d.fd, .events = POLLIN };
+
+		if (poll(&p, 1, 20) > 0)
+			display_handle_events();
+	}
+	if (d.flip_pending) {
+		log_msg("display: flip still pending after %d ms", ms);
+		d.flip_pending = 0;
+		d.back ^= 1;
+	}
+}
+
+int display_set_power(int on)
+{
+	struct drm_mode_obj_set_property sp = {
+		.value = on ? DRM_MODE_DPMS_ON : DRM_MODE_DPMS_OFF,
+		.obj_id = d.conn_id,
+		.obj_type = DRM_MODE_OBJECT_CONNECTOR,
+	};
+	uint64_t cur = 0;
+	int r;
+
+	if (d.fd < 0)
+		return -1;
+	wait_flip(100);
+	sp.prop_id = conn_prop("DPMS", &cur);
+	if (!sp.prop_id) {
+		log_msg("display: no DPMS property");
+		return -1;
+	}
+	r = xioctl(d.fd, DRM_IOCTL_MODE_OBJ_SETPROPERTY, &sp);
+	if (r)
+		log_msg("display: DPMS %s: %s", on ? "on" : "off", strerror(errno));
+	else
+		log_msg("display: DPMS %s (was %llu)", on ? "on" : "off",
+			(unsigned long long)cur);
+	display_resync();
+	return r;
+}
+
+void display_resync(void)
+{
+	d.have_seq = 0;
+	d.missed = 0;
 }
 
 uint32_t display_take_missed(void)
