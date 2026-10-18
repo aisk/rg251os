@@ -9,6 +9,7 @@ struct audio_stats {
 	unsigned overflows;  /* frames dropped because the buffer was full */
 	int fill_min, fill_max;  /* queued frames, sampled before each write */
 	double adj;          /* current rate control factor */
+	double hw_rate;      /* frames/s the device really consumed, 0 if unknown */
 };
 
 /* Mixer setup and PCM open on card 0; safe to call again if it failed. */

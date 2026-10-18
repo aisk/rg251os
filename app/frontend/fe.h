@@ -46,6 +46,8 @@ int write_file_atomic(const char *path, const void *data, size_t len);
 void backlight_init(int percent);
 void backlight_set(int percent);
 void cpu_info_log(void);
+/* Same governor on all CPUs (they share one clock on the RK3326). */
+void cpu_set_governor(const char *gov);
 long cpu_freq_khz(void);
 long soc_temp_mc(void);
 

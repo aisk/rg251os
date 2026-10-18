@@ -398,6 +398,18 @@ void cpu_info_log(void)
 	log_msg("thermal_zone0 %s: %ld mC", buf[0] ? buf : "-", soc_temp_mc());
 }
 
+/*
+ * In game the CPU is pinned to its top frequency. schedutil sees the time
+ * spent waiting for vblank as idle and settles at 816 MHz, where a frame
+ * no longer fits in one refresh; missed vblanks then halve the load it
+ * sees and it never climbs back up.
+ */
+void cpu_set_governor(const char *gov)
+{
+	write_str("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", gov);
+	log_msg("cpu0 governor %s", gov);
+}
+
 long cpu_freq_khz(void)
 {
 	return read_sysfs_long("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", -1);

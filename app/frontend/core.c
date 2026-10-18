@@ -67,9 +67,10 @@ static void core_log(enum retro_log_level level, const char *fmt, ...)
 	n = strlen(buf);
 	while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
 		buf[--n] = 0;
+	/* mGBA logs every DMA at debug level, thousands of lines a minute */
 	if (level >= RETRO_LOG_WARN)
 		log_msg("core: %s", buf);
-	else
+	else if (level == RETRO_LOG_INFO)
 		log_verbose("core: %s", buf);
 }
 
@@ -389,6 +390,7 @@ int core_load(const char *rom_path, char *err, size_t errlen)
 		c.info.width, c.info.height, c.info.fps, c.info.sample_rate,
 		c.have_bios ? bios : "HLE (built in)");
 	save_load();
+	cpu_set_governor("performance");
 	return 0;
 }
 
@@ -404,6 +406,7 @@ void core_unload(void)
 	free(c.last);
 	c.last = NULL;
 	c.sram = NULL;
+	cpu_set_governor("schedutil");
 	log_msg("core: unloaded (%u save writes)", c.saves_written);
 	c.saves_written = 0;
 }

@@ -65,6 +65,10 @@ static struct {
 	int64_t time_ns;
 	int64_t next_init_ns;
 	int dumped;
+	/* Measured consumption rate: frames written minus frames queued */
+	uint64_t written;
+	uint64_t rate_frames;
+	int64_t rate_ns;
 } a = { .adj = 1.0, .st = { .fill_min = -1 } };
 
 /* ---------------------------------------------------------------- mixer */
@@ -370,7 +374,13 @@ static int dev_write(const int16_t *buf, unsigned frames)
 		a.null_fill += n;
 		return (int)n;
 	}
-	return pcm_writei(a.pcm, buf, frames);
+	{
+		int n = pcm_writei(a.pcm, buf, frames);
+
+		if (n > 0)
+			a.written += (unsigned)n;
+		return n;
+	}
 }
 
 static long dev_delay(void)
@@ -478,10 +488,33 @@ void audio_pause(void)
 	a.out_n = 0;
 }
 
+/*
+ * Frames the codec actually played since the last call, per second. On an
+ * underrun the queue drains completely, so the count stays right across
+ * xruns as long as the delay can be read.
+ */
+static double measure_rate(void)
+{
+	int64_t now = now_ns();
+	long fill = a.pcm ? pcm_get_delay(a.pcm) : -1;
+	uint64_t played;
+	double r = 0;
+
+	if (fill < 0)
+		fill = 0;
+	played = a.written > (uint64_t)fill ? a.written - (uint64_t)fill : 0;
+	if (a.rate_ns && now > a.rate_ns && played >= a.rate_frames)
+		r = (played - a.rate_frames) * 1e9 / (double)(now - a.rate_ns);
+	a.rate_frames = played;
+	a.rate_ns = now;
+	return r;
+}
+
 void audio_take_stats(struct audio_stats *st)
 {
 	*st = a.st;
 	st->adj = a.adj;
+	st->hw_rate = a.pcm ? measure_rate() : 0;
 	memset(&a.st, 0, sizeof(a.st));
 	a.st.fill_min = -1;
 }

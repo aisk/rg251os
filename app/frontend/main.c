@@ -224,10 +224,10 @@ static void perf_report(void)
 	perf_format(&m.p_audio, aud, sizeof(aud));
 	log_msg("perf: %llu frames, ms avg/p99/max: run %s blit %s audio %s; "
 		"missed vblanks %u, underruns %u, overflow %u frames, fill %d..%d, "
-		"drc %.4f, cpu0 %ld MHz, temp %s",
+		"drc %.4f, codec %.0f Hz, cpu0 %ld MHz, temp %s",
 		(unsigned long long)m.perf_frames, run, blit, aud, m.missed,
 		as.xruns, as.overflows, as.fill_min, as.fill_max, as.adj,
-		khz > 0 ? khz / 1000 : -1, temp);
+		as.hw_rate, khz > 0 ? khz / 1000 : -1, temp);
 	m.perf_frames = 0;
 	m.missed = 0;
 	if (++m.reports % 6 == 0 && fe_is_init)
