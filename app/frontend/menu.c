@@ -30,11 +30,10 @@
 #include "cpuctl.h"
 #include "fe.h"
 #include "fx.h"
-#include "libretro.h"
+#include "input.h"
 #include "menu.h"
 #include "romlist.h"
 
-#define BIT(id) (1u << RETRO_DEVICE_ID_JOYPAD_##id)
 #define ROW_H 18
 #define LIST_Y 40
 #define LIST_ROWS 14
@@ -54,7 +53,8 @@ uint32_t ui_repeat(uint32_t held, int64_t now)
 {
 	static uint32_t prev;
 	static int64_t next;
-	const uint32_t dirs = BIT(UP) | BIT(DOWN) | BIT(LEFT) | BIT(RIGHT);
+	const uint32_t dirs = JOY_BIT(UP) | JOY_BIT(DOWN) | JOY_BIT(LEFT) |
+			      JOY_BIT(RIGHT);
 	uint32_t pressed = held & ~prev;
 
 	if (pressed & dirs)
@@ -167,24 +167,24 @@ void romlist_menu_enter(void)
 int romlist_menu_update(uint32_t pressed, char *path, size_t size)
 {
 	if (!roms.count)
-		pressed &= BIT(SELECT);
-	if (pressed & BIT(UP))
+		pressed &= JOY_BIT(SELECT);
+	if (pressed & JOY_BIT(UP))
 		sel = sel > 0 ? sel - 1 : roms.count - 1;
-	if (pressed & BIT(DOWN))
+	if (pressed & JOY_BIT(DOWN))
 		sel = sel < roms.count - 1 ? sel + 1 : 0;
-	if (pressed & BIT(LEFT))
+	if (pressed & JOY_BIT(LEFT))
 		sel = sel > LIST_ROWS ? sel - LIST_ROWS : 0;
-	if (pressed & BIT(RIGHT))
+	if (pressed & JOY_BIT(RIGHT))
 		sel = sel + LIST_ROWS < roms.count ? sel + LIST_ROWS : roms.count - 1;
 	if (sel < top)
 		top = sel;
 	if (sel >= top + LIST_ROWS)
 		top = sel - LIST_ROWS + 1;
-	if (pressed & BIT(SELECT)) {
+	if (pressed & JOY_BIT(SELECT)) {
 		message[0] = 0;
 		return UI_SETTINGS;
 	}
-	if (pressed & (BIT(A) | BIT(START))) {
+	if (pressed & (JOY_BIT(A) | JOY_BIT(START))) {
 		snprintf(path, size, "%s/roms/%s", fe_data_dir, roms.names[sel]);
 		message[0] = 0;
 		return UI_START_ROM;
@@ -275,15 +275,15 @@ int ingame_menu_update(uint32_t pressed)
 {
 	int d = 0;
 
-	if (pressed & BIT(UP))
+	if (pressed & JOY_BIT(UP))
 		ig.sel = (ig.sel + IG_COUNT - 1) % IG_COUNT;
-	if (pressed & BIT(DOWN))
+	if (pressed & JOY_BIT(DOWN))
 		ig.sel = (ig.sel + 1) % IG_COUNT;
-	if (pressed & BIT(LEFT))
+	if (pressed & JOY_BIT(LEFT))
 		d = -1;
-	if (pressed & BIT(RIGHT))
+	if (pressed & JOY_BIT(RIGHT))
 		d = 1;
-	if (pressed & BIT(B))
+	if (pressed & JOY_BIT(B))
 		return UI_RESUME;
 
 	if (d && ig.sel == IG_VOLUME)
@@ -294,7 +294,7 @@ int ingame_menu_update(uint32_t pressed)
 		cpu_step(d);
 	if (d && ig.sel == IG_CORE)
 		core_step(d);
-	if (pressed & (BIT(A) | BIT(START))) {
+	if (pressed & (JOY_BIT(A) | JOY_BIT(START))) {
 		switch (ig.sel) {
 		case IG_RESUME:
 			return UI_RESUME;
@@ -436,17 +436,17 @@ int settings_menu_update(uint32_t pressed)
 {
 	int item = st.items[st.sel];
 
-	if (pressed & BIT(UP))
+	if (pressed & JOY_BIT(UP))
 		st.sel = (st.sel + st.count - 1) % st.count;
-	if (pressed & BIT(DOWN))
+	if (pressed & JOY_BIT(DOWN))
 		st.sel = (st.sel + 1) % st.count;
-	if (pressed & BIT(B))
+	if (pressed & JOY_BIT(B))
 		return UI_BACK;
-	if (pressed & BIT(LEFT))
+	if (pressed & JOY_BIT(LEFT))
 		settings_change(item, -1);
-	if (pressed & BIT(RIGHT))
+	if (pressed & JOY_BIT(RIGHT))
 		settings_change(item, 1);
-	if (pressed & (BIT(A) | BIT(START))) {
+	if (pressed & (JOY_BIT(A) | JOY_BIT(START))) {
 		if (item == SI_BACK)
 			return UI_BACK;
 		if (item == SI_GRID || item == SI_COLOR || item == SI_AUDIO ||

@@ -6,9 +6,7 @@
 
 struct core_info {
 	double fps, sample_rate;
-	unsigned width, height;
 	int core;  /* enum core_id actually loaded */
-	const char *name, *version;
 };
 
 /* Load a ROM by path with the given core (enum core_id; one that is not

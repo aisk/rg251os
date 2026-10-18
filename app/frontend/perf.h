@@ -16,5 +16,6 @@ struct perf_series {
 void perf_add(struct perf_series *s, int64_t ns);
 /* "avg/p99/max" in ms, then resets the series. */
 void perf_format(struct perf_series *s, char *buf, int size);
+void perf_reset(struct perf_series *s);
 
 #endif

@@ -1,5 +1,5 @@
 /*
- * Stand-in libretro core for building and testing without mGBA: a moving
+ * Stand-in libretro core for building and testing without the real cores: a moving
  * test pattern at 240x160 RGB565, a 440 Hz tone at 32768 Hz in batches
  * like mGBA's, and a 32KiB "SRAM" that counts A presses so the save path
  * can be exercised. Buttons are drawn as boxes at the bottom.

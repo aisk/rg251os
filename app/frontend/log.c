@@ -1,16 +1,18 @@
 /*
- * Logging. Every line gets a CLOCK_BOOTTIME timestamp so it lines up with
- * dmesg. Until the GBA partition is mounted, lines are kept in memory and
- * written out when the log file opens. Important lines also go to
- * /dev/kmsg, so they show up in the dmesg dumps as well.
+ * Logging and clocks. Every line gets a CLOCK_BOOTTIME timestamp so it
+ * lines up with dmesg. Until the GBA partition is mounted, lines are kept
+ * in memory and written out when the log file opens. Important lines also
+ * go to /dev/kmsg (stderr when not PID 1), so they show up in the dmesg
+ * dumps as well.
  *
  * Debug logging (settings "debug", off by default, switchable live in
  * the settings menus): when off, log_verbose() lines are dropped, and the
  * other modules skip what only serves investigations (log_debug()): the
  * 10 s perf lines, battery and cpufreq change lines, kernel log dumps
- * other than at power off and fatal errors, genpd, clk, /proc/asound,
- * mixer, DAPM and /dev/mem register dumps, and ALSA xrun_debug. Startup,
- * errors, game start/stop, saves and the per game summaries stay.
+ * other than at power off and fatal errors, input key and axis lists,
+ * mixer and ALSA dumps, ALSA xrun_debug and the kernel's suspend debug
+ * messages. Startup, errors, game start/stop, saves, sleep and the per
+ * game summaries stay.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -42,6 +44,16 @@ int64_t boot_ms(void)
 
 	clock_gettime(CLOCK_BOOTTIME, &ts);
 	return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+int realtime_utc(struct tm *tm)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_REALTIME, &ts);
+	if (!gmtime_r(&ts.tv_sec, tm))
+		memset(tm, 0, sizeof(*tm));
+	return ts.tv_sec > 1704067200;  /* 2024-01-01 */
 }
 
 void log_set_kmsg(int fd)
@@ -132,20 +144,12 @@ int log_debug(void)
 	return debug;
 }
 
-/*
- * Keep the previous run's log next to the new one: when something goes
- * wrong the user often reboots before copying the card.
- */
+/* Replaces the file; earlier boots have their own directory. */
 void log_open_file(const char *path)
 {
-	char prev[300];
-	const char *dot = strrchr(path, '.');
-	int fd;
+	int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND | O_CLOEXEC,
+		      0644);
 
-	snprintf(prev, sizeof(prev), "%.*s-prev%s",
-		 dot ? (int)(dot - path) : (int)strlen(path), path, dot ? dot : "");
-	rename(path, prev);
-	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND | O_CLOEXEC, 0644);
 	if (fd < 0) {
 		log_msg("open %s: %s", path, strerror(errno));
 		return;

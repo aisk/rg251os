@@ -44,8 +44,6 @@ void cpuctl_sleep(int on);
 
 /* State for the perf line. */
 void cpuctl_format(char *buf, int size);
-/* Current target OPP in kHz. */
-long cpuctl_target_khz(void);
 
 /* For tests. */
 struct cpuctl_counters {

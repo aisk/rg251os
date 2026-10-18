@@ -197,24 +197,18 @@ static struct {
 
 static long read_long(const char *name, long fallback)
 {
-	char path[320];
-
-	snprintf(path, sizeof(path), "%s/%s", c.root, name);
-	return read_sysfs_long(path, fallback);
+	return read_attr_long(c.root, name, fallback);
 }
 
 static void write_long(const char *name, long v)
 {
-	char path[320], buf[24];
-	int fd, n;
+	char buf[24];
+	int err;
 
-	snprintf(path, sizeof(path), "%s/%s", c.root, name);
-	n = snprintf(buf, sizeof(buf), "%ld\n", v);
-	fd = open(path, O_WRONLY | O_TRUNC | O_CLOEXEC);
-	if (fd < 0 || write(fd, buf, n) != n)
-		log_msg("cpufreq: write %s: %s", path, strerror(errno));
-	if (fd >= 0)
-		close(fd);
+	snprintf(buf, sizeof(buf), "%ld\n", v);
+	err = write_attr(c.root, name, buf);
+	if (err)
+		log_msg("cpufreq: write %s/%s: %s", c.root, name, strerror(err));
 }
 
 long cpu_freq_khz(void)
@@ -259,15 +253,14 @@ int cpuctl_fake_sysfs(const char *dir)
 
 void cpuctl_init(const char *root)
 {
-	char path[320], buf[256], list[128], *p, *end;
+	char buf[256], list[128], *p, *end;
 	size_t ln = 0;
 
 	snprintf(c.root, sizeof(c.root), "%s", root ? root : CPUFREQ_SYSFS);
 	c.act = root ? ACT_FAKE : fe_is_init ? ACT_UCLAMP : ACT_NONE;
 	c.applied = -1;
 	c.n = 0;
-	snprintf(path, sizeof(path), "%s/scaling_available_frequencies", c.root);
-	read_sysfs(path, buf, sizeof(buf));
+	read_attr(c.root, "scaling_available_frequencies", buf, sizeof(buf));
 	for (p = buf; c.n < CPU_MAX_OPPS; p = end) {
 		long v = strtol(p, &end, 10);
 
@@ -463,13 +456,13 @@ void cpuctl_set_mode(int mode)
 
 static int read_kstats(long *tis, long *trans)
 {
-	char path[320], buf[1024], *p, *end;
+	char buf[1024], *p, *end;
 	int got = 0;
 
 	memset(tis, 0, sizeof(long) * CPU_MAX_OPPS);
 	*trans = read_long("stats/total_trans", -1);
-	snprintf(path, sizeof(path), "%s/stats/time_in_state", c.root);
-	if (read_sysfs(path, buf, sizeof(buf)) <= 0 || *trans < 0)
+	if (read_attr(c.root, "stats/time_in_state", buf, sizeof(buf)) <= 0 ||
+	    *trans < 0)
 		return -1;
 	for (p = buf; *p; p = end) {
 		long khz = strtol(p, &end, 10), t;
@@ -835,11 +828,6 @@ int cpuctl_in_game(void)
 	return c.s.in_game;
 }
 
-long cpuctl_target_khz(void)
-{
-	return c.khz[c.s.in_game ? c.s.opp : c.top];
-}
-
 static int learn(void)
 {
 	int found = -1, mhz;
@@ -866,12 +854,9 @@ static int learn(void)
 
 static void timestamp(char *buf, size_t size)
 {
-	struct timespec ts;
 	struct tm tm;
 
-	clock_gettime(CLOCK_REALTIME, &ts);
-	/* Only trust the RTC (RTC_HCTOSYS) when it was ever set. */
-	if (ts.tv_sec > 1704067200 && gmtime_r(&ts.tv_sec, &tm))
+	if (realtime_utc(&tm))
 		strftime(buf, size, "%Y-%m-%dT%H:%M:%SZ", &tm);
 	else
 		snprintf(buf, size, "boot+%.0f", boot_ms() / 1000.0);
@@ -899,8 +884,8 @@ static const char csv_header[] =
 	"work_p99_ms,work_max_ms,missed,missed_cpu,underruns,changes,"
 	"bat_samples,avg_mA,avg_mV,avg_mW,backlight_pct,grid,grid_dim,"
 	"grid_boost,color,kernel_s,kernel_trans,start_mhz,learned_mhz,"
-	"audio_mode,audio_config,audio_dev_hz,audio_measured_hz,"
-	"audio_fill_min,audio_fill_max,audio_lrck_hz\n";
+	"audio_mode,audio_config,audio_measured_hz,audio_fill_min,"
+	"audio_fill_max\n";
 
 /* One CSV row and one log line. opp < 0: summary of a class. */
 static size_t emit(char *buf, size_t size, const char *when, const char *qrom,

@@ -2,11 +2,12 @@
  * frontend: the RG351P GBA frontend, running as PID 1 (/sbin/init).
  *
  * One static program: mounts, logging, KMS output, evdev input, ALSA
- * audio and a statically linked libretro core (mGBA). The main loop is
- * driven by page flip events: whenever the previous frame is on screen,
- * one retro_run is done, the frame is scaled 2x and rotated straight into
- * the back buffer and flipped, so emulation runs at the panel's 60.02 Hz
- * and audio is resampled to match (see audio.c).
+ * audio and the statically linked libretro cores (mGBA and gpSP, picked
+ * per game, see core.c). The main loop is driven by page flip events:
+ * whenever the previous frame is on screen, one retro_run is done, the
+ * frame is scaled 2x and rotated straight into the back buffer and
+ * flipped, so emulation runs at the panel's 60.02 Hz and audio is
+ * resampled to match (see audio.c).
  *
  * Status LED (one GPIO, red or green):
  *   red steady      starting up (set as soon as PID 1 runs)
@@ -23,9 +24,10 @@
  *
  * Logs on the GBA partition: log/boot-NNNN/ per boot (the last 20 are
  * kept, log/LATEST.txt names the newest, see sys_log_init) with
- * frontend.txt (this program), dmesg-5s.txt, dmesg-20s.txt,
- * dmesg-game<N>-30s.txt and dmesg-game<N>-end.txt (each game),
- * dmesg-poweroff.txt; and log/perf.csv across boots (per game and CPU
+ * frontend.txt (this program) and dmesg-poweroff.txt, plus with debug
+ * logging dmesg-5s.txt, dmesg-20s.txt, dmesg-game<N>-30s.txt,
+ * dmesg-game<N>-end.txt (also after a fatal error) and
+ * dmesg-sleep<N>.txt; and log/perf.csv across boots (per game and CPU
  * frequency timing, power and audio statistics, appended at the end of
  * every game, see cpuctl.c).
  *
@@ -60,12 +62,10 @@
  *                                      process, N frames each
  *   frontend --data DIR                normal UI with DATA from DIR
  */
-#include <errno.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
@@ -80,15 +80,15 @@
 #include "fe.h"
 #include "fx.h"
 #include "input.h"
-#include "libretro.h"
 #include "menu.h"
 #include "perf.h"
 #include "sleep.h"
 
-#define BIT(id) (1u << RETRO_DEVICE_ID_JOYPAD_##id)
-#define HOTKEY (BIT(SELECT) | BIT(START))
+#define HOTKEY (JOY_BIT(SELECT) | JOY_BIT(START))
 #define PERF_INTERVAL_NS (10 * 1000000000LL)
 #define MAX_POLL 24
+#define HEADLESS_HZ 60.0186
+#define HEADLESS_FRAME_NS 16661000LL
 
 int selftest(const char *dir);
 int selftest_core_switch(const char *data, long frames);
@@ -120,7 +120,6 @@ static struct {
 	unsigned missed;
 	unsigned xrun_total;
 	unsigned reports;
-	int genpd_logged;
 	struct audio_stats last_as;
 	unsigned games;        /* started this boot, numbers the dmesg dumps */
 	uint64_t game_frames;  /* frames of the current game */
@@ -210,13 +209,6 @@ static void save_settings(void)
 	}
 }
 
-/* Game statistics out and the learned start OPP into the ROM settings. */
-static void end_game_stats(void)
-{
-	if (cpuctl_in_game())
-		rom_settings.cpu_start = cpuctl_game_end();
-}
-
 /* Audio summary and a kernel log dump (XRUN / hw_ptr reports) at the end
  * of a game. Before audio_pause, while the session numbers are intact. */
 static void game_end_logs(const char *why)
@@ -234,27 +226,31 @@ static void game_end_logs(const char *why)
 	klog_dump(name);
 }
 
+/* Stop the game if one runs: logs, save written, core unloaded, game
+ * statistics out and the learned start OPP into the ROM settings. */
+static void end_game(const char *why)
+{
+	game_end_logs(why);
+	audio_pause();
+	core_unload();
+	if (cpuctl_in_game())
+		rom_settings.cpu_start = cpuctl_game_end();
+}
+
 static void fatal(const char *title, const char *msg)
 {
 	snprintf(m.fatal_title, sizeof(m.fatal_title), "%s", title);
 	snprintf(m.fatal_msg, sizeof(m.fatal_msg), "%s", msg);
 	log_msg("FATAL: %s: %s", title, msg);
 	log_sync();
-	game_end_logs("fatal");
-	if (core_loaded())
-		core_unload();
-	end_game_stats();
-	audio_pause();
+	end_game("fatal");
 	m.st = ST_FATAL;
 }
 
 static void do_poweroff(void)
 {
 	led_set_red(1);
-	game_end_logs("power off");
-	audio_pause();
-	core_unload();
-	end_game_stats();
+	end_game("power off");
 	save_settings();
 	log_msg("uptime %lld ms, dumping dmesg", (long long)boot_ms());
 	log_sync();
@@ -264,7 +260,7 @@ static void do_poweroff(void)
 
 static void start_game(const char *path)
 {
-	const struct display_info *di = display_info();
+	double hz = display_ready() ? display_info()->refresh_hz : 60.0;
 	const char *base = strrchr(path, '/');
 	char err[128];
 
@@ -283,13 +279,11 @@ static void start_game(const char *path)
 		return;
 	}
 	audio_init();
-	audio_set_source(core_info()->sample_rate, core_info()->fps,
-			 display_ready() ? di->refresh_hz : 60.0);
+	audio_set_source(core_info()->sample_rate, core_info()->fps, hz);
 	m.games++;
 	m.game_frames = 0;
 	fx_update();
-	cpuctl_game_start(m.rom_name, display_ready() ? di->refresh_hz : 60.0,
-			  rom_settings.cpu_start, now_ns());
+	cpuctl_game_start(m.rom_name, hz, rom_settings.cpu_start, now_ns());
 	m.st = ST_GAME;
 	m.suppress = input_buttons();
 	display_take_missed();
@@ -299,10 +293,7 @@ static void start_game(const char *path)
 
 static void quit_game(void)
 {
-	game_end_logs("quit");
-	audio_pause();
-	core_unload();
-	end_game_stats();
+	end_game("quit");
 	save_settings();
 	rom_settings_load(NULL);
 	m.saved_rom = rom_settings;
@@ -321,10 +312,7 @@ static void restart_game(void)
 
 	snprintf(path, sizeof(path), "%s", m.rom_path);
 	log_msg("restarting with %s", core_names[rom_settings.core]);
-	game_end_logs("restart");
-	audio_pause();
-	core_unload();
-	end_game_stats();
+	end_game("restart");
 	save_settings();
 	start_game(path);
 	if (m.st != ST_GAME) {
@@ -503,19 +491,23 @@ static int menu_hotkey(uint32_t buttons)
 	       ((buttons & BTN_BIT_MENU) && !(m.prev & BTN_BIT_MENU));
 }
 
+/* Every PERF_INTERVAL_NS in game and before sleeping: the audio counters,
+ * and with debug logging the perf line. */
 static void perf_report(void)
 {
-	char run[48], blit[48], aud[48], bat[80] = "n/a", cpu[96];
+	char run[48], blit[48], aud[48], cpu[96];
+	char bat[80] = "n/a", temp[24] = "n/a";
 	const struct battery *b = battery_get();
 	struct audio_stats as;
 	long khz, mc;
-	char temp[24] = "n/a";
 
+	audio_take_stats(&as);
+	m.xrun_total += as.xruns;
+	m.last_as = as;
 	if (!log_debug()) {
-		/* Only the counters (per game summary, headless result). */
-		audio_take_stats(&as);
-		m.xrun_total += as.xruns;
-		m.last_as = as;
+		perf_reset(&m.p_run);
+		perf_reset(&m.p_blit);
+		perf_reset(&m.p_audio);
 		m.perf_frames = 0;
 		m.missed = 0;
 		return;
@@ -531,10 +523,6 @@ static void perf_report(void)
 			 (b->ua < 0 ? -b->ua : b->ua) * (double)b->uv / 1e9,
 			 b->online ? " (charger)" : "");
 	cpuctl_format(cpu, sizeof(cpu));
-
-	audio_take_stats(&as);
-	m.xrun_total += as.xruns;
-	m.last_as = as;
 	perf_format(&m.p_run, run, sizeof(run));
 	perf_format(&m.p_blit, blit, sizeof(blit));
 	perf_format(&m.p_audio, aud, sizeof(aud));
@@ -546,14 +534,25 @@ static void perf_report(void)
 		as.xruns, as.overflows, as.fill_min, as.fill_max, as.adj,
 		as.hw_rate, khz > 0 ? khz / 1000 : -1, cpu, temp, bat,
 		settings.brightness);
-	if (!m.genpd_logged) {
-		m.genpd_logged = 1;
-		genpd_log("in game");
-	}
 	m.perf_frames = 0;
 	m.missed = 0;
 	if (++m.reports % 6 == 0 && fe_is_init)
 		log_sync_async();
+}
+
+/* One retro_run (the core pushes its audio meanwhile) and the audio
+ * write, into the run and audio timing series. */
+static void emulate(uint32_t buttons)
+{
+	int64_t t0 = now_ns(), t1, push;
+
+	core_run(buttons);
+	t1 = now_ns();
+	push = audio_take_time_ns();
+	audio_flush();
+	perf_add(&m.p_run, t1 - t0 - push);
+	perf_add(&m.p_audio, audio_take_time_ns() + push);
+	m.perf_frames++;
 }
 
 static void blit_canvas(void)
@@ -572,7 +571,7 @@ static void game_frame(uint32_t buttons, int64_t now)
 {
 	const struct display_info *di = display_info();
 	const uint16_t *fr;
-	int64_t t0, t1, t2, t3, push;
+	int64_t t0, t2, t3;
 	int fw, fh, fp, pitch, scale;
 	unsigned missed;
 	uint16_t *dst;
@@ -582,10 +581,7 @@ static void game_frame(uint32_t buttons, int64_t now)
 		return;
 	}
 	t0 = now_ns();
-	core_run(buttons & ~m.suppress & 0xffff);
-	t1 = now_ns();
-	push = audio_take_time_ns();
-	audio_flush();
+	emulate(buttons & ~m.suppress & 0xffff);
 	t2 = now_ns();
 
 	fr = core_frame(&fw, &fh, &fp);
@@ -604,10 +600,7 @@ static void game_frame(uint32_t buttons, int64_t now)
 		t3 = t2;
 	}
 
-	perf_add(&m.p_run, t1 - t0 - push);
-	perf_add(&m.p_audio, audio_take_time_ns() + push);
 	perf_add(&m.p_blit, t3 - t2);
-	m.perf_frames++;
 	missed = display_take_missed();
 	m.missed += missed;
 	/* Work: CPU time until the frame is ready for the flip. */
@@ -719,15 +712,13 @@ static void frame(int64_t now)
 /* CLOCK_REALTIME comes from the RK817 RTC (RTC_HCTOSYS) if it was set. */
 static void clock_log(void)
 {
-	struct timespec ts;
 	struct tm tm;
-	char buf[32] = "?";
+	char buf[32];
+	int valid = realtime_utc(&tm);
 
-	clock_gettime(CLOCK_REALTIME, &ts);
-	if (gmtime_r(&ts.tv_sec, &tm))
-		strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S UTC", &tm);
+	strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S UTC", &tm);
 	log_msg("clock: realtime %s%s", buf,
-		ts.tv_sec > 1704067200 ? "" : " (RTC not set, perf.csv uses boot time)");
+		valid ? "" : " (RTC not set, perf.csv uses boot time)");
 }
 
 static void startup(void)
@@ -797,7 +788,6 @@ static void timers(int64_t now)
 	if (!m.dumped5 && up >= 5000 && log_debug()) {
 		m.dumped5 = 1;
 		klog_dump_async("dmesg-5s.txt");
-		genpd_log("5 s");
 	}
 	if (!m.dumped20 && up >= 20000 && log_debug()) {
 		m.dumped20 = 1;
@@ -880,28 +870,6 @@ static void run(void)
 
 /* --------------------------------------------------------- headless */
 
-/* A /sys/power without suspend support, for the sleep test. */
-static void fake_power_dir(const char *dir)
-{
-	static const char *const files[][2] = {
-		{ "state", "freeze mem\n" },
-		{ "mem_sleep", "s2idle [deep]\n" },
-		{ "wakeup_count", "7\n" },
-		{ "suspend_stats/success", "0\n" },
-		{ "suspend_stats/fail", "0\n" },
-		{ "suspend_stats/last_failed_dev", "\n" },
-	};
-	char path[400];
-
-	mkdir(dir, 0755);
-	snprintf(path, sizeof(path), "%s/suspend_stats", dir);
-	mkdir(path, 0755);
-	for (size_t i = 0; i < ARRAY_SIZE(files); i++) {
-		snprintf(path, sizeof(path), "%s/%s", dir, files[i][0]);
-		write_file_atomic(path, files[i][1], strlen(files[i][1]));
-	}
-}
-
 /*
  * Runs a ROM without display or sound device (for qemu-user): exercises
  * core glue, the scaler, the resampler and rate control against a
@@ -913,13 +881,14 @@ static void fake_power_dir(const char *dir)
 static int headless(const char *data, const char *rom, long frames)
 {
 	static uint16_t native[320 * 480];
-	char err[128], path[300];
-	const struct audio_stats *as = &m.last_as;
-	const uint16_t *fr;
-	int fw = 0, fh = 0, fp = 0, st;
-	const char *sleep_env = getenv("FE_SLEEP_AT");
-	long sleep_at = sleep_env ? strtol(sleep_env, NULL, 0) : -1;
 	static char power[320];
+	const char *base = strrchr(rom, '/') ? strrchr(rom, '/') + 1 : rom;
+	const char *sleep_env = getenv("FE_SLEEP_AT"), *mode = getenv("FE_AUDIO");
+	long sleep_at = sleep_env ? strtol(sleep_env, NULL, 0) : -1;
+	const struct audio_stats *as = &m.last_as;
+	char err[128], path[300];
+	const uint16_t *fr;
+	int fw = 0, fh = 0, fp = 0, st, learned;
 	pid_t pid;
 
 	snprintf(fe_data_dir, sizeof(fe_data_dir), "%s", data);
@@ -928,19 +897,13 @@ static int headless(const char *data, const char *rom, long frames)
 	log_open_file(path);
 	/* Settings from DATA, so effects can be exercised too. */
 	settings_load();
-	rom_settings_load(strrchr(rom, '/') ? strrchr(rom, '/') + 1 : rom);
+	rom_settings_load(base);
 	fx_update();
 	/* FE_AUDIO=simple: the simple path with a realistic 50 ppm codec
-	 * drift (it has no rate control); otherwise adaptive (the default)
-	 * with 0.1%. */
-	{
-		const char *mode = getenv("FE_AUDIO");
-
-		settings.audio = mode && !strcmp(mode, "simple") ? AUDIO_SIMPLE :
-				 AUDIO_ADAPTIVE;
-		audio_init_null(48000, settings.audio == AUDIO_SIMPLE ? 0.00005 :
-				0.001);
-	}
+	 * drift (it has no rate control); otherwise adaptive with 0.1%. */
+	settings.audio = mode && !strcmp(mode, "simple") ? AUDIO_SIMPLE :
+			 AUDIO_ADAPTIVE;
+	audio_init_null(settings.audio == AUDIO_SIMPLE ? 0.00005 : 0.001);
 	/* Simulated cpufreq: real work times, fake 60 Hz clock. */
 	snprintf(path, sizeof(path), "%s/fake-cpufreq", fe_data_dir);
 	cpuctl_fake_sysfs(path);
@@ -950,39 +913,31 @@ static int headless(const char *data, const char *rom, long frames)
 		log_msg("headless: %s", err);
 		return 1;
 	}
-	audio_set_source(core_info()->sample_rate, core_info()->fps, 60.0186);
-	cpuctl_game_start(strrchr(rom, '/') ? strrchr(rom, '/') + 1 : rom,
-			  60.0186, rom_settings.cpu_start, 0);
+	audio_set_source(core_info()->sample_rate, core_info()->fps, HEADLESS_HZ);
+	cpuctl_game_start(base, HEADLESS_HZ, rom_settings.cpu_start, 0);
 	m.saved = settings;
 	m.saved_rom = rom_settings;
 	m.st = ST_GAME;
 	if (sleep_at >= 0) {
 		snprintf(power, sizeof(power), "%s/fake-power", fe_data_dir);
-		fake_power_dir(power);
+		sleep_fake_sysfs(power);
 		m.power_dir = power;
 		m.sleep_test = 1;
 	}
 	for (long i = 0; i < frames; i++) {
 		/* Tap A for 10 frames every 2 s of emulated time. */
-		uint32_t b = i % 120 < 10 ? BIT(A) : 0;
-		int64_t t0 = now_ns(), t1, t2, push;
+		int64_t t0 = now_ns(), t2;
 
-		core_run(b);
-		t1 = now_ns();
-		push = audio_take_time_ns();
-		audio_flush();
+		emulate(i % 120 < 10 ? JOY_BIT(A) : 0);
 		fr = core_frame(&fw, &fh, &fp);
 		t2 = now_ns();
 		if (fr)
 			blit_rotate(native, 320, 320, 480, 270, fr, fp, fw, fh, 2,
 				    fx_current());
-		perf_add(&m.p_run, t1 - t0 - push);
-		perf_add(&m.p_audio, audio_take_time_ns() + push);
 		perf_add(&m.p_blit, now_ns() - t2);
-		m.perf_frames++;
-		cpuctl_game_frame(now_ns() - t0, 0, (int64_t)(i + 1) * 16661000LL);
+		cpuctl_game_frame(now_ns() - t0, 0, (i + 1) * HEADLESS_FRAME_NS);
 		/* Fake time for the save timer: 60 frames per second. */
-		core_save_tick((int64_t)i * 16661000LL);
+		core_save_tick(i * HEADLESS_FRAME_NS);
 		while ((pid = sys_reap(&st)) > 0)
 			core_child_exited(pid, st);
 		if (i == sleep_at) {
@@ -1013,13 +968,10 @@ static int headless(const char *data, const char *rom, long frames)
 		frames, fw, fh, fp, as->adj, as->fill_min, as->fill_max,
 		m.xrun_total);
 	core_unload();
-	{
-		int learned = cpuctl_game_end();
-
-		if (learned != rom_settings.cpu_start) {
-			rom_settings.cpu_start = learned;
-			rom_settings_save();
-		}
+	learned = cpuctl_game_end();
+	if (learned != rom_settings.cpu_start) {
+		rom_settings.cpu_start = learned;
+		rom_settings_save();
 	}
 	snprintf(path, sizeof(path), "%s/native.raw", fe_data_dir);
 	write_file_atomic(path, native, sizeof(native));

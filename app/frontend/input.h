@@ -4,6 +4,9 @@
 #include <poll.h>
 #include <stdint.h>
 
+#include "libretro.h"
+
+#define JOY_BIT(id) (1u << RETRO_DEVICE_ID_JOYPAD_##id)
 /* Extra bits above the libretro joypad ids, for frontend-only keys. */
 #define BTN_BIT_MENU (1u << 20)
 

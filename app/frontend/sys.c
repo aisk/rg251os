@@ -1,7 +1,8 @@
 /*
- * PID 1 duties and small system helpers: mounts, status LED, kernel log
- * dumps, child reaping, power off, sysfs access, atomic file writes,
- * backlight, CPU info, temperature and the power domain summary.
+ * PID 1 duties and small system helpers: mounts, per boot log
+ * directories, status LED, kernel log dumps, child reaping, power off,
+ * file and sysfs access, atomic file writes, backlight, CPU info and
+ * temperature.
  */
 #include <dirent.h>
 #include <errno.h>
@@ -186,17 +187,6 @@ unsigned sys_log_init(void)
 
 /* ------------------------------------------------------------------ LED */
 
-static void write_str(const char *path, const char *val)
-{
-	int fd = open(path, O_WRONLY | O_CLOEXEC);
-
-	if (fd < 0)
-		return;
-	if (write(fd, val, strlen(val)) < 0)
-		log_verbose("write %s: %s", path, strerror(errno));
-	close(fd);
-}
-
 /*
  * The RG351 status LED is one GPIO: driven high it is red, low it is
  * green. Only touched as PID 1 (on a PC this would poke real LEDs).
@@ -219,11 +209,11 @@ void led_set_red(int red)
 		if (!triggers_cleared) {
 			snprintf(path, sizeof(path), "/sys/class/leds/%s/trigger",
 				 e->d_name);
-			write_str(path, "none");
+			write_sysfs(path, "none");
 		}
 		snprintf(path, sizeof(path), "/sys/class/leds/%s/brightness",
 			 e->d_name);
-		write_str(path, red ? "1" : "0");
+		write_sysfs(path, red ? "1" : "0");
 	}
 	triggers_cleared = 1;
 	closedir(d);
@@ -231,35 +221,9 @@ void led_set_red(int red)
 
 /* ------------------------------------------------------------- klog dump */
 
-void klog_dump(const char *name)
-{
-	int size = klogctl(10 /* SYSLOG_ACTION_SIZE_BUFFER */, NULL, 0);
-	char path[400], *buf;
-	int n, fd;
-
-	if (!fe_is_init)
-		return;
-	if (size <= 0)
-		size = 1 << 17;
-	buf = malloc(size);
-	if (!buf)
-		return;
-	n = klogctl(3 /* SYSLOG_ACTION_READ_ALL */, buf, size);
-	snprintf(path, sizeof(path), "%s/%s", fe_log_dir, name);
-	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-	if (fd >= 0 && n > 0) {
-		if (write(fd, buf, n) != n)
-			log_msg("write %s: %s", path, strerror(errno));
-		fsync(fd);
-	}
-	if (fd >= 0)
-		close(fd);
-	free(buf);
-}
-
 /*
- * Like klog_dump, but only from the last line containing marker on (the
- * whole buffer if it is gone), e.g. what a suspend and resume logged.
+ * The kernel log buffer into <log dir>/name, from the last line containing
+ * marker on (everything when marker is NULL or gone).
  */
 void klog_dump_since(const char *name, const char *marker)
 {
@@ -275,13 +239,11 @@ void klog_dump_since(const char *name, const char *marker)
 	if (!buf)
 		return;
 	n = klogctl(3 /* SYSLOG_ACTION_READ_ALL */, buf, size);
-	if (n <= 0) {
-		free(buf);
-		return;
-	}
+	if (n < 0)
+		n = 0;
 	buf[n] = 0;
 	from = buf;
-	for (p = buf; (p = strstr(p, marker)); p++)
+	for (p = buf; marker && (p = strstr(p, marker)); p++)
 		from = p;
 	while (from > buf && from[-1] != '\n')
 		from--;
@@ -290,12 +252,17 @@ void klog_dump_since(const char *name, const char *marker)
 	if (fd >= 0) {
 		ssize_t len = buf + n - from;
 
-		if (write(fd, from, len) != len)
+		if (len && write(fd, from, len) != len)
 			log_msg("write %s: %s", path, strerror(errno));
 		fsync(fd);
 		close(fd);
 	}
 	free(buf);
+}
+
+void klog_dump(const char *name)
+{
+	klog_dump_since(name, NULL);
 }
 
 /* In a child, so a slow card never stalls a frame. */
@@ -379,6 +346,49 @@ long read_sysfs_long(const char *path, long fallback)
 	if (read_sysfs(path, buf, sizeof(buf)) <= 0)
 		return fallback;
 	return strtol(buf, NULL, 10);
+}
+
+int read_attr(const char *dir, const char *name, char *buf, size_t size)
+{
+	char path[640];
+
+	snprintf(path, sizeof(path), "%s/%s", dir, name);
+	return read_sysfs(path, buf, size);
+}
+
+long read_attr_long(const char *dir, const char *name, long fallback)
+{
+	char path[640];
+
+	snprintf(path, sizeof(path), "%s/%s", dir, name);
+	return read_sysfs_long(path, fallback);
+}
+
+int write_sysfs(const char *path, const char *val)
+{
+	size_t len = strlen(val);
+	ssize_t n;
+	int fd, err = 0;
+
+	fd = open(path, O_WRONLY | O_TRUNC | O_CLOEXEC);
+	if (fd < 0)
+		return errno;
+	n = write(fd, val, len);
+	if (n < 0)
+		err = errno;
+	else if ((size_t)n != len)
+		err = EIO;
+	if (close(fd) && !err)
+		err = errno;
+	return err;
+}
+
+int write_attr(const char *dir, const char *name, const char *val)
+{
+	char path[640];
+
+	snprintf(path, sizeof(path), "%s/%s", dir, name);
+	return write_sysfs(path, val);
 }
 
 /*
@@ -498,7 +508,7 @@ void backlight_set(int percent)
 		v = 1;
 	snprintf(path, sizeof(path), "%s/brightness", bl_dir);
 	snprintf(val, sizeof(val), "%ld", v);
-	write_str(path, val);
+	write_sysfs(path, val);
 	log_verbose("backlight %d%% = %ld/%ld", percent, v, bl_max);
 }
 
@@ -510,7 +520,7 @@ void backlight_off(void)
 	if (!bl_dir[0] || !fe_is_init)
 		return;
 	snprintf(path, sizeof(path), "%s/brightness", bl_dir);
-	write_str(path, "0");
+	write_sysfs(path, "0");
 	log_verbose("backlight off");
 }
 
@@ -533,41 +543,6 @@ void cpu_info_log(void)
 	}
 	read_sysfs("/sys/class/thermal/thermal_zone0/type", buf, sizeof(buf));
 	log_msg("thermal_zone0 %s: %ld mC", buf[0] ? buf : "-", soc_temp_mc());
-}
-
-/*
- * The power domain summary shows whether the GPU and VPU domains are
- * really off. Best effort: debugfs is mounted if needed (audio.c may have
- * done it already), nothing is logged as an error.
- */
-void genpd_log(const char *when)
-{
-	static const char *const path =
-		"/sys/kernel/debug/pm_genpd/pm_genpd_summary";
-	struct stat dbg, sys;
-	char *buf, *line, *save;
-	int n;
-
-	if (!fe_is_init || !log_debug())
-		return;
-	if (stat("/sys/kernel/debug", &dbg) == 0 && stat("/sys", &sys) == 0 &&
-	    dbg.st_dev == sys.st_dev)
-		mount("debugfs", "/sys/kernel/debug", "debugfs", 0, NULL);
-	buf = malloc(16384);
-	if (!buf)
-		return;
-	n = read_file(path, buf, 16383);
-	if (n <= 0) {
-		log_verbose("genpd (%s): no %s", when, path);
-		free(buf);
-		return;
-	}
-	buf[n] = 0;
-	log_verbose("genpd (%s): pm_genpd_summary:", when);
-	for (line = strtok_r(buf, "\n", &save); line;
-	     line = strtok_r(NULL, "\n", &save))
-		log_verbose("genpd: %s", line);
-	free(buf);
 }
 
 long soc_temp_mc(void)

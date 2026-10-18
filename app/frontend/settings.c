@@ -18,13 +18,10 @@
  *
  * A per ROM file is only written once something was changed for that
  * game, and only with the fields that were in the file or differ from the
- * defaults, so a future default source (rom_settings_defaults(), e.g. a
- * ROM database turning color correction on for known titles) still
- * applies to every game whose color the user has not touched. The same
- * goes for the core: core= is only written once the user picked a core
- * other than the default for that game (files written before gpSP became
- * the default never contain core=mgba unless mGBA was picked after
- * gpSP), so changing the default reaches every game without a choice.
+ * defaults (rom_settings_defaults()), so a changed default still reaches
+ * every game the user has not touched: core= appears only once a core
+ * other than the default was picked for that game (files from before
+ * gpSP became the default contain no core= at all).
  */
 #include <ctype.h>
 #include <stdio.h>
@@ -269,9 +266,7 @@ void settings_save(void)
 
 void rom_settings_defaults(const char *rom_name, struct rom_settings *r)
 {
-	/* Hook for per game defaults (e.g. color correction for titles
-	 * known to be authored for the unlit screen, or mGBA for games gpSP
-	 * gets wrong); same for all today. gpSP is the default core: mGBA
+	/* The same for every game today. gpSP is the default core: mGBA
 	 * barely keeps up with demanding games on the RK3326. */
 	(void)rom_name;
 	r->color = COLOR_OFF;
@@ -282,12 +277,6 @@ void rom_settings_defaults(const char *rom_name, struct rom_settings *r)
 int rom_settings_parse(struct rom_settings *r, const char *text)
 {
 	return parse_fields(r, rom_fields, ARRAY_SIZE(rom_fields), text, NULL);
-}
-
-int rom_settings_format(const struct rom_settings *r, char *buf, size_t size)
-{
-	return format_fields(r, rom_fields, ARRAY_SIZE(rom_fields), ~0u, buf,
-			     size);
 }
 
 static void rom_path(char *buf, size_t size)

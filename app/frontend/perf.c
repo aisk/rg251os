@@ -38,6 +38,11 @@ void perf_format(struct perf_series *s, char *buf, int size)
 	}
 	snprintf(buf, size, "%.2f/%.2f/%.2f", s->n ? s->sum / s->n : 0.0,
 		 (double)p99, (double)s->max);
+	perf_reset(s);
+}
+
+void perf_reset(struct perf_series *s)
+{
 	s->n = 0;
 	s->sum = 0;
 	s->max = 0;

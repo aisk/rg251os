@@ -27,5 +27,7 @@ void sleep_suspend(const char *power_dir, unsigned n, struct sleep_result *r);
 
 /* "a=1 b=2 ..." from <power_dir>/suspend_stats; returns success or -1. */
 long sleep_stats(const char *power_dir, char *buf, int size);
+/* A /sys/power that offers mem but never suspends, for the headless test. */
+int sleep_fake_sysfs(const char *dir);
 
 #endif

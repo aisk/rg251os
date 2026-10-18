@@ -25,7 +25,6 @@
  * buffer thanks to copy on write.
  */
 #include <errno.h>
-#include <fcntl.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -41,7 +40,8 @@
 #include "fe.h"
 #include "libretro.h"
 
-#define SAVE_SETTLE_NS 1000000000LL
+#define SAVE_TICK_NS 1000000000LL    /* how often save RAM is compared */
+#define SAVE_SETTLE_NS 1000000000LL  /* unchanged this long before a write */
 #define MAX_ROM_SIZE (64u << 20)
 /* Core log lines per game. mGBA logs every DMA at info level (hundreds
  * per frame in some games); writing those to the card cost milliseconds
@@ -256,10 +256,9 @@ static int16_t input_state(unsigned port, unsigned device, unsigned index,
 
 static void save_load(void)
 {
-	int n;
-
-	char srm[400];
 	size_t len = strlen(c.save_path);
+	char srm[400];
+	int n;
 
 	c.sram = c.api->get_memory_data(RETRO_MEMORY_SAVE_RAM);
 	c.sram_cap = c.api->get_memory_size(RETRO_MEMORY_SAVE_RAM);
@@ -396,7 +395,7 @@ void core_save_tick(int64_t now)
 {
 	if (!c.loaded || now < c.next_tick_ns)
 		return;
-	c.next_tick_ns = now + 1000000000LL;
+	c.next_tick_ns = now + SAVE_TICK_NS;
 	save_poll_child();
 	/* Games write saves over several frames; wait until it settles. */
 	if (save_check(now) && c.save_pid == 0 &&
@@ -499,8 +498,6 @@ int core_load(const char *rom_path, int core, char *err, size_t errlen)
 	c.api->init();
 	c.api->get_system_info(&si);
 	c.info.core = core;
-	c.info.name = si.library_name;
-	c.info.version = si.library_version;
 
 	gi.path = rom_path;
 	gi.data = rom;
@@ -518,8 +515,6 @@ int core_load(const char *rom_path, int core, char *err, size_t errlen)
 	c.api->get_system_av_info(&av);
 	c.info.fps = av.timing.fps;
 	c.info.sample_rate = av.timing.sample_rate;
-	c.info.width = av.geometry.base_width;
-	c.info.height = av.geometry.base_height;
 	c.frame = NULL;
 	c.loaded = 1;
 	c.save_pid = 0;
@@ -527,7 +522,8 @@ int core_load(const char *rom_path, int core, char *err, size_t errlen)
 	log_msg("core: %s %s loaded %s (%zu KiB) in %lld ms: %ux%u, %.4f fps, "
 		"%.0f Hz audio, BIOS %s", si.library_name, si.library_version,
 		base, size >> 10, (long long)((now_ns() - t0) / 1000000),
-		c.info.width, c.info.height, c.info.fps, c.info.sample_rate,
+		av.geometry.base_width, av.geometry.base_height, c.info.fps,
+		c.info.sample_rate,
 		c.have_bios ? bios : "HLE (built in)");
 	if (c.options[0])
 		log_msg("core: options %s", c.options);

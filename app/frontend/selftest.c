@@ -178,8 +178,6 @@ static void test_resampler(void)
 		CHECK(out[2 * i] >= out[2 * i - 2], "ramp not monotonic at %zu", i);
 }
 
-#define CAL_TOL 0.02
-
 static void test_drc(double drift)
 {
 	static int16_t silence[1200 * 2];
@@ -189,7 +187,7 @@ static void test_drc(double drift)
 	int fmin = 1 << 30, fmax = 0;
 
 	settings.audio = AUDIO_ADAPTIVE;
-	audio_init_null(48000, drift);
+	audio_init_null(drift);
 	audio_set_source(32768, 59.7275, 60.0186);
 	for (int f = 0; f < 60 * 120; f++) {
 		int n;
@@ -210,31 +208,20 @@ static void test_drc(double drift)
 			}
 		}
 	}
-	log_msg("selftest: drc drift %+.3f%%: device %.0f Hz, buffer %u, adj %.4f, "
+	log_msg("selftest: drc drift %+.3f%%: device %u Hz, buffer %u, adj %.4f, "
 		"fill %d..%d of target %u, underruns %u", drift * 100,
-		audio_device_rate(), audio_buffer(), st.adj, fmin, fmax,
-		audio_target(), xruns);
+		audio_rate(), audio_buffer(), st.adj, fmin, fmax, audio_target(),
+		xruns);
 	CHECK(xruns == 0, "underruns with drift %f", drift);
 	CHECK(fmin > (int)audio_target() / 4, "fill too low with drift %f", drift);
 	CHECK(fabs(st.adj - 1) < 0.005, "drc saturated with drift %f", drift);
-	CHECK(fmax + audio_device_rate() / 60.0186 <= audio_buffer() + 1,
+	CHECK(fmax + audio_rate() / 60.0186 <= audio_buffer() + 1,
 	      "buffer overflow with drift %f", drift);
 	CHECK(st.overflows == 0, "overflow with drift %f", drift);
-	if (fabs(drift) < CAL_TOL) {
-		/* Small drift: nominal rate, DRC absorbs the rest. */
-		CHECK(audio_device_rate() == 48000, "device rate %f with drift %f",
-		      audio_device_rate(), drift);
-		CHECK(audio_buffer() == 4096, "buffer %u with drift %f",
-		      audio_buffer(), drift);
-	} else {
-		/* A device playing far off its nominal rate is measured and
-		 * resampled for, with the big fallback buffer. */
-		CHECK(fabs(audio_device_rate() / (48000 * (1 + drift)) - 1) < 0.002,
-		      "device rate %f not measured with drift %f",
-		      audio_device_rate(), drift);
-		CHECK(audio_buffer() == 8192, "buffer %u with drift %f",
-		      audio_buffer(), drift);
-	}
+	CHECK(audio_rate() == 48000 && audio_buffer() == 4096,
+	      "config %u Hz buffer %u", audio_rate(), audio_buffer());
+	CHECK(fabs(audio_session_rate() / (48000 * (1 + drift)) - 1) < 0.003,
+	      "measured rate %f with drift %f", audio_session_rate(), drift);
 }
 
 /* Color tables: identity when off, grid scaling, sane color models. */
@@ -585,7 +572,7 @@ static void test_battery(const char *base)
 	battery_poll(5000000000000000LL);
 }
 
-/* The default path: fixed ratio, half a buffer, no calibration. */
+/* The simple path: fixed ratio, blocking writes, half a buffer. */
 static void test_audio_simple(double drift, int seconds)
 {
 	static int16_t silence[1200 * 2];
@@ -595,7 +582,7 @@ static void test_audio_simple(double drift, int seconds)
 	char csv[200];
 
 	settings.audio = AUDIO_SIMPLE;
-	audio_init_null(48000, drift);
+	audio_init_null(drift);
 	audio_set_source(32768, 59.7275, 60.0186);
 	for (int f = 0; f < 60 * seconds; f++) {
 		int n;
@@ -615,12 +602,18 @@ static void test_audio_simple(double drift, int seconds)
 	log_msg("selftest: simple drift %+.4f%% %d s: underruns %u, measured %.0f "
 		"Hz, csv %s", drift * 100, seconds, xruns, audio_session_rate(), csv);
 	CHECK(xruns == 0, "simple mode underruns with drift %f", drift);
-	CHECK(audio_device_rate() == 48000 && audio_buffer() == 4096,
+	CHECK(audio_rate() == 48000 && audio_buffer() == 4096,
 	      "simple mode config");
 	CHECK(fabs(audio_session_rate() / (48000 * (1 + drift)) - 1) < 0.003,
 	      "simple mode measured rate %f", audio_session_rate());
-	CHECK(!strncmp(csv, "simple,48000 Hz S16 512x8,48000,", 32),
-	      "csv fields %s", csv);
+	{
+		int commas = 0;
+
+		for (const char *p = csv; *p; p++)
+			commas += *p == ',';
+		CHECK(!strncmp(csv, "simple,48000 Hz S16 512x8,", 26) &&
+		      commas == 4, "csv fields %s", csv);
+	}
 	settings.audio = settings_defaults.audio;
 }
 
@@ -1199,8 +1192,6 @@ int selftest(const char *dir)
 	test_drc(-0.0005);
 	test_drc(0.003);
 	test_drc(-0.003);
-	test_drc(1.0);    /* the first hardware run: device at 2x */
-	test_drc(-0.25);  /* device slower than nominal */
 	test_audio_simple(0, 60);
 	test_audio_simple(0.00005, 300);  /* 50 ppm for 5 minutes */
 	test_audio_simple(-0.0002, 300);  /* slower codec: blocks, never xruns */
@@ -1310,7 +1301,7 @@ int selftest_core_switch(const char *data, long frames)
 	snprintf(path, sizeof(path), "%s/log/frontend.txt", fe_data_dir);
 	log_open_file(path);
 	settings_load();
-	audio_init_null(48000, 0.001);
+	audio_init_null(0.001);
 	snprintf(rom, sizeof(rom), "%s/savetest.gba", data);
 	snprintf(sav, sizeof(sav), "%s/saves/savetest.sav", data);
 	snprintf(srm, sizeof(srm), "%s/saves/savetest.srm", data);

@@ -2,11 +2,10 @@
  * evdev input with hot plug through inotify on /dev/input. The internal
  * gamepad is a USB device behind a hub and shows up ~2.3s after boot, i.e.
  * a few hundred ms after we start, as three nodes: "OpenSimHardware OSH PB
- * Controller" (buttons and axes), "... Keyboard" and "... Mouse".
- *
- * During the first 30s after a device appears, every key and abs event is
- * written to the log (rate limited) so the mapping can be checked from one
- * hardware run.
+ * Controller" (buttons and axes), "... Keyboard" and "... Mouse". Every
+ * device is logged when it appears (with its keys and axes in debug
+ * logging). The power key and the headphone switch come from their own
+ * nodes and go to the main loop's callbacks.
  */
 #include <dirent.h>
 #include <errno.h>
@@ -25,8 +24,6 @@
 #include "libretro.h"
 
 #define MAX_DEVS 16
-#define TRACE_NS (30 * 1000000000LL)
-#define TRACE_RATE 40  /* lines per second per device */
 #define STICK_DEADZONE_PCT 40
 
 #define J(x) RETRO_DEVICE_ID_JOYPAD_##x
@@ -112,11 +109,6 @@ struct idev {
 	char name[80];
 	struct input_id id;
 	int is_pad_node;   /* any node of the OSH controller */
-	int64_t opened_ns;
-	int64_t trace_sec;
-	int trace_lines;
-	unsigned trace_dropped;
-	int trace_done;
 	uint32_t keys;     /* buttons from keys */
 	struct axis_state ax[ARRAY_SIZE(pad_axes)];
 };
@@ -230,7 +222,6 @@ static void open_dev(int num)
 	memset(dv, 0, sizeof(*dv));
 	dv->fd = fd;
 	dv->num = num;
-	dv->opened_ns = now_ns();
 	if (ioctl(fd, EVIOCGNAME(sizeof(dv->name) - 1), dv->name) < 0)
 		strcpy(dv->name, "?");
 	ioctl(fd, EVIOCGID, &dv->id);
@@ -279,32 +270,6 @@ int input_pollfds(struct pollfd *p, int max)
 		p[n++].revents = 0;
 	}
 	return n;
-}
-
-static void trace(struct idev *dv, const struct input_event *ev, int64_t now)
-{
-	int64_t sec;
-
-	if (dv->trace_done)
-		return;
-	if (now - dv->opened_ns > TRACE_NS) {
-		log_verbose("input event%d: event trace off after 30s (%u lines "
-			    "dropped by rate limit)", dv->num, dv->trace_dropped);
-		dv->trace_done = 1;
-		return;
-	}
-	sec = now / 1000000000;
-	if (sec != dv->trace_sec) {
-		dv->trace_sec = sec;
-		dv->trace_lines = 0;
-	}
-	if (dv->trace_lines++ >= TRACE_RATE) {
-		dv->trace_dropped++;
-		return;
-	}
-	log_verbose("in event%d %s 0x%03x = %d", dv->num,
-		    ev->type == EV_KEY ? "key" : ev->type == EV_ABS ? "abs" : "sw",
-		    ev->code, ev->value);
 }
 
 static void handle_key(struct idev *dv, unsigned code, int value)
@@ -365,7 +330,6 @@ static void read_dev(int idx)
 	struct idev *dv = &devs[idx];
 	struct input_event ev[64];
 	ssize_t n = read(dv->fd, ev, sizeof(ev));
-	int64_t now = now_ns();
 
 	if (n < 0 && errno == ENODEV) {
 		log_msg("input event%d removed", dv->num);
@@ -376,18 +340,14 @@ static void read_dev(int idx)
 	for (ssize_t i = 0; i < n / (ssize_t)sizeof(ev[0]); i++) {
 		switch (ev[i].type) {
 		case EV_KEY:
-			trace(dv, &ev[i], now);
 			handle_key(dv, ev[i].code, ev[i].value);
 			break;
 		case EV_ABS:
-			trace(dv, &ev[i], now);
 			handle_abs(dv, ev[i].code, ev[i].value);
 			break;
 		case EV_SW:
-			if (ev[i].code == SW_HEADPHONE_INSERT) {
-				trace(dv, &ev[i], now);
+			if (ev[i].code == SW_HEADPHONE_INSERT)
 				on_jack(ev[i].value);
-			}
 			break;
 		}
 	}

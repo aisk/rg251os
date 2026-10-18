@@ -18,7 +18,6 @@
  */
 #include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -26,6 +25,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 
 #include "fe.h"
@@ -42,36 +42,6 @@ static int64_t clock_ms(clockid_t id)
 
 	clock_gettime(id, &ts);
 	return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
-
-/* Returns 0 or an errno. */
-static int write_attr(const char *dir, const char *name, const char *val)
-{
-	char path[640];
-	size_t len = strlen(val);
-	ssize_t n;
-	int fd, err = 0;
-
-	snprintf(path, sizeof(path), "%s/%s", dir, name);
-	fd = open(path, O_WRONLY | O_TRUNC | O_CLOEXEC);
-	if (fd < 0)
-		return errno;
-	n = write(fd, val, len);
-	if (n < 0)
-		err = errno;
-	else if ((size_t)n != len)
-		err = EIO;
-	if (close(fd) && !err)
-		err = errno;
-	return err;
-}
-
-static int read_attr(const char *dir, const char *name, char *buf, size_t size)
-{
-	char path[640];
-
-	snprintf(path, sizeof(path), "%s/%s", dir, name);
-	return read_sysfs(path, buf, size);
 }
 
 /*
@@ -158,6 +128,30 @@ long sleep_stats(const char *power_dir, char *buf, int size)
 		free(names[i]);
 	}
 	return success;
+}
+
+int sleep_fake_sysfs(const char *dir)
+{
+	static const char *const files[][2] = {
+		{ "state", "freeze mem\n" },
+		{ "mem_sleep", "s2idle [deep]\n" },
+		{ "wakeup_count", "7\n" },
+		{ "suspend_stats/success", "0\n" },
+		{ "suspend_stats/fail", "0\n" },
+		{ "suspend_stats/last_failed_dev", "\n" },
+	};
+	char path[400];
+
+	snprintf(path, sizeof(path), "%s/suspend_stats", dir);
+	if ((mkdir(dir, 0755) && errno != EEXIST) ||
+	    (mkdir(path, 0755) && errno != EEXIST))
+		return -1;
+	for (size_t i = 0; i < ARRAY_SIZE(files); i++) {
+		snprintf(path, sizeof(path), "%s/%s", dir, files[i][0]);
+		if (write_file_atomic(path, files[i][1], strlen(files[i][1])))
+			return -1;
+	}
+	return 0;
 }
 
 void sleep_suspend(const char *power_dir, unsigned n, struct sleep_result *r)

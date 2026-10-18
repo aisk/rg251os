@@ -9,24 +9,21 @@ struct audio_stats {
 	unsigned overflows;  /* frames dropped because the buffer was full */
 	int fill_min, fill_max;  /* queued frames, sampled before each write */
 	double adj;          /* current rate control factor */
-	double hw_rate;      /* frames/s the device really consumed, 0 if unknown */
+	double hw_rate;      /* frames/s the device played, 0 if unknown */
 };
 
-/* Mixer setup and PCM open on card 0; safe to call again if it failed. */
+/* Mixer setup and PCM open on card 0 in settings.audio's mode; cheap to
+ * call again, retries at most every 2 s while it fails. */
 int audio_init(void);
-/* Simulated device for tests: consumes rate*(1+drift) frames per second
- * whatever config is opened (drift 1.0 simulates the 2x of the first run). */
-void audio_init_null(unsigned rate, double drift);
-int audio_ready(void);
-/* Nominal rate of the open PCM config. */
+/* Simulated device for tests, in settings.audio's mode: plays at the
+ * nominal rate * (1 + drift). */
+void audio_init_null(double drift);
+/* Open config: nominal rate, buffer and target fill, in frames. */
 unsigned audio_rate(void);
-/* Rate the device was measured to really play at (calibration). */
-double audio_device_rate(void);
-unsigned audio_target(void);
 unsigned audio_buffer(void);
-/* Source format: core sample rate, core fps and display refresh. The
- * first call calibrates the device (about 0.4 s, longer if the first
- * configs do not play at their nominal rate). */
+unsigned audio_target(void);
+/* Source format: core sample rate, core fps and display refresh; starts
+ * a game session (statistics) and reopens the PCM if the mode changed. */
 void audio_set_source(double in_rate, double core_fps, double display_hz);
 /* Called from the core's audio callback. */
 void audio_push(const int16_t *samples, size_t frames);
@@ -46,19 +43,16 @@ int64_t audio_take_time_ns(void);
 /* Underruns since start, never reset. */
 unsigned audio_xruns_total(void);
 
-/* Log the calibration, chosen config, rates, underruns and fill of
- * this game (call at game end, before audio_pause, and at power off). */
+/* Log mode, config, measured rate, underruns and fill of this game (call
+ * at game end, before audio_pause). */
 void audio_summary(const char *when);
 /* Device rate measured during play this game, 0 if unknown. */
 double audio_session_rate(void);
-/* perf.csv columns: audio_mode,audio_config,audio_dev_hz,
- * audio_measured_hz,audio_fill_min,audio_fill_max,audio_lrck_hz */
+/* perf.csv columns: audio_mode,audio_config,audio_measured_hz,
+ * audio_fill_min,audio_fill_max */
 int audio_csv_fields(char *buf, size_t size);
 /* Play a 440 Hz sine through the game's audio path (blocks). */
 void audio_test_tone(double seconds);
 int16_t audio_tone_sample(unsigned i, unsigned len, unsigned rate, double hz);
-
-/* Apply "Control Name=value" lines (from <data>/mixer.txt). */
-int audio_apply_mixer_text(const char *text);
 
 #endif

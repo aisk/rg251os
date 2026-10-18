@@ -6,8 +6,8 @@
  * cached values, so reading every few seconds costs next to nothing.
  *
  * Log lines: "power_supply <name>: ..." with every property once when the
- * supplies are first found, then "battery: ..." once a minute (and a
- * short form in the perf line), for calibration from the logs.
+ * supplies are first found; with debug logging also "battery: ..." once a
+ * minute (and a short form in the perf line).
  */
 #include <dirent.h>
 #include <stdio.h>
@@ -31,12 +31,11 @@ static struct {
 
 static void log_uevent(const char *path, const char *name)
 {
-	char file[400], buf[2048], out[1024];
+	char buf[2048], out[1024];
 	size_t n = 0;
 	char *line, *save;
 
-	snprintf(file, sizeof(file), "%s/uevent", path);
-	if (read_sysfs(file, buf, sizeof(buf)) <= 0) {
+	if (read_attr(path, "uevent", buf, sizeof(buf)) <= 0) {
 		log_msg("power_supply %s: no uevent", name);
 		return;
 	}
@@ -56,7 +55,7 @@ void battery_init(const char *dir)
 {
 	DIR *d;
 	struct dirent *e;
-	char path[400], type[32];
+	char type[32];
 
 	snprintf(s.root, sizeof(s.root), "%s", dir);
 	s.bat[0] = s.chg[0] = 0;
@@ -70,8 +69,7 @@ void battery_init(const char *dir)
 		if (e->d_name[0] == '.')
 			continue;
 		snprintf(sub, sizeof(sub), "%s/%s", dir, e->d_name);
-		snprintf(path, sizeof(path), "%s/type", sub);
-		if (read_sysfs(path, type, sizeof(type)) <= 0)
+		if (read_attr(sub, "type", type, sizeof(type)) <= 0)
 			continue;
 		if (!strcmp(type, "Battery") && !s.bat[0])
 			snprintf(s.bat, sizeof(s.bat), "%s", sub);
@@ -90,14 +88,6 @@ void battery_init(const char *dir)
 	}
 }
 
-static long read_long(const char *dir, const char *name, long fallback)
-{
-	char path[400];
-
-	snprintf(path, sizeof(path), "%s/%s", dir, name);
-	return read_sysfs_long(path, fallback);
-}
-
 static int parse_status(const char *v)
 {
 	if (!strcmp(v, "Charging"))
@@ -113,27 +103,26 @@ static int parse_status(const char *v)
 
 int battery_read(struct battery *b)
 {
-	char path[400], buf[32];
+	char buf[32];
 
 	memset(b, 0, sizeof(*b));
 	b->capacity = -1;
 	b->uv = -1;
 	if (!s.bat[0])
 		return -1;
-	b->capacity = (int)read_long(s.bat, "capacity", -1);
+	b->capacity = (int)read_attr_long(s.bat, "capacity", -1);
 	if (b->capacity > 100)
 		b->capacity = 100;
-	b->uv = read_long(s.bat, "voltage_now", -1);
+	b->uv = read_attr_long(s.bat, "voltage_now", -1);
 	if (b->uv < 0)
-		b->uv = read_long(s.bat, "voltage_avg", -1);
-	b->ua = read_long(s.bat, "current_now", 0x7fffffff);
+		b->uv = read_attr_long(s.bat, "voltage_avg", -1);
+	b->ua = read_attr_long(s.bat, "current_now", 0x7fffffff);
 	if (b->ua == 0x7fffffff)
-		b->ua = read_long(s.bat, "current_avg", 0);
-	snprintf(path, sizeof(path), "%s/status", s.bat);
-	read_sysfs(path, buf, sizeof(buf));
+		b->ua = read_attr_long(s.bat, "current_avg", 0);
+	read_attr(s.bat, "status", buf, sizeof(buf));
 	b->status = parse_status(buf);
 	if (s.chg[0])
-		b->online = read_long(s.chg, "online", 0) > 0;
+		b->online = read_attr_long(s.chg, "online", 0) > 0;
 	b->valid = b->capacity >= 0 || b->uv >= 0;
 	return b->valid ? 0 : -1;
 }
