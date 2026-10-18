@@ -51,8 +51,5 @@ double audio_session_rate(void);
 /* perf.csv columns: audio_mode,audio_config,audio_measured_hz,
  * audio_fill_min,audio_fill_max */
 int audio_csv_fields(char *buf, size_t size);
-/* Play a 440 Hz sine through the game's audio path (blocks). */
-void audio_test_tone(double seconds);
-int16_t audio_tone_sample(unsigned i, unsigned len, unsigned rate, double hz);
 
 #endif

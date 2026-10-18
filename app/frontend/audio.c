@@ -51,11 +51,9 @@
  * video frame, for the selftest and headless runs.
  */
 #include <errno.h>
-#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include <tinyalsa/asoundlib.h>
 
@@ -886,96 +884,4 @@ int audio_csv_fields(char *buf, size_t size)
 			 a.sess_fill_min, a.sess_fill_max);
 
 	return n < (int)size ? n : (int)size - 1;
-}
-
-/* ---------------------------------------------------------- test tone */
-
-/* Sine sample at frame i of a tone of len frames with 20 ms fades. */
-int16_t audio_tone_sample(unsigned i, unsigned len, unsigned rate, double hz)
-{
-	double fade = rate * 0.02, g = 1.0;
-
-	if (i < fade)
-		g = i / fade;
-	else if (len - i < fade)
-		g = (len - i) / fade;
-	return (int16_t)(sin(2 * M_PI * hz * i / rate) * 0.3 * 32767 * g);
-}
-
-/*
- * 440 Hz at the nominal rate through the open PCM, the same config and
- * write mode as in game, so pitch and crackle can be judged without a
- * game. Blocks for about the tone's length.
- */
-void audio_test_tone(double seconds)
-{
-	int16_t buf[SILENCE_CHUNK * 2];
-	unsigned len, done = 0, xr0 = a.xruns_total;
-	int64_t t0, t_start = 0;
-	uint64_t w0;
-	long d;
-
-	audio_init();
-	apply_mode();
-	if (!a.pcm) {
-		log_msg("audio: test tone: no PCM");
-		return;
-	}
-	audio_pause();
-	pcm_prepare(a.pcm);
-	len = (unsigned)(seconds * a.rate);
-	w0 = a.written;
-	t0 = now_ns();
-	a.prev_ok = 0;
-	a.sess_frames = 0;
-	a.sess_ns = 0;
-	while (done < len) {
-		unsigned n = len - done < SILENCE_CHUNK ? len - done : SILENCE_CHUNK;
-		int w;
-
-		for (unsigned i = 0; i < n; i++)
-			buf[2 * i] = buf[2 * i + 1] =
-				audio_tone_sample(done + i, len, a.rate, 440);
-		w = dev_write(buf, n);
-		if (w < 0 && errno == EPIPE) {
-			on_xrun("tone");
-			continue;
-		}
-		if (w < 0 && errno != EAGAIN) {
-			log_msg("audio: test tone: write: %s", pcm_get_error(a.pcm));
-			break;
-		}
-		if (w > 0)
-			done += (unsigned)w;
-		d = pcm_get_delay(a.pcm);
-		if (d >= 0) {
-			if (!t_start && dev_running())
-				t_start = now_ns();
-			rate_sample(d);
-		}
-		if (w <= 0 || (unsigned)w < n) {
-			struct timespec ts = { 0, 2000000 };
-
-			nanosleep(&ts, NULL);
-		}
-	}
-	/* Let it drain, then stop. */
-	for (int i = 0; i < 200; i++) {
-		struct timespec ts = { 0, 5000000 };
-
-		d = pcm_get_delay(a.pcm);
-		if (d < 0 || d < (long)a.period)
-			break;
-		rate_sample(d);
-		nanosleep(&ts, NULL);
-	}
-	pcm_stop(a.pcm);
-	a.started = 0;
-	log_msg("audio: test tone 440 Hz %.1f s, %s %s mode: %u underruns, "
-		"measured %.0f Hz, %llu frames written in %.2f s wall (%.2f s "
-		"after start)", seconds, config_name(), mode_name(a.mode),
-		a.xruns_total - xr0, audio_session_rate(),
-		(unsigned long long)(a.written - w0), (now_ns() - t0) / 1e9,
-		t_start ? (now_ns() - t_start) / 1e9 : 0);
-	audio_summary("test tone");
 }

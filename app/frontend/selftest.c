@@ -668,26 +668,6 @@ static void test_audio_simple(double drift, int seconds)
 	settings.audio = settings_defaults.audio;
 }
 
-static void test_tone(void)
-{
-	unsigned len = 48000, zero = 0;
-	int peak = 0;
-
-	CHECK(audio_tone_sample(0, len, 48000, 440) == 0, "tone starts at 0");
-	for (unsigned i = 1; i < len; i++) {
-		int a = audio_tone_sample(i - 1, len, 48000, 440);
-		int b = audio_tone_sample(i, len, 48000, 440);
-
-		if ((a < 0) != (b < 0))
-			zero++;
-		if (abs(b) > peak)
-			peak = abs(b);
-	}
-	/* 440 Hz: 880 sign changes per second, about -10 dBFS. */
-	CHECK(zero >= 875 && zero <= 885, "tone zero crossings %u", zero);
-	CHECK(peak > 9000 && peak < 10500, "tone peak %d", peak);
-}
-
 static void touch(const char *dir, const char *name)
 {
 	char path[400];
@@ -1382,13 +1362,22 @@ static void test_ui(const char *dir)
 	settings_menu_draw(&cv, NULL, 0, 0, 0);
 	snprintf(path, sizeof(path), "%s/ui-settings.raw", dir);
 	write_file_atomic(path, px, sizeof(px));
-	settings.grid = 1;
-	settings_menu_update(1u << 5);
-	settings_menu_update(1u << 5);
-	fx_update();
-	settings_menu_draw(&cv, NULL, 0, 0, 0);
-	snprintf(path, sizeof(path), "%s/ui-settings-grid.raw", dir);
-	write_file_atomic(path, px, sizeof(px));
+	/* Volume, Brightness, CPU, Audio, Debug log, Back: no grid rows
+	 * outside a game. */
+	settings_menu_update(JOY_BIT(DOWN));
+	settings_menu_update(JOY_BIT(DOWN));
+	settings_menu_update(JOY_BIT(A));
+	CHECK(settings.audio == AUDIO_SIMPLE, "settings: 4th row is Audio");
+	settings.audio = settings_defaults.audio;
+	settings_menu_update(JOY_BIT(DOWN));
+	settings_menu_update(JOY_BIT(DOWN));
+	CHECK(settings_menu_update(JOY_BIT(A)) == UI_BACK,
+	      "settings: 6th row is Back");
+	settings_menu_enter(1);
+	for (int i = 0; i < 5; i++)
+		settings_menu_update(JOY_BIT(DOWN));
+	CHECK(settings_menu_update(JOY_BIT(A)) == UI_BACK,
+	      "in-game settings: 6th row is Back");
 
 	/* In game: a picture with detail, GBA colors and the grid. */
 	for (int y = 0; y < 160; y++)
@@ -1398,6 +1387,7 @@ static void test_ui(const char *dir)
 			game[y * 240 + x] = (uint16_t)(r << 11 | g << 6 | b);
 		}
 	rom_settings.color = COLOR_GBA;
+	settings.grid = 1;
 	fx_update();
 	settings_menu_enter(1);
 	settings_menu_draw(&cv, game, 240, 240, 160);
@@ -1802,7 +1792,6 @@ int selftest(const char *dir)
 	test_audio_simple(0, 60);
 	test_audio_simple(0.00005, 300);  /* 50 ppm for 5 minutes */
 	test_audio_simple(-0.0002, 300);  /* slower codec: blocks, never xruns */
-	test_tone();
 	test_log_dirs(dir);
 	test_fx_tables();
 	test_grid_pattern();

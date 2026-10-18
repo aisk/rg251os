@@ -6,10 +6,8 @@
  * with "~"; the selected one, and the game's name above the in-game
  * menu, scroll after 1 s to show the rest, see marquee_offset), up/down
  * (left/right page), A or START starts, SELECT opens
- * the global settings (Volume, Brightness, CPU, LCD grid, Grid darkness,
- * Dot boost, Audio mode Simple/Adaptive, Audio test: A plays a 3 s
- * 440 Hz tone through the game's audio path, and Debug log on/off, see
- * log.c). In game, SELECT+START opens the in-game menu: Resume, Volume,
+ * the global settings (Volume, Brightness, CPU, Audio mode
+ * Simple/Adaptive and Debug log on/off, see log.c). In game, SELECT+START opens the in-game menu: Resume, Volume,
  * Brightness, CPU, Core, Frame blend, Settings, Quit to ROM list, Power
  * off; B or SELECT+START again resumes. CPU is the global CPU mode
  * (Adaptive, Max or a fixed frequency, see cpuctl.c); changed in game it
@@ -502,17 +500,16 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 
 enum {
 	SI_VOLUME, SI_BRIGHTNESS, SI_CPU, SI_COLOR, SI_GRID, SI_GRID_DIM,
-	SI_GRID_BOOST, SI_AUDIO, SI_AUDIO_TEST, SI_DEBUG, SI_BACK,
+	SI_GRID_BOOST, SI_AUDIO, SI_DEBUG, SI_BACK,
 };
 
 static const char *const si_names[] = {
 	"Volume", "Brightness", "CPU", "Color", "LCD grid", "Grid darkness",
-	"Dot boost", "Audio", "Audio test", "Debug log", "Back",
+	"Dot boost", "Audio", "Debug log", "Back",
 };
 
 static const uint8_t si_romlist[] = {
-	SI_VOLUME, SI_BRIGHTNESS, SI_CPU, SI_GRID, SI_GRID_DIM, SI_GRID_BOOST,
-	SI_AUDIO, SI_AUDIO_TEST, SI_DEBUG, SI_BACK,
+	SI_VOLUME, SI_BRIGHTNESS, SI_CPU, SI_AUDIO, SI_DEBUG, SI_BACK,
 };
 static const uint8_t si_ingame[] = {
 	SI_COLOR, SI_GRID, SI_GRID_DIM, SI_GRID_BOOST, SI_DEBUG, SI_BACK,
@@ -560,7 +557,7 @@ static void settings_change(int item, int d)
 						 settings.grid_boost, d);
 		break;
 	case SI_AUDIO:
-		/* Applied when the next game (or test tone) starts. */
+		/* Applied when the next game starts. */
 		settings.audio = settings.audio == AUDIO_SIMPLE ? AUDIO_ADAPTIVE :
 				 AUDIO_SIMPLE;
 		break;
@@ -592,8 +589,6 @@ int settings_menu_update(uint32_t pressed)
 		if (item == SI_GRID || item == SI_COLOR || item == SI_AUDIO ||
 		    item == SI_DEBUG)
 			settings_change(item, 1);
-		if (item == SI_AUDIO_TEST)
-			audio_test_tone(3.0);  /* blocks for the tone */
 	}
 	return UI_NONE;
 }
@@ -629,9 +624,6 @@ static void settings_value(int item, char *buf, size_t size)
 		snprintf(buf, size, "%s",
 			 settings.audio == AUDIO_SIMPLE ? "Simple" : "Adaptive");
 		break;
-	case SI_AUDIO_TEST:
-		snprintf(buf, size, "440Hz");
-		break;
 	case SI_DEBUG:
 		snprintf(buf, size, "%s", settings.debug ? "On" : "Off");
 		break;
@@ -650,7 +642,8 @@ static void settings_rows(struct canvas *c, int x, int y, int w, int row_h)
 		if (!settings.grid && (item == SI_GRID_DIM || item == SI_GRID_BOOST))
 			col = i == st.sel ? COL_DIM : COL_OFF;
 		if (i == st.sel)
-			draw_fill(c, x + 4, y - 4, w - 8, row_h, COL_SEL);
+			draw_fill(c, x + 4, y - (row_h - 16) / 2, w - 8, row_h,
+				  COL_SEL);
 		draw_text(c, x + 12, y, 2, col, si_names[item]);
 		settings_value(item, v, sizeof(v));
 		/* "(game)" unless a long value like "Auto (GBA light)" needs
@@ -670,40 +663,6 @@ static void settings_rows(struct canvas *c, int x, int y, int w, int row_h)
 	}
 }
 
-/* Color bars and ramps to judge the effects without a game. */
-static const uint16_t *test_pattern(int *w, int *h)
-{
-	static uint16_t px[240 * 56];
-	static int done;
-	static const uint16_t bars[8] = {
-		0xffdf, 0xffc0, 0x07df, 0x07c0, 0xf81f, 0xf800, 0x001f, 0x0000,
-	};
-
-	*w = 240;
-	*h = 56;
-	if (done)
-		return px;
-	for (int y = 0; y < 56; y++)
-		for (int x = 0; x < 240; x++) {
-			int v = x * 32 / 240;  /* 0..31 */
-			uint16_t p;
-
-			if (y < 28)
-				p = bars[x / 30];
-			else if (y < 35)
-				p = (uint16_t)(v << 11 | v << 6 | v);
-			else if (y < 42)
-				p = (uint16_t)(v << 11);
-			else if (y < 49)
-				p = (uint16_t)(v << 6);
-			else
-				p = (uint16_t)v;
-			px[y * 240 + x] = p;
-		}
-	done = 1;
-	return px;
-}
-
 void settings_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 			int w, int h)
 {
@@ -718,16 +677,15 @@ void settings_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 				      frame, pitch, w, h, fx);
 		draw_fill(c, 0, py, c->w, ph, COL_BOX);
 		draw_fill(c, 0, py, c->w, 2, COL_SEL);
-		settings_rows(c, 0, py + 10, c->w, 22);
+		settings_rows(c, 0, py + 9, c->w, 22);
 		return;
 	}
 	draw_fill(c, 0, 0, c->w, c->h, COL_BG);
 	draw_text(c, 8, 8, 2, COL_HI, "Settings");
 	draw_battery(c, c->w - 8, 8);
 	draw_fill(c, 0, 30, c->w, 2, COL_SEL);
-	settings_rows(c, 0, 40, c->w, 17);
-	frame = test_pattern(&w, &h);
-	draw_image_fx(c, 0, c->h - 2 * h, frame, w, w, h, fx);
+	settings_rows(c, 0, 46, c->w, 26);
+	draw_text(c, 8, c->h - 18, 2, COL_DIM, "B:back");
 }
 
 void message_draw(struct canvas *c, const char *title, const char *body,
