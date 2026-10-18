@@ -163,6 +163,19 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	grep -q 'headless: after sleep, no new sleep request' $$f; \
 	! grep -q 'sleep #2' $$f; \
 	grep -q 'underruns after warmup 0' $$f
+	# Restart game from the in-game menu (gpSP, the default): the save
+	# written, the core reset, the game resumed in the same session (one
+	# perf.csv row), no underrun after the restart.
+	mkdir -p $(FRONTEND_TEST_DIR)/reset
+	FE_RESET_AT=1500 $(QEMU_AARCH64) $(FRONTEND_ELF) --headless \
+		$(FRONTEND_TEST_DIR)/reset $(FRONTEND_TEST_ROM) 3000
+	set -e; f=$(FRONTEND_TEST_DIR)/reset/log/frontend.txt; \
+	grep -q 'restart: test.gba from the beginning (gpSP), same session' $$f; \
+	grep -q 'core: gpSP reset in' $$f; \
+	grep -q 'cpufreq: resume at' $$f; \
+	grep -q 'headless: restart at frame 1500 done' $$f; \
+	grep -q 'underruns after warmup 0' $$f; \
+	test $$(grep -c ',all,' $(FRONTEND_TEST_DIR)/reset/log/perf.csv) -eq 1
 	# A perf.csv from an older build (other header) is moved aside.
 	mkdir -p $(FRONTEND_TEST_DIR)/core/log $(FRONTEND_TEST_DIR)/core/config/roms
 	printf 'time,old\n1,2\n' > $(FRONTEND_TEST_DIR)/core/log/perf.csv
@@ -199,11 +212,14 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	grep -q 'settings: test: loaded, .*core gpsp, blend on' $$f; \
 	grep -q 'core: options .*gpsp_frame_mixing=enabled' $$f; \
 	grep -q 'headless: 1200 frames, frame 240x160' $$f
-	# mGBA -> gpSP -> mGBA in one process on one save, a .srm, and
-	# frame blending switched on and off in game.
+	# mGBA -> gpSP -> mGBA in one process on one save, a .srm, a reset
+	# in each core keeping the save, and frame blending switched on and
+	# off in game.
 	$(QEMU_AARCH64) $(FRONTEND_ELF) --core-switch $(FRONTEND_TEST_DIR)/switch 120
 	set -e; f=$(FRONTEND_TEST_DIR)/switch/log/frontend.txt; \
 	grep -q 'core switch: passed' $$f; \
+	grep -q 'core switch: gpsp reset, counter 6' $$f; \
+	grep -q 'core switch: mgba reset, counter 8' $$f; \
 	grep -q 'core: gpsp_frame_mixing=enabled, applied live' $$f; \
 	grep -q 'core: gpsp_frame_mixing=disabled, applied live' $$f; \
 	grep -q 'core: blend on kept for gpSP, mGBA has no frame blending' $$f

@@ -76,6 +76,15 @@ void retro_unload_game(void)
 {
 }
 
+/* Like a console reset: the pattern and the tone start over, the SRAM
+ * stays. */
+void retro_reset(void)
+{
+	frame = 0;
+	audio_acc = phase = 0;
+	prev_a = 0;
+}
+
 void retro_run(void)
 {
 	static int16_t audio[2048];

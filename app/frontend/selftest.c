@@ -1323,6 +1323,97 @@ static void test_marquee(void)
 	CHECK(!bad, "marquee: no \"*\" at the end (%d rows differ)", bad);
 }
 
+/* Pixels of col in rows [y0, y1). */
+static int count_color(const uint16_t *px, int y0, int y1, uint16_t col)
+{
+	int n = 0;
+
+	for (int i = y0 * 480; i < y1 * 480; i++)
+		n += px[i] == col;
+	return n;
+}
+
+/*
+ * In-game menu: Restart game is the 2nd row and needs a second A within
+ * 3 s (180 updates, one per vblank); moving away or waiting cancels, B
+ * resumes. All 10 rows fit in the box, which ends above the bottom edge.
+ */
+static void test_ingame_restart(const char *dir)
+{
+	static uint16_t px[480 * 320];
+	struct canvas cv = { px, 480, 320 };
+	char path[300];
+	int act, armed, plain;
+
+	ingame_menu_enter("Game");
+	ingame_menu_update(JOY_BIT(DOWN));
+	ingame_menu_draw(&cv, NULL, 0, 0, 0);
+	/* Row 1 at y 96 (box at 36, 36 px name, 24 px rows). */
+	plain = count_color(px, 92, 116, COL_HI);
+	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_NONE, "restart: first A arms");
+	ingame_menu_draw(&cv, NULL, 0, 0, 0);
+	armed = count_color(px, 92, 116, COL_HI);
+	CHECK(plain == 0 && armed > 0, "restart: armed row %d/%d highlighted",
+	      plain, armed);
+	snprintf(path, sizeof(path), "%s/ui-ingame-restart.raw", dir);
+	write_file_atomic(path, px, sizeof(px));
+	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_RESET,
+	      "restart: second A confirms");
+	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_NONE,
+	      "restart: disarmed after confirming");
+
+	/* Moving away and back cancels. */
+	ingame_menu_enter("Game");
+	ingame_menu_update(JOY_BIT(DOWN));
+	ingame_menu_update(JOY_BIT(A));
+	ingame_menu_update(JOY_BIT(DOWN));
+	ingame_menu_update(JOY_BIT(UP));
+	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_NONE,
+	      "restart: moving away cancels");
+	/* An A on the 179th frame after arming still confirms, on the
+	 * 180th it does not. */
+	ingame_menu_enter("Game");
+	ingame_menu_update(JOY_BIT(DOWN));
+	ingame_menu_update(JOY_BIT(A));
+	for (int i = 0; i < 178; i++)
+		ingame_menu_update(0);
+	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_RESET,
+	      "restart: confirmed within 3 s");
+	ingame_menu_enter("Game");
+	ingame_menu_update(JOY_BIT(DOWN));
+	ingame_menu_update(JOY_BIT(A));
+	for (int i = 0; i < 179; i++)
+		ingame_menu_update(0);
+	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_NONE,
+	      "restart: times out after 3 s");
+	/* That A armed it again; 180 frames later the label is back. */
+	for (int i = 0; i < 180; i++)
+		ingame_menu_update(0);
+	ingame_menu_draw(&cv, NULL, 0, 0, 0);
+	CHECK(count_color(px, 92, 116, COL_HI) == 0,
+	      "restart: label back after 3 s");
+	/* B resumes; the menu opens again disarmed. */
+	CHECK(ingame_menu_update(JOY_BIT(B)) == UI_RESUME, "restart: B resumes");
+	ingame_menu_enter("Game");
+	ingame_menu_update(JOY_BIT(DOWN));
+	ingame_menu_draw(&cv, NULL, 0, 0, 0);
+	CHECK(count_color(px, 92, 116, COL_HI) == 0,
+	      "restart: disarmed on entering");
+
+	/* Up from Resume wraps to Power off, the last row: its highlight
+	 * and the box frame end at y 312, the rest is the dimmed game. */
+	ingame_menu_enter("Game");
+	act = ingame_menu_update(JOY_BIT(UP));
+	ingame_menu_draw(&cv, NULL, 0, 0, 0);
+	CHECK(act == UI_NONE && px[300 * 480 + 240] == COL_SEL &&
+	      px[309 * 480 + 240] == COL_BOX && px[311 * 480 + 240] == COL_SEL &&
+	      count_color(px, 312, 320, COL_SEL) == 0 &&
+	      count_color(px, 312, 320, COL_BOX) == 0,
+	      "restart: menu box fits on screen");
+	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_POWEROFF,
+	      "restart: last row is Power off");
+}
+
 /* Render the menus to <dir>/ui-*.raw (480x320 RGB565) for a visual check. */
 static void test_ui(const char *dir)
 {
@@ -1344,7 +1435,7 @@ static void test_ui(const char *dir)
 	write_file_atomic(path, px, sizeof(px));
 	/* With mGBA, Frame blend reads "gpSP only" and does not change. */
 	rom_settings.core = CORE_MGBA;
-	for (int i = 0; i < 4; i++)
+	for (int i = 0; i < 5; i++)
 		ingame_menu_update(JOY_BIT(DOWN));
 	ingame_menu_update(JOY_BIT(A));
 	ingame_menu_update(JOY_BIT(RIGHT));
@@ -1806,6 +1897,7 @@ int selftest(const char *dir)
 	test_sdgrow(dir);
 	test_cpuctl(dir);
 	test_marquee();
+	test_ingame_restart(dir);
 	test_ui(dir);
 	log_msg("selftest: %s (%d failures)", failures ? "FAILED" : "passed",
 		failures);
@@ -1886,6 +1978,39 @@ static int switch_round(const char *rom, const char *sav, int core,
 }
 
 /*
+ * Restart game: the core's reset writes the save first, the game boots
+ * again and sees it (the counter goes up once more), and the save from
+ * after the reset is written on unload.
+ */
+static void reset_round(const char *rom, const char *sav, int core,
+			int expect, long frames)
+{
+	uint8_t buf[64];
+	char err[128];
+	int n;
+
+	if (core_load(rom, core, err, sizeof(err))) {
+		CHECK(0, "reset: %s: %s", core_names[core], err);
+		return;
+	}
+	audio_set_source(core_info()->sample_rate, core_info()->fps, 60.0186);
+	run_frames(frames);
+	core_reset();
+	n = read_file(sav, buf, sizeof(buf));
+	CHECK(n > 1 && buf[0] == expect && buf[1] == 0x5a,
+	      "reset: %s: save before the reset %d, expected %d",
+	      core_names[core], n > 0 ? buf[0] : -1, expect);
+	run_frames(frames);
+	core_unload();
+	n = read_file(sav, buf, sizeof(buf));
+	CHECK(n > 1 && buf[0] == expect + 1,
+	      "reset: %s: save after the reset %d, expected %d",
+	      core_names[core], n > 0 ? buf[0] : -1, expect + 1);
+	log_msg("core switch: %s reset, counter %d", core_names[core],
+		n > 0 ? buf[0] : -1);
+}
+
+/*
  * Frame blending switched in game: gpSP reads the option again after the
  * next retro_run and then hands out its mixed buffer instead of the
  * rendered one; mGBA keeps the setting without a change.
@@ -1929,8 +2054,8 @@ static void blend_live(const char *rom)
 
 /*
  * mGBA -> gpSP -> mGBA in one process on the same .sav, then a RetroArch
- * .srm picked up by gpSP when there is no .sav (and left untouched), then
- * frame blending switched live.
+ * .srm picked up by gpSP when there is no .sav (and left untouched), a
+ * reset in each core on that save, then frame blending switched live.
  */
 int selftest_core_switch(const char *data, long frames)
 {
@@ -1957,6 +2082,8 @@ int selftest_core_switch(const char *data, long frames)
 	switch_round(rom, sav, CORE_GPSP, 4, frames);
 	CHECK(read_file(srm, buf, sizeof(buf)) == sizeof(buf) && buf[0] == 3,
 	      ".srm left alone");
+	reset_round(rom, sav, CORE_GPSP, 5, frames);
+	reset_round(rom, sav, CORE_MGBA, 7, frames);
 	blend_live(rom);
 	log_msg("core switch: %s (%d failures)", failures ? "FAILED" : "passed",
 		failures);

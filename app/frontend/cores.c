@@ -22,6 +22,7 @@
 	void p##_retro_get_system_av_info(struct retro_system_av_info *); \
 	bool p##_retro_load_game(const struct retro_game_info *); \
 	void p##_retro_unload_game(void); \
+	void p##_retro_reset(void); \
 	void p##_retro_run(void); \
 	void *p##_retro_get_memory_data(unsigned); \
 	size_t p##_retro_get_memory_size(unsigned);
@@ -40,6 +41,7 @@
 	.get_system_av_info = p##_retro_get_system_av_info, \
 	.load_game = p##_retro_load_game, \
 	.unload_game = p##_retro_unload_game, \
+	.reset = p##_retro_reset, \
 	.run = p##_retro_run, \
 	.get_memory_data = p##_retro_get_memory_data, \
 	.get_memory_size = p##_retro_get_memory_size, \

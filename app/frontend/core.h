@@ -17,6 +17,9 @@ int core_load(const char *rom_path, int core, char *err, size_t errlen);
 void core_unload(void);
 int core_loaded(void);
 const struct core_info *core_info(void);
+/* Write changed save data and wait for it, then retro_reset: the game
+ * starts over like after the console's reset, with its save RAM kept. */
+void core_reset(void);
 /* One retro_run with the given joypad bitmask. */
 void core_run(uint32_t buttons);
 /* rom_settings.blend changed: gpSP reads it again after the next

@@ -7,9 +7,13 @@
  * menu, scroll after 1 s to show the rest, see marquee_offset), up/down
  * (left/right page), A or START starts, SELECT opens
  * the global settings (Volume, Brightness, CPU, Audio mode
- * Simple/Adaptive and Debug log on/off, see log.c). In game, SELECT+START opens the in-game menu: Resume, Volume,
- * Brightness, CPU, Core, Frame blend, Settings, Quit to ROM list, Power
- * off; B or SELECT+START again resumes. CPU is the global CPU mode
+ * Simple/Adaptive and Debug log on/off, see log.c). In game, SELECT+START
+ * opens the in-game menu: Resume, Restart game, Volume, Brightness, CPU,
+ * Core, Frame blend, Settings, Quit to ROM list, Power off; B or
+ * SELECT+START again resumes. Restart game starts the game over like the
+ * console's reset button (its save written first); the first A only turns
+ * the row into "Press A to restart", a second A within 3 s does it,
+ * moving away or waiting cancels. CPU is the global CPU mode
  * (Adaptive, Max or a fixed frequency, see cpuctl.c); changed in game it
  * applies as soon as the game resumes. Core (this game: mGBA or gpSP)
  * shows the running core; left/right pick another one, the row then
@@ -61,6 +65,7 @@ static struct marquee list_mq = { .sel = -1 };
 
 static struct {
 	int sel;
+	int confirm;  /* Restart game armed: frames left, see IG_CONFIRM_FRAMES */
 	char name[ROMDB_NAME_MAX + 2];
 	struct marquee mq;
 } ig;
@@ -349,10 +354,16 @@ void romlist_menu_draw(struct canvas *c)
 /* -------------------------------------------------------- in-game menu */
 
 enum {
-	IG_RESUME, IG_VOLUME, IG_BRIGHTNESS, IG_CPU, IG_CORE, IG_BLEND,
-	IG_SETTINGS, IG_QUIT, IG_POWEROFF, IG_COUNT
+	IG_RESUME, IG_RESET, IG_VOLUME, IG_BRIGHTNESS, IG_CPU, IG_CORE,
+	IG_BLEND, IG_SETTINGS, IG_QUIT, IG_POWEROFF, IG_COUNT
 };
-#define IG_ROW_H 26
+/* Name and rows in a 36 + 10 * 24 px box from y 36 to 312, below the
+ * battery. */
+#define IG_HEAD_H 36
+#define IG_ROW_H 24
+/* Restart game armed: frames (the menu is updated on every vblank) left
+ * for the confirming A. */
+#define IG_CONFIRM_FRAMES (3 * 60)
 
 /* The game's core setting, to the next core that is built in. */
 static void core_step(int d)
@@ -391,18 +402,23 @@ static void blend_toggle(void)
 void ingame_menu_enter(const char *rom_name)
 {
 	ig.sel = 0;
+	ig.confirm = 0;
 	snprintf(ig.name, sizeof(ig.name), "%s", rom_name);
 	ig.mq.sel = -1;
 }
 
 int ingame_menu_update(uint32_t pressed)
 {
-	int d = 0;
+	int d = 0, prev = ig.sel;
 
+	if (ig.confirm > 0)
+		ig.confirm--;
 	if (pressed & JOY_BIT(UP))
 		ig.sel = (ig.sel + IG_COUNT - 1) % IG_COUNT;
 	if (pressed & JOY_BIT(DOWN))
 		ig.sel = (ig.sel + 1) % IG_COUNT;
+	if (ig.sel != prev)
+		ig.confirm = 0;
 	if (pressed & JOY_BIT(LEFT))
 		d = -1;
 	if (pressed & JOY_BIT(RIGHT))
@@ -424,6 +440,13 @@ int ingame_menu_update(uint32_t pressed)
 		switch (ig.sel) {
 		case IG_RESUME:
 			return UI_RESUME;
+		case IG_RESET:
+			if (ig.confirm > 0) {
+				ig.confirm = 0;
+				return UI_RESET;
+			}
+			ig.confirm = IG_CONFIRM_FRAMES;
+			break;
 		case IG_CORE:
 			if (core_pending())
 				return UI_RESTART;
@@ -447,10 +470,11 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 		      int w, int h)
 {
 	static const char *const items[IG_COUNT] = {
-		"Resume", "Volume", "Brightness", "CPU", "Core", "Frame blend",
-		"Settings", "Quit to ROM list", "Power off",
+		"Resume", "Restart game", "Volume", "Brightness", "CPU", "Core",
+		"Frame blend", "Settings", "Quit to ROM list", "Power off",
 	};
-	int bx = 56, by = 36, bw = c->w - 112, bh = 40 + IG_COUNT * IG_ROW_H;
+	int bx = 56, by = 36, bw = c->w - 112;
+	int bh = IG_HEAD_H + IG_COUNT * IG_ROW_H;
 	int cols = (bw - 24) / 16;
 
 	draw_image_dim(c, frame, pitch, w, h);
@@ -460,15 +484,22 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 	draw_rom_name(c, bx + 12, by + 12, COL_HI, ig.name, cols,
 		      marquee_step(&ig.mq, 0, ig.name, cols));
 	for (int i = 0; i < IG_COUNT; i++) {
-		int y = by + 40 + i * IG_ROW_H;
+		int y = by + IG_HEAD_H + i * IG_ROW_H;
 		uint16_t col = i == ig.sel ? COL_FG : COL_DIM;
+		const char *label = items[i];
 
 		if (i == IG_BLEND && !blend_available())
 			col = i == ig.sel ? COL_DIM : COL_OFF;
+		if (i == IG_CORE && core_pending())
+			label = "Restart with";
+		if (i == IG_RESET && ig.confirm > 0) {
+			label = "Press A to restart";
+			col = COL_HI;
+		}
 		if (i == ig.sel)
-			draw_fill(c, bx + 4, y - 5, bw - 8, IG_ROW_H, COL_SEL);
-		draw_text(c, bx + 16, y, 2, col, i == IG_CORE && core_pending() ?
-			  "Restart with" : items[i]);
+			draw_fill(c, bx + 4, y - (IG_ROW_H - 16) / 2, bw - 8,
+				  IG_ROW_H, COL_SEL);
+		draw_text(c, bx + 16, y, 2, col, label);
 		if (i == IG_VOLUME) {
 			char v[16];
 

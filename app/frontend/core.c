@@ -578,6 +578,25 @@ const struct core_info *core_info(void)
 	return &c.info;
 }
 
+/*
+ * Both cores keep the save buffer through retro_reset (mGBA keeps the
+ * cartridge mapped onto it, gpSP never clears it) and detect the save
+ * type again on the first access, as after a load; gpSP also flushes its
+ * translation caches. So the save is only written first, in case the
+ * card is pulled while the game starts over.
+ */
+void core_reset(void)
+{
+	int64_t t0 = now_ns();
+
+	if (!c.loaded)
+		return;
+	core_save_sync();
+	c.api->reset();
+	log_msg("core: %s reset in %.1f ms", core_labels[c.info.core],
+		(now_ns() - t0) / 1e6);
+}
+
 void core_run(uint32_t buttons)
 {
 	if (!c.loaded)

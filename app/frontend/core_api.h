@@ -27,6 +27,7 @@ struct core_api {
 	void (*get_system_av_info)(struct retro_system_av_info *);
 	bool (*load_game)(const struct retro_game_info *);
 	void (*unload_game)(void);
+	void (*reset)(void);
 	void (*run)(void);
 	void *(*get_memory_data)(unsigned);
 	size_t (*get_memory_size)(unsigned);

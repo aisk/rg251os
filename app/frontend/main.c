@@ -369,6 +369,23 @@ static void resume_game(uint32_t buttons)
 	cpuctl_game_resume();
 }
 
+/*
+ * Restart game in the in-game menu: the save written, then the core's
+ * reset, and back into the game like a resume (the output restarts with
+ * its silence fill, frame pacing and the CPU floor pick up from the
+ * pause, so nothing is caught up). The ROM, core and audio rates stay,
+ * so it is the same session: no new game number, its statistics and
+ * perf.csv row run on until the game ends.
+ */
+static void reset_game(uint32_t buttons)
+{
+	log_msg("restart: %s from the beginning (%s), same session",
+		m.rom_name, core_labels[core_info()->core]);
+	core_reset();
+	resume_game(buttons);
+	log_sync();
+}
+
 static void open_settings(uint32_t buttons)
 {
 	m.settings_from = m.st;
@@ -691,6 +708,9 @@ static void frame(int64_t now)
 		case UI_RESTART:
 			restart_game();
 			break;
+		case UI_RESET:
+			reset_game(buttons);
+			break;
 		case UI_POWEROFF:
 			request_poweroff("in-game menu");
 			break;
@@ -941,7 +961,8 @@ static void run(void)
  * simulated codec running 0.1% fast, and the save path. FE_SLEEP_AT=N
  * also sleeps after frame N, through a fake /sys/power that cannot
  * suspend, so the fallback light sleep and the wake path run (the light
- * sleep wakes itself with a simulated power key press).
+ * sleep wakes itself with a simulated power key press). FE_RESET_AT=N
+ * opens the in-game menu after frame N and confirms Restart game.
  */
 static int headless(const char *data, const char *rom, long frames)
 {
@@ -949,7 +970,9 @@ static int headless(const char *data, const char *rom, long frames)
 	static char power[320];
 	const char *base = strrchr(rom, '/') ? strrchr(rom, '/') + 1 : rom;
 	const char *sleep_env = getenv("FE_SLEEP_AT"), *mode = getenv("FE_AUDIO");
+	const char *reset_env = getenv("FE_RESET_AT");
 	long sleep_at = sleep_env ? strtol(sleep_env, NULL, 0) : -1;
+	long reset_at = reset_env ? strtol(reset_env, NULL, 0) : -1;
 	const struct audio_stats *as = &m.last_as;
 	char err[128], path[300];
 	const uint16_t *fr;
@@ -1019,6 +1042,20 @@ static int headless(const char *data, const char *rom, long frames)
 			on_power_key(0);
 			log_msg("headless: after sleep, %s", m.sleep_req ?
 				"FAILED: sleep requested again" : "no new sleep request");
+		}
+		if (i == reset_at) {
+			/* The menu, then Restart game: down, A, A. */
+			int act = UI_NONE;
+
+			open_menu(0);
+			ingame_menu_update(JOY_BIT(DOWN));
+			ingame_menu_update(JOY_BIT(A));
+			for (int k = 0; k < 10 && act == UI_NONE; k++)
+				act = ingame_menu_update(k == 9 ? JOY_BIT(A) : 0);
+			if (act == UI_RESET)
+				reset_game(0);
+			log_msg("headless: restart at frame %ld %s", i,
+				m.st == ST_GAME ? "done" : "FAILED");
 		}
 		if (i % 600 == 599) {
 			perf_report();
