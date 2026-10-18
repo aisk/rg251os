@@ -1,6 +1,6 @@
 # RG351P 硬件与上游支持调研
 
-调研日期 2026-10-15。目标是给 Anbernic RG351P 做一个基于 Linux、只用来玩 GBA 的精简发行版，不需要网络，尽量缩短开机时间。
+调研日期 2026-10-15，之后随实机结果更新。目标是给 Anbernic RG351P 做一个基于 Linux、只用来玩 GBA 的精简发行版，不需要网络，尽量缩短开机时间。现在的实现见文末的“当前状态”。
 
 ## 硬件配置
 
@@ -33,9 +33,9 @@ GBA 原生分辨率 240×160，正好按 2 倍整数放大铺满 480×320 的屏
   - 温度传感器（tsadc）
   - 串口 UART2，波特率 115200
 - 手柄是 USB HID 设备，内核开着 `usbhid` 就能用，不需要专门的驱动。
-- 主线 DTS 没有启用 `rk817_charger`。原因是这块板子上没有电流检测电阻，充电驱动没法正常算电量。ROCKNIX 自己补了 `simple-battery` 节点和 OCV 曲线，但电流检测那一行还是注释掉的。所以电量显示很可能只能按电压估算，需要自己处理。
+- 主线 DTS 没有启用 `rk817_charger`。主线 commit 的说法是这块板子上没有电流检测电阻。ROCKNIX 自己补了 `simple-battery` 节点和 OCV 曲线，但电流检测那一行还是注释掉的。我们的 DTS 按 BSP 的 10mΩ 把充电器和电池节点加回来了，详见 DTS 里的注释。
 - 充电灯的控制方式比较特殊。拉高是红，拉低是绿，引脚设为输入是黄。主线只描述成了一个红灯。
-- 主线 DTS 里还有一个 SPI NOR 节点（sfc）。这是从 Odroid Go Advance 继承来的，RG351P 上是否真的焊了 SPI flash 还需要实机确认。
+- 主线 DTS 里还有一个 SPI NOR 节点（sfc）。这是从 Odroid Go Advance 继承来的，BSP DTS 里是关掉的，我们的 DTS 也关掉了。
 
 ## 上游 U-Boot 和 TF-A
 
@@ -93,7 +93,7 @@ GBA 原生分辨率 240×160，正好按 2 倍整数放大铺满 480×320 的屏
 
 ### 内核
 
-已确定使用主线内核，dtb 以主线的 `rk3326-anbernic-rg351m.dts` 为基础，再按 RG351P 的实际情况修改（比如关掉 sfc 和 sdio）。
+已确定使用主线内核，dtb 以主线的 `rk3326-anbernic-rg351m.dtsi` 为基础，再按 RG351P 的实际情况修改。sdio 在 px30.dtsi 里本来就是关的，不用再管。
 
 ### U-Boot（已定：legacy，主线留待以后）
 
@@ -142,23 +142,28 @@ DDR blob 在两边是同一个文件，legacy 能启动，说明 DDR 初始化�
 
 ### 构建系统（顶层 Makefile 加 Bootlin 工具链）
 
-- 不用 Buildroot。整个系统只有内核、bootloader 和几个静态程序，用一个顶层 `Makefile` 加 `mk/*.mk` 就能管住，比维护一个 `BR2_EXTERNAL` 外部树简单，增量构建也更直观。
+- 不用 Buildroot。整个系统只有内核、bootloader 和一个静态程序，用一个顶层 `Makefile` 加 `mk/*.mk` 就能管住，比维护一个 `BR2_EXTERNAL` 外部树简单，增量构建也更直观。
 - 交叉工具链用 Bootlin 预编译的 `aarch64--musl--stable-2026.08-1`（gcc 15.3.0，binutils 2.45.1，musl 1.2.6），第一次构建时下载到 `dl/` 并校验 sha256。
-- 上游源码全部用 git submodule 管理，浅克隆，版本写死。
+- 上游源码全部用 git submodule 管理，浅克隆，版本写死，构建产物都在 `build/`，子模块不改动也不打补丁。
   - `external/linux`：stable v6.18.57
-  - `external/u-boot`：v2026.10
-  - `external/trusted-firmware-a`：lts-v2.14.10
-  - `external/rkbin`：只用 DDR blob，BL31 也可以选它
-- 板级的东西放在 `board/rg351p/` 下，包括内核 DTS 和配置片段、U-Boot 配置片段和 dtsi、`genimage.cfg`、`extlinux.conf`。对上游没有打补丁。
-- 内核基于 allnoconfig 合并配置片段，所有驱动内置，没有模块和 initramfs。makefile 会检查片段里的符号是否都生效。
-- U-Boot 从 `odroid-go2_defconfig` 合并片段，proper 阶段改用主线 RG351M 的 DT 并通过 `DEVICE_TREE_INCLUDES` 加上自己的 dtsi，避开 OGA DT 里 `vcc_host` 打开震动马达的问题。`DDR_INIT=rkbin|open` 和 `BL31=tfa|rkbin` 可以切换。
-- 正式镜像里用静态程序直接当 PID 1，不用 BusyBox init。之后可以做一个调试变体，带上静态 BusyBox，接 USB 键盘开 shell。
-- 镜像用 genimage 生成，MBR 分区表，`u-boot-rockchip.bin` 写在 32KiB 处，p1 是 FAT 的 BOOT 分区（从 16MiB 开始），p2 是只读的 ext4 rootfs，p3 是 FAT 的 GBA 分区，放 ROM 和存档。
-- 主机依赖：`swig python3-setuptools python3-pyelftools genimage mtools dosfstools`。
+  - `external/u-boot-legacy`：ROCKNIX/hardkernel-uboot 的 RK3326 分支，默认 bootloader
+  - `external/rkbin`：DDR blob、miniloader、BL31 和打包工具（legacy 用全部，主线只用 DDR blob，BL31 可选）
+  - `external/u-boot`：v2026.10，只给 `BOOTLOADER=mainline` 用
+  - `external/trusted-firmware-a`：lts-v2.14.10，只给 `BOOTLOADER=mainline BL31=tfa` 用
+  - `external/mgba`：0.10.5，libretro 核心，静态链接进前端
+  - `external/gpsp`：libretro 版 gpSP，带 ARM64 动态重编译，静态链接进前端
+  - `external/tinyalsa`：v2.0.0，前端的 ALSA 库
+- 板级的东西放在 `board/rg351p/` 下，包括内核 DTS 和配置片段、两套 U-Boot 的配置片段、主线 U-Boot 的 dtsi、`genimage.cfg`、`boot.ini` 和 `extlinux.conf`。
+- 内核基于 allnoconfig 合并 `rg351p.config`，所有驱动内置，没有模块和 initramfs。`debug.config` 默认也合并进去（`LINUX_DEBUG=0` 去掉），里面是 fbcon 和前端调试日志要读的 `/proc/asound`、debugfs、`/dev/mem`。makefile 会检查片段里的符号是否都生效。
+- 两个核心各自用 `mk/core-archive.sh` 合成一个只导出 `<core>_retro_*` 的目标文件，这样能静态链接进同一个程序而不撞符号。
+- 主线 U-Boot 从 `odroid-go2_defconfig` 合并片段，proper 阶段改用主线 RG351M 的 DT 并通过 `DEVICE_TREE_INCLUDES` 加上自己的 dtsi，避开 OGA DT 里 `vcc_host` 打开震动马达的问题。`DDR_INIT=rkbin|open` 和 `BL31=tfa|rkbin` 留着给以后排查用。
+- 镜像里用前端直接当 PID 1（`/sbin/init`），不用 BusyBox。rootfs 里另有 `/sbin/hwtest`，内核命令行加 `init=/sbin/hwtest` 可以改跑硬件测试。
+- 镜像用 genimage 生成，布局见“当前状态”。
+- 主机依赖：`genimage mtools dosfstools fakeroot cmake ninja-build`，主线 U-Boot 另外要 `swig python3-setuptools python3-pyelftools python3-dev libssl-dev bison flex`，`make frontend-test` 要 `qemu-user`。
 
 ### 显示输出（CPU 加 KMS dumb buffer，不用 GPU）
 
-- 直接用 DRM/KMS 的 dumb buffer。分配两块做双缓冲，通过 page flip 提交，翻页对齐垂直同步，不会撕裂，vblank 事件还可以用来给模拟器定节奏。只依赖 libdrm。
+- 直接用 DRM/KMS 的 dumb buffer。分配两块做双缓冲，通过 page flip 提交，翻页对齐垂直同步，不会撕裂，vblank 事件还可以用来给模拟器定节奏。前端直接调 ioctl，连 libdrm 也不用。
 - 不用 `/dev/fb0`。它只是 DRM 上面的一层兼容模拟（`CONFIG_DRM_FBDEV_EMULATION`），双缓冲和垂直同步不可靠，容易撕裂。开发初期可以拿它快速出图验证。
 - 不用 SDL2 的 KMSDRM 后端。它要走 GBM 和 EGL，会把 Mesa 带进来。
 - 放大和旋转由 CPU 一次完成。屏幕是竖装的 320×480，PX30 的 VOP 应该不支持硬件 90° 旋转（待确认）。GBA 的 240×160 放大 2 倍再旋转，每帧写 15.4 万像素，60fps 时大约每秒 920 万像素。用 NEON 估算只占一个核心的 1% 到 3%，相比模拟器本身可以忽略。
@@ -167,7 +172,7 @@ DDR blob 在两边是同一个文件，legacy 能启动，说明 DDR 初始化�
   - GPU 电源域要一直开着
   - 要带上 Mesa 加 Panfrost 或者 libmali，rootfs 变大，开机多初始化一个驱动
 - 省电相关
-  - 不加载 GPU 驱动，genpd 会在启动后期关掉没人用的电源域，Mali 可以完全断电（待实机确认）
+  - 不加载 GPU 驱动，genpd 会在启动后期关掉没人用的电源域，Mali 可以完全断电（实机日志已确认 gpu 和 vpu 都是 off-0）
   - 扫描输出用 RGB565。GBA 原生是 15 位色，不损失颜色，VOP 每秒的内存读取量从约 37MB/s 降到约 18MB/s。PX30 VOP 是否支持 RGB565 扫描输出还需要确认
   - CPU 调频用 schedutil，模拟器负载平稳，可以停在较低的频率档
   - 整机最耗电的是背光和屏幕，背光档位要设计合理
@@ -198,7 +203,6 @@ DDR blob 在两边是同一个文件，legacy 能启动，说明 DDR 初始化�
 ## 待确认
 
 - RG351P 和 RG351M 的屏幕是否完全一致，早期批次 RG351P 有没有换过屏
-- RG351P 有没有 SPI flash（BSP DTS 里是关掉的，大概率没有）
 - 主线 U-Boot 为什么停在 SPL 之前或之中，开源 TPL DDR 初始化能否工作
 - 到底有没有电流检测电阻（主线 commit 说没有，BSP DTS 写的是 10mΩ），这决定了电量能不能用库仑计来算
 - 主线内核上休眠唤醒后 dwc2 和 USB 手柄能不能正常恢复
@@ -207,13 +211,46 @@ DDR blob 在两边是同一个文件，legacy 能启动，说明 DDR 初始化�
 - RG351P 主板上 UART2 测试点的位置
 - 机内 USB 手柄的具体芯片和枚举耗时
 
-## 下一步
+## 当前状态
 
-先把功能做出来，开机速度以后再优化。下一步是选定模拟器核心，开始写前端。
+2026-10-18 更新。legacy U-Boot 加主线 6.18 内核，前端（`app/frontend`）作为 PID 1 直接启动，内置 gpSP 和 mGBA 两个核心。
 
-调试手段保留：init 程序（目前是 hwtest，以后是前端）启动后会把 dmesg 存到 GBA 分区的 `log/` 目录，并用指示灯显示启动进度。每次迭代上机后，把日志发回来分析，不需要串口，也不用反复烧卡。前端要继承这一套，并把自己的日志也写进去。
+### SD 卡布局
 
-接上 UART2 串口后，再回头查主线 U-Boot。
+| 位置 | 内容 |
+|---|---|
+| 32KiB 到 16MiB，分区表之外 | bootloader：legacy 是 idbloader（扇区 64）、`uboot.img`（8MiB）、`trust.img`（12MiB） |
+| p1，FAT，`BOOT`，从 16MiB 开始 | `Image`、`rk3326-anbernic-rg351p.dtb`、`boot.ini`、`extlinux/extlinux.conf` |
+| p2，ext4，只读 | rootfs：`/sbin/init`（前端）和 `/sbin/hwtest` |
+| p3，FAT，`GBA` | ROM、存档、设置和日志，前端挂在 `/mnt/data` |
+
+GBA 分区（下面写作 `<data>`）里的文件
+
+| 路径 | 用途 |
+|---|---|
+| `roms/*.gba` | ROM |
+| `saves/<rom>.sav` | 存档，两个核心通用；没有 `.sav` 时会读同名的 RetroArch `.srm`，之后写回 `.sav` |
+| `bios/gba_bios.bin` | 可选的 GBA BIOS。没有的话 gpSP 用内置 BIOS，mGBA 用 HLE |
+| `config/settings.txt` | 全局设置：音量、亮度、LCD 网格、CPU 模式、音频模式、调试日志 |
+| `config/roms/<rom>.txt` | 单个游戏的设置：色彩校正、核心、学到的起始频率 |
+| `log/boot-NNNN/` | 每次开机一个目录，保留最近 20 个，有 `frontend.txt` 和各个时间点的 dmesg；`log/LATEST.txt` 指向最新的一个 |
+| `log/perf.csv` | 每局游戏的性能、功耗和音频统计，跨开机追加 |
+
+`roms/` 和 `saves/` 在镜像里就有，其余目录前端第一次启动时创建。
+
+### 默认行为
+
+- 核心默认 gpSP（ARM64 动态重编译），可以在游戏菜单里按游戏改成 mGBA，只有改过的游戏才会写 `core=`。
+- 音频默认 adaptive，48kHz 非阻塞写入加动态速率控制，跟屏幕的 60.02Hz 对齐。`audio=simple` 是固定比例加阻塞写入的简单路径。
+- CPU 调频用 schedutil，游戏中前端根据帧耗时通过 uclamp 设频率下限（`cpu=adaptive`，也可以选 `max` 或固定频率）。
+- 调试日志默认关闭。打开后（设置里的 debug，或 `debug=on`）会多记周期性的 perf 行、mixer、`/proc/asound`、ALSA xrun 报告、内核日志和休眠调试信息。这些依赖内核的 `debug.config`。
+- 按键：ROM 列表里按 SELECT 进设置，游戏中 SELECT+START 打开菜单。
+- 电源键短按休眠，先尝试挂起到内存，内核挂不起来就退回浅睡眠（关背光和屏幕，CPU 降到最低频率），再按一次唤醒。长按 2 秒保存并关机。
+- 指示灯：内核阶段是 heartbeat 闪烁，前端启动时变红，第一帧出来后变绿，低电量时绿灯里隔 2 秒闪一下红，出错时红绿交替。
+
+### 以后
+
+开机速度还没有优化。接上 UART2 串口后，再回头查主线 U-Boot。
 
 ## 参考资料
 

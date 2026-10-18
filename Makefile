@@ -13,14 +13,19 @@ JOBS ?= $(shell nproc)
 all: image
 
 include mk/toolchain.mk
--include mk/linux.mk
--include mk/bootloader.mk
--include mk/mgba.mk
--include mk/gpsp.mk
--include mk/tinyalsa.mk
--include mk/frontend.mk
--include mk/rootfs.mk
--include mk/image.mk
+include mk/linux.mk
+include mk/bootloader.mk
+include mk/mgba.mk
+include mk/gpsp.mk
+include mk/tinyalsa.mk
+include mk/frontend.mk
+include mk/rootfs.mk
+include mk/image.mk
+
+# Prerequisite for outputs whose recipe always runs and defers the
+# up-to-date check to a sub-build (kbuild, ninja)
+.PHONY: FORCE
+FORCE:
 
 .PHONY: clean distclean
 clean:

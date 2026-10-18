@@ -7,7 +7,8 @@ LINUX_CONFIG := $(LINUX_BUILD)/.config
 LINUX_IMAGE := $(LINUX_BUILD)/arch/arm64/boot/Image
 LINUX_DTC := $(LINUX_BUILD)/scripts/dtc/dtc
 
-# Debug fragment (fbcon on the panel) is merged unless LINUX_DEBUG=0
+# Debug fragment (fbcon on the panel, the frontend's debug log sources) is
+# merged unless LINUX_DEBUG=0
 LINUX_DEBUG ?= 1
 LINUX_FRAGMENTS := $(BOARD_DIR)/linux/rg351p.config
 ifeq ($(LINUX_DEBUG),1)
@@ -39,7 +40,7 @@ $(LINUX_CONFIG): $(LINUX_FRAGMENTS) $(LINUX_FRAGMENTS_STAMP) $(TOOLCHAIN_STAMP)
 $(LINUX_IMAGE): $(LINUX_CONFIG) FORCE
 	$(LINUX_MAKE) Image
 
-.PHONY: linux linux-menuconfig linux-savedefconfig FORCE
+.PHONY: linux linux-menuconfig linux-savedefconfig
 linux: $(LINUX_IMAGE)
 
 linux-menuconfig: $(LINUX_CONFIG)
@@ -48,7 +49,6 @@ linux-menuconfig: $(LINUX_CONFIG)
 linux-savedefconfig: $(LINUX_CONFIG)
 	$(LINUX_MAKE) savedefconfig
 
-FORCE:
 
 # Device tree, preprocessed and compiled out of tree with the kernel's dtc
 DTB_DIR := $(BUILD)/dtb

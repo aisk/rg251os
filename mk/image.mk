@@ -1,7 +1,8 @@
-# SD card image assembled with genimage from the kernel, dtb, U-Boot and
-# rootfs. The GBA partition is filled from the genimage root path, which
-# holds the empty roms/ and saves/ directories. Needs genimage, mtools and
-# dosfstools on the host.
+# SD card image assembled with genimage from the kernel, dtb, bootloader
+# blob and rootfs. The GBA partition is filled from the genimage root path,
+# which holds the empty roms/ and saves/ directories (the frontend creates
+# the rest on first boot). Needs genimage, mtools and dosfstools on the
+# host.
 
 IMAGES_DIR := $(BUILD)/images
 SDCARD_IMG := $(BUILD)/sdcard.img
@@ -16,11 +17,7 @@ GENIMAGE ?= genimage
 IMAGE_PATH := /usr/sbin:/sbin:$(PATH)
 
 $(SDCARD_IMG): $(LINUX_IMAGE) $(LINUX_DTB) $(BOOT_BLOB) $(BOOT_BLOB_STAMP) $(ROOTFS_IMG) \
-		$(GENIMAGE_CFG) $(EXTLINUX_CONF) $(BOOT_INI)
-	@if [ -z "$(LINUX_IMAGE)" ] || [ -z "$(LINUX_DTB)" ] || [ -z "$(BOOT_BLOB)" ]; then \
-		echo "error: LINUX_IMAGE, LINUX_DTB or BOOT_BLOB undefined (mk/linux.mk, mk/bootloader.mk)" >&2; \
-		exit 1; \
-	fi
+		$(GENIMAGE_CFG) $(EXTLINUX_CONF) $(BOOT_INI) $(TOP)/mk/image.mk
 	@missing=; \
 	for t in $(GENIMAGE):genimage mcopy:mtools mmd:mtools mkdosfs:dosfstools; do \
 		PATH=$(IMAGE_PATH) command -v $${t%%:*} >/dev/null 2>&1 || missing="$$missing $${t#*:}"; \

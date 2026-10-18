@@ -40,7 +40,8 @@ ifeq ($(filter $(BL31),tfa rkbin),)
 $(error BL31 must be "tfa" or "rkbin", got "$(BL31)")
 endif
 
-# Rockchip blobs, pinned to the newest RK3326 versions in external/rkbin
+# Rockchip blobs, pinned to the newest RK3326 versions in external/rkbin,
+# shared with mk/bootloader-legacy.mk
 RKBIN_DIR := $(EXTERNAL)/rkbin/bin/rk33
 RKBIN_DDR := $(RKBIN_DIR)/rk3326_ddr_333MHz_v2.12.bin
 RKBIN_BL31 := $(RKBIN_DIR)/rk3326_bl31_v1.37.elf
@@ -115,7 +116,7 @@ $(UBOOT_CONFIG): $(UBOOT_SRC)/configs/$(UBOOT_DEFCONFIG) $(UBOOT_FRAGMENTS) \
 	cd $(UBOOT_BUILD) && $(UBOOT_SRC)/scripts/kconfig/merge_config.sh -m \
 		.config $(UBOOT_FRAGMENTS) $(UBOOT_GEN_FRAGMENT)
 	$(UBOOT_MAKE) olddefconfig
-	$(UBOOT_CFG_DIR)/check-config.sh $@ $(UBOOT_FRAGMENTS) $(UBOOT_GEN_FRAGMENT)
+	$(TOP)/mk/check-config.sh $@ $(UBOOT_FRAGMENTS) $(UBOOT_GEN_FRAGMENT)
 
 # BL31 (and ROCKCHIP_TPL for DDR_INIT=rkbin) are consumed by binman.
 $(UBOOT_BIN): $(UBOOT_CONFIG) $(UBOOT_DTSI) $(BL31_FILE) $(UBOOT_TPL_FILE) \

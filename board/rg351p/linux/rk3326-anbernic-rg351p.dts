@@ -53,8 +53,9 @@
 };
 
 /*
- * Bring-up aid: heartbeat once the LED driver probes, steady blinking on
- * panic. Needs the LED triggers from debug.config, ignored otherwise.
+ * Boot indicator: heartbeat from the moment the LED driver probes until
+ * the frontend clears the trigger and sets its own colours (main.c),
+ * steady blinking on a kernel panic.
  */
 &red_green_led {
 	linux,default-trigger = "heartbeat";

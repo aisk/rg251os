@@ -1,7 +1,8 @@
 # Legacy bootloader for the RG351P: ROCKNIX's Hardkernel U-Boot 2017.09
 # (external/u-boot-legacy) with the Rockchip miniloader and BL31 from rkbin,
-# as shipped by ROCKNIX "A" images on the RG351 family. Mainline U-Boot does
-# not get past SPL on the device yet, see mk/bootloader.mk.
+# as shipped by ROCKNIX "A" images on the RG351 family. This is the default
+# (BOOTLOADER=legacy); mainline U-Boot shows no sign of life on the device
+# yet, see mk/bootloader.mk and docs/hardware-research.md.
 #
 # Card layout, all relative to the start of the SD card:
 #   sector    64 (32KiB)  idbloader.img: rkbin DDR init + miniloader
@@ -22,10 +23,11 @@ LEGACY_UBOOT := $(LEGACY_BUILD)/u-boot-dtb.bin
 LEGACY_OUT := $(LEGACY_BUILD)/pack
 LEGACY_BIN := $(LEGACY_OUT)/u-boot-legacy.bin
 
-# Same blob family ROCKNIX uses (it pins ddr v2.11 and bl31 v1.34)
-LEGACY_DDR := $(EXTERNAL)/rkbin/bin/rk33/rk3326_ddr_333MHz_v2.12.bin
-LEGACY_MINILOADER := $(EXTERNAL)/rkbin/bin/rk33/rk3326_miniloader_v1.40.bin
-LEGACY_BL31 := $(EXTERNAL)/rkbin/bin/rk33/rk3326_bl31_v1.37.elf
+# Same blob family ROCKNIX uses (it pins ddr v2.11 and bl31 v1.34). The DDR
+# blob and BL31 are the RKBIN_* ones from mk/bootloader.mk.
+LEGACY_DDR := $(RKBIN_DDR)
+LEGACY_MINILOADER := $(RKBIN_DIR)/rk3326_miniloader_v1.40.bin
+LEGACY_BL31 := $(RKBIN_BL31)
 RKBIN_TOOLS := $(EXTERNAL)/rkbin/tools
 
 # gcc 15 defaults to C23, whose <stddef.h> defines unreachable() and
@@ -41,7 +43,7 @@ $(LEGACY_CONFIG): $(LEGACY_SRC)/configs/$(LEGACY_DEFCONFIG) $(LEGACY_FRAGMENT) \
 	cd $(LEGACY_BUILD) && $(LEGACY_SRC)/scripts/kconfig/merge_config.sh -m \
 		.config $(LEGACY_FRAGMENT)
 	$(LEGACY_MAKE) olddefconfig
-	$(BOARD_DIR)/u-boot/check-config.sh $@ $(LEGACY_FRAGMENT)
+	$(TOP)/mk/check-config.sh $@ $(LEGACY_FRAGMENT)
 
 $(LEGACY_UBOOT): $(LEGACY_CONFIG)
 	$(LEGACY_MAKE) -j$(JOBS)

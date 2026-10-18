@@ -21,7 +21,6 @@ MGBA_RAW_LIB := $(MGBA_BUILD)/libmgba_libretro.a
 MGBA_LIBS := $(MGBA_BUILD)/libmgba_core.a
 MGBA_LDLIBS := -lm
 MGBA_INCLUDE := $(MGBA_SRC)/src/platform/libretro
-MGBA_STAMP := $(MGBA_LIBS)
 
 # CMake's Release type adds -O3 -DNDEBUG on top of these
 MGBA_CFLAGS := -mcpu=cortex-a35
@@ -79,7 +78,5 @@ $(MGBA_RAW_LIB): $(MGBA_CONFIG_STAMP) FORCE
 $(MGBA_LIBS): $(MGBA_RAW_LIB) $(TOP)/mk/core-archive.sh
 	$(TOP)/mk/core-archive.sh mgba $@ $(MGBA_RAW_LIB)
 
-.PHONY: mgba FORCE
+.PHONY: mgba
 mgba: $(MGBA_LIBS)
-
-FORCE:
