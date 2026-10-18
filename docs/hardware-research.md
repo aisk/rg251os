@@ -95,28 +95,50 @@ GBA 原生分辨率 240×160，正好按 2 倍整数放大铺满 480×320 的屏
 
 已确定使用主线内核，dtb 以主线的 `rk3326-anbernic-rg351m.dts` 为基础，再按 RG351P 的实际情况修改（比如关掉 sfc 和 sdio）。
 
-### U-Boot（暂用 legacy，主线待查）
+### U-Boot（已定：legacy，主线留待以后）
 
-实机结果（2026-10-18）：主线 U-Boot v2026.10 在 RG351P 上没有任何反应，换 OGA 设备树、换 rkbin BL31 都一样，bootcmd 里的震动和指示灯都没出现，说明 U-Boot proper 没有跑起来。ROCKNIX PR #2120 提到主线 U-Boot 在 RK3326 上处理 SD 卡的 vmmc/vqmmc 有问题，部分卡初始化失败，这和现象吻合，修复已经加进 `rk3326-rg351p-u-boot.dtsi`，还没上机验证。
+**结论（2026-10-18）**：默认使用 ROCKNIX 的 legacy U-Boot 2017.09（`external/u-boot-legacy`，`BOOTLOADER=legacy`），从源码编译，配合 rkbin 的 DDR、miniloader 和 BL31。它已经在实机上引导主线内核成功，从 p1 读 `boot.ini`，再用 `sysboot` 转到 `extlinux.conf`。主线 U-Boot（`BOOTLOADER=mainline`）的构建保留，以后有串口再查。
 
-目前默认用 ROCKNIX 的 legacy U-Boot 2017.09（`external/u-boot-legacy`，`BOOTLOADER=legacy`），从源码编译，配合 rkbin 的 DDR、miniloader 和 BL31，已经在实机上引导主线内核成功。它从 p1 读 `boot.ini`，再用 `sysboot` 转到 `extlinux.conf`。`BOOTLOADER=mainline` 保留，等有串口后继续查。
+#### 主线 U-Boot 的实机测试记录
 
-主线 U-Boot 的现状
+所有组合都是同一个现象：上电后指示灯保持默认的绿色，没有震动。bootcmd 开头会控制马达震一下、让指示灯闪红，这些都没有出现，说明 U-Boot proper 没有执行到 bootcmd，很可能停在 SPL 甚至更早。
 
-- 能直接用 `odroid-go2_defconfig` 起步，ROCKNIX 的 B 镜像证明主线 U-Boot v2025.10 加主线内核在 RK3326 掌机上能跑。
-- 机型识别有坑。`board/hardkernel/odroid_go2/go2.c` 读 SARADC 通道 0，在标称值上下 50 的窗口里匹配。RG351P 的读数在 655 到 695 之间（取自 AmberELEC 的 `hwrev.c`），正好落进 Odroid Go Advance Black Edition（677）的窗口。结果 U-Boot 会把 RG351P 当成 OGA v11，自己用 `rk3326-odroid-go2-v11` 的 DT，并且把 `fdtfile` 设成 OGA v11 的 dtb 交给 Linux。
-- 这会引出第二个坑。主线 RG351M DTS 注释说 `vcc_host`（USB 5V 输出）和震动马达冲突，ROCKNIX 也专门改过一次，避免 U-Boot 打开 USB 5V 导致 RG351M 开机震动。用 OGA v11 的 DT 很可能会触发这个问题。
-- ROCKNIX 在 2025-12 修过一次主线 U-Boot 的 SD 卡兼容性问题，改动只是把 `kernel_addr_r` 挪到 0x09000000，看起来是加载地址重叠。
-- ROCKNIX 在 2025-11 把 RK3326 全部切到主线 U-Boot，2025-12 又改成 A 镜像用 legacy、B 镜像用主线，RG351 系列分在 A 组。commit 里没有写原因，暂时没查到为什么 RG351 退回了 legacy。
+| 设备树 | BL31 | SD 供电修复 | 结果 |
+|---|---|---|---|
+| RG351M 加自己的 dtsi | 主线 TF-A | 无 | 不启动 |
+| RG351M 加自己的 dtsi | rkbin v1.37 | 无 | 不启动 |
+| 原版 OGA | rkbin v1.37 | 无 | 不启动 |
+| RG351M 加自己的 dtsi | rkbin v1.37 | 有 | 不启动 |
+| RG351M 加自己的 dtsi | 主线 TF-A | 有 | 不启动 |
 
-建议的路线
+"SD 供电修复"指的是 ROCKNIX PR #2120 的做法，在 U-Boot 设备树里删掉 `&sdmmc` 的 `vmmc-supply` 和 `vqmmc-supply`。在 RG351P 上它没有解决问题。
 
-1. 先用主线 U-Boot 加 rkbin 的 DDR blob 和 BL31。这是 ROCKNIX B 镜像已经跑通的组合，最快能点亮。
-2. 给 RG351P 单独做一个 board 配置，或者至少关掉自动识别、写死 dtb，并且确保 U-Boot 不打开 `vcc_host`。
-3. 点亮之后再换开源 TPL DDR 初始化和主线 TF-A，最终做到整条启动链没有闭源 blob。如果开源 TPL 在 RG351P 上不稳定，就保留 rkbin 的 DDR blob。
-4. 最后做开机速度优化，见下一节。
+ROCKNIX 在 2025-11 把 RK3326 全部切到主线 U-Boot（PR #1986），2025-12 又把 RG351 系列等不带 eMMC 的机型退回 legacy（PR #2105，没有写原因）。主线 U-Boot 在 RG351 上很可能一直就没跑通。
 
-厂商 U-Boot 2017.09 只作为备选。它的问题在于版本太老，新版 GCC 需要加编译参数绕过报错，SD 卡布局是老式的 idbloader、uboot.img、trust.img 三段，而且裁剪起来不如主线方便。
+#### legacy（能启动）和主线（不能启动）的区别
+
+| 环节 | legacy | 主线 |
+|---|---|---|
+| sector 64 的 idbloader | rkbin DDR v2.12 加 rkbin miniloader v1.40（闭源 SPL），`mkimage -T rksd` 打包 | rkbin DDR v2.12 加 U-Boot SPL，binman 打包 |
+| 8MiB 处 | `uboot.img`（`loaderimage` 打包的 U-Boot proper，4 份） | FIT（`u-boot.itb`，内含 U-Boot proper、BL31、dtb） |
+| 12MiB 处 | `trust.img`（rkbin BL31，`trust_merger` 打包） | 没有，BL31 在 FIT 里 |
+| 谁加载 BL31 和 U-Boot proper | miniloader | U-Boot SPL，带 SD 驱动、PMIC（RK817）、SARADC 识别机型 |
+| U-Boot proper 用的设备树 | 内置 odroidgoa 设备树 | RG351M 或 OGA 设备树 |
+
+DDR blob 在两边是同一个文件，legacy 能启动，说明 DDR 初始化没问题。问题最可能出在 U-Boot SPL 这一段：SD 卡初始化、SPL 里的 RK817 访问、SARADC 读数，或者 SPL 的设备树。
+
+#### 以后排查主线的思路
+
+1. 接 UART2 串口（DDR blob 输出 1500000 波特率，主线 SPL 是 115200），直接看 SPL 停在哪里。
+2. 做混合镜像缩小范围：用 legacy 的 miniloader 加载主线 U-Boot proper，如果能跑，问题就确定在主线 SPL。
+3. 在 SPL 里尽早拉 GPIO（指示灯 GPIO2_B5 或马达 GPIO0_B7）打点，不需要串口也能判断执行到哪一步。需要对 SPL 加板级代码，要打补丁。
+4. 逐个关掉 SPL 里的可选功能（`SPL_PMIC_RK8XX`、SARADC 机型识别等），对比 ROCKNIX B 组能启动的机型和 RG351 在硬件上的差别。
+
+#### 主线 U-Boot 的已知坑（保留备查）
+
+- 机型识别。`board/hardkernel/odroid_go2/go2.c` 读 SARADC 通道 0，在标称值上下 50 的窗口里匹配。RG351P 的读数在 655 到 695 之间，正好落进 OGA Black Edition（677）的窗口，会被当成 OGA v11。
+- 震动马达。OGA 设备树里 `vcc_host` 是常开的，使能脚 GPIO0_B7 在 RG351 上接的是震动马达，所以 U-Boot 一启动马达就会转。改用 RG351M 设备树可以避开。
+- ROCKNIX 把 `kernel_addr_r` 挪到 0x09000000，避免加载地址重叠。legacy 的 `boot.ini` 也用这个地址。
 
 ### 构建系统（顶层 Makefile 加 Bootlin 工具链）
 
@@ -177,7 +199,7 @@ GBA 原生分辨率 240×160，正好按 2 倍整数放大铺满 480×320 的屏
 
 - RG351P 和 RG351M 的屏幕是否完全一致，早期批次 RG351P 有没有换过屏
 - RG351P 有没有 SPI flash（BSP DTS 里是关掉的，大概率没有）
-- 主线 U-Boot 去掉 SD 卡供电后能否启动，开源 TPL DDR 初始化能否工作
+- 主线 U-Boot 为什么停在 SPL 之前或之中，开源 TPL DDR 初始化能否工作
 - 到底有没有电流检测电阻（主线 commit 说没有，BSP DTS 写的是 10mΩ），这决定了电量能不能用库仑计来算
 - 主线内核上休眠唤醒后 dwc2 和 USB 手柄能不能正常恢复
 - PX30 VOP 是否支持硬件旋转
@@ -187,7 +209,11 @@ GBA 原生分辨率 240×160，正好按 2 倍整数放大铺满 480×320 的屏
 
 ## 下一步
 
-根据 dmesg 分析内核启动耗时，压缩开机时间。之后选定模拟器核心，开始写前端。接上 UART2 串口后再回头查主线 U-Boot。
+先把功能做出来，开机速度以后再优化。下一步是选定模拟器核心，开始写前端。
+
+调试手段保留：init 程序（目前是 hwtest，以后是前端）启动后会把 dmesg 存到 GBA 分区的 `log/` 目录，并用指示灯显示启动进度。每次迭代上机后，把日志发回来分析，不需要串口，也不用反复烧卡。前端要继承这一套，并把自己的日志也写进去。
+
+接上 UART2 串口后，再回头查主线 U-Boot。
 
 ## 参考资料
 
