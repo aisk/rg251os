@@ -13,8 +13,6 @@
 #   DDR_INIT=open   U-Boot's open source TPL DRAM init (sdram_px30.c)
 #   BL31=tfa        mainline TF-A, PLAT=px30 (default)
 #   BL31=rkbin      Rockchip prebuilt BL31
-#   UBOOT_DT=rg351m mainline RG351M DT plus our dtsi (default)
-#   UBOOT_DT=oga    stock Odroid Go Advance DTs (bring-up fallback)
 #
 # Host requirements for U-Boot: binman needs pylibfdt (built from U-Boot's
 # dtc with swig + setuptools) and pyelftools; mkimage needs libssl. U-Boot
@@ -31,7 +29,6 @@
 BOOTLOADER ?= legacy
 DDR_INIT ?= rkbin
 BL31 ?= tfa
-UBOOT_DT ?= rg351m
 
 ifeq ($(filter $(BOOTLOADER),legacy mainline),)
 $(error BOOTLOADER must be "legacy" or "mainline", got "$(BOOTLOADER)")
@@ -41,9 +38,6 @@ $(error DDR_INIT must be "rkbin" or "open", got "$(DDR_INIT)")
 endif
 ifeq ($(filter $(BL31),tfa rkbin),)
 $(error BL31 must be "tfa" or "rkbin", got "$(BL31)")
-endif
-ifeq ($(filter $(UBOOT_DT),rg351m oga),)
-$(error UBOOT_DT must be "rg351m" or "oga", got "$(UBOOT_DT)")
 endif
 
 # Rockchip blobs, pinned to the newest RK3326 versions in external/rkbin
@@ -91,8 +85,7 @@ UBOOT_CFG_DIR := $(BOARD_DIR)/u-boot
 UBOOT_DEFCONFIG := odroid-go2_defconfig
 UBOOT_DTSI := $(UBOOT_CFG_DIR)/rk3326-rg351p-u-boot.dtsi
 UBOOT_FRAGMENTS := $(UBOOT_CFG_DIR)/rg351p.config \
-	$(UBOOT_CFG_DIR)/ddr-$(DDR_INIT).config \
-	$(UBOOT_CFG_DIR)/dt-$(UBOOT_DT).config
+	$(UBOOT_CFG_DIR)/ddr-$(DDR_INIT).config
 # Fragment with absolute paths, generated next to the build
 UBOOT_GEN_FRAGMENT := $(UBOOT_BUILD)/rg351p-generated.config
 UBOOT_CONFIG := $(UBOOT_BUILD)/.config
@@ -101,16 +94,11 @@ UBOOT_BIN := $(UBOOT_BUILD)/u-boot-rockchip.bin
 UBOOT_MAKE = $(MAKE) -C $(UBOOT_SRC) O=$(UBOOT_BUILD) \
 	CROSS_COMPILE=$(CROSS_COMPILE)
 
-# Marker files record the selected variant so that switching DDR_INIT or
-# UBOOT_DT regenerates .config and switching BL31 re-runs binman.
+# Marker files record the selected variant so that switching DDR_INIT
+# regenerates .config and switching BL31 re-runs binman.
 $(UBOOT_BUILD)/.ddr-init-%:
 	mkdir -p $(UBOOT_BUILD)
 	rm -f $(UBOOT_BUILD)/.ddr-init-*
-	touch $@
-
-$(UBOOT_BUILD)/.dt-%:
-	mkdir -p $(UBOOT_BUILD)
-	rm -f $(UBOOT_BUILD)/.dt-*
 	touch $@
 
 $(UBOOT_BUILD)/.bl31-%:
@@ -120,12 +108,10 @@ $(UBOOT_BUILD)/.bl31-%:
 
 # odroid-go2_defconfig + our fragments, then verify nothing was dropped
 $(UBOOT_CONFIG): $(UBOOT_SRC)/configs/$(UBOOT_DEFCONFIG) $(UBOOT_FRAGMENTS) \
-		$(UBOOT_BUILD)/.ddr-init-$(DDR_INIT) $(UBOOT_BUILD)/.dt-$(UBOOT_DT) \
-		| $(TOOLCHAIN_STAMP)
+		$(UBOOT_BUILD)/.ddr-init-$(DDR_INIT) | $(TOOLCHAIN_STAMP)
 	mkdir -p $(UBOOT_BUILD)
 	$(UBOOT_MAKE) $(UBOOT_DEFCONFIG)
-	printf 'CONFIG_DEVICE_TREE_INCLUDES="%s"\n' \
-		'$(if $(filter rg351m,$(UBOOT_DT)),$(UBOOT_DTSI))' > $(UBOOT_GEN_FRAGMENT)
+	printf 'CONFIG_DEVICE_TREE_INCLUDES="%s"\n' '$(UBOOT_DTSI)' > $(UBOOT_GEN_FRAGMENT)
 	cd $(UBOOT_BUILD) && $(UBOOT_SRC)/scripts/kconfig/merge_config.sh -m \
 		.config $(UBOOT_FRAGMENTS) $(UBOOT_GEN_FRAGMENT)
 	$(UBOOT_MAKE) olddefconfig
