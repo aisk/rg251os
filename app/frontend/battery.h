@@ -18,6 +18,7 @@ struct battery {
 	long uv;         /* voltage (voltage_now or voltage_avg), -1 if none */
 	long ua;         /* current (current_now or current_avg), 0 if none */
 	int online;      /* a charger supply reports online */
+	unsigned seq;    /* incremented on every poll */
 };
 
 #define BAT_LOW_PCT 10

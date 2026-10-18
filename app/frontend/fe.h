@@ -46,10 +46,9 @@ int write_file_atomic(const char *path, const void *data, size_t len);
 void backlight_init(int percent);
 void backlight_set(int percent);
 void cpu_info_log(void);
-/* Same governor on all CPUs (they share one clock on the RK3326). */
-void cpu_set_governor(const char *gov);
-long cpu_freq_khz(void);
 long soc_temp_mc(void);
+/* pm_genpd_summary from debugfs into the log (best effort). */
+void genpd_log(const char *when);
 
 /* ---- settings.c: key=value text files in <data>/config */
 enum color_mode {
@@ -62,6 +61,10 @@ enum color_mode {
 extern const char *const color_mode_names[COLOR_COUNT];   /* in files */
 extern const char *const color_mode_labels[COLOR_COUNT];  /* in menus */
 
+/* settings.cpu, otherwise a fixed frequency in MHz (see cpuctl.c) */
+#define CPU_MODE_ADAPTIVE 0
+#define CPU_MODE_MAX 1
+
 /* Global, in config/settings.txt. */
 struct settings {
 	int volume;      /* raw "Master Playback Volume", 0..255 */
@@ -69,10 +72,12 @@ struct settings {
 	int grid;        /* LCD pixel grid effect on/off */
 	int grid_dim;    /* darkening of the 3 unlit pixels of a cell, percent */
 	int grid_boost;  /* brightening of the lit pixel, percent */
+	int cpu;         /* CPU_MODE_ADAPTIVE, CPU_MODE_MAX or MHz */
 };
 /* Per game, in config/roms/<rom name>.txt. */
 struct rom_settings {
 	int color;       /* enum color_mode */
+	int cpu_start;   /* learned start OPP in MHz, 0: the top */
 };
 extern struct settings settings;
 extern struct rom_settings rom_settings;  /* for the running game */

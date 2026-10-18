@@ -13,6 +13,7 @@
 #include "audio.h"
 #include "battery.h"
 #include "blit.h"
+#include "cpuctl.h"
 #include "draw.h"
 #include "menu.h"
 #include "fe.h"
@@ -372,10 +373,24 @@ static void test_settings(const char *base)
 	s.grid = 1;
 	s.grid_dim = 75;
 	s.grid_boost = 30;
+	s.cpu = 1008;
 	CHECK(settings_format(&s, buf, sizeof(buf)) > 0, "format");
-	CHECK(settings_parse(&t, buf) == 5, "parse back: %s", buf);
+	CHECK(settings_parse(&t, buf) == 6, "parse back: %s", buf);
 	CHECK(!memcmp(&s, &t, sizeof(s)), "round trip: %s", buf);
 	CHECK(strstr(buf, "grid=on\n") != NULL, "grid written as on/off");
+	CHECK(strstr(buf, "cpu=1008\n") != NULL, "cpu written as MHz: %s", buf);
+	s.cpu = CPU_MODE_MAX;
+	settings_format(&s, buf, sizeof(buf));
+	CHECK(strstr(buf, "cpu=max\n") != NULL, "cpu written as max: %s", buf);
+	t = settings_defaults;
+	CHECK(t.cpu == CPU_MODE_ADAPTIVE, "cpu default adaptive");
+	CHECK(settings_parse(&t, "cpu=MAX\n") == 1 && t.cpu == CPU_MODE_MAX,
+	      "cpu=max");
+	CHECK(settings_parse(&t, "cpu=816\n") == 1 && t.cpu == 816, "cpu=816");
+	CHECK(settings_parse(&t, "cpu=adaptive\n") == 1 &&
+	      t.cpu == CPU_MODE_ADAPTIVE, "cpu=adaptive");
+	CHECK(settings_parse(&t, "cpu=1\ncpu=fast\ncpu=99999\n") == 0 &&
+	      t.cpu == CPU_MODE_ADAPTIVE, "cpu range");
 
 	/* Old format, CRLF, spaces, comments, junk: good values only. */
 	t = settings_defaults;
@@ -433,13 +448,33 @@ static void test_settings(const char *base)
 	CHECK(rom_settings.color == COLOR_SP101, "per ROM round trip");
 	rom_settings_load("Other.gba");
 	CHECK(rom_settings.color == COLOR_OFF, "other ROM unaffected");
+	/* A learned cpu_start alone does not pin the color default. */
+	rom_settings.cpu_start = 816;
+	rom_settings_save();
+	snprintf(path, sizeof(path), "%s/config/roms/Other.txt", base);
+	CHECK(read_file(path, buf, sizeof(buf) - 1) > 0 &&
+	      !strncmp(buf, "cpu_start=816\n", 14) && !strstr(buf, "color"),
+	      "learned cpu_start only: %s", buf);
+	rom_settings_load("Other.gba");
+	CHECK(rom_settings.cpu_start == 816, "cpu_start round trip");
+	rom_settings.color = COLOR_GBA;
+	rom_settings_save();
+	rom_settings_load("Other.gba");
+	CHECK(rom_settings.cpu_start == 816 && rom_settings.color == COLOR_GBA,
+	      "cpu_start and color");
+	rom_settings.color = COLOR_OFF;
+	rom_settings_save();
+	memset(buf, 0, sizeof(buf));
+	read_file(path, buf, sizeof(buf) - 1);
+	CHECK(strstr(buf, "color=off") != NULL, "color in the file stays: %s",
+	      buf);
 	rom_settings_load(NULL);
 	settings = keep;
 }
 
 static void put(const char *dir, const char *name, const char *val)
 {
-	char path[400];
+	char path[512];
 
 	snprintf(path, sizeof(path), "%s/%s", dir, name);
 	write_text(path, val);
@@ -557,6 +592,208 @@ static void test_files(const char *base)
 	CHECK(write_file_atomic(path, data, 16) != 0, "write into missing dir");
 }
 
+/* ---------------------------------------------------------- cpufreq */
+
+#define SIM_PERIOD_NS 16661000LL
+/* A start too low jumps after a few CPU bound misses (cpuctl.c warmup). */
+#define WARMUP_MISSES_MAX 4
+
+static char sim_ps[320];
+static int64_t sim_t = 10000000000000000LL;  /* after test_battery's clock */
+
+/* Simulated frame load: base_ms at 1296 MHz, scaling with 1/f. */
+struct sim {
+	double base_ms, noise_ms;
+	int heavy_every;        /* frames, 0: none */
+	double heavy_mul;
+	int burst_every, burst_len;  /* frames */
+	double burst_mul;
+};
+
+static long sim_read_long(const char *dir, const char *name)
+{
+	char path[400], buf[32];
+
+	snprintf(path, sizeof(path), "%s/%s", dir, name);
+	if (read_file(path, buf, sizeof(buf) - 1) <= 0)
+		return -1;
+	buf[31] = 0;
+	return strtol(buf, NULL, 10);
+}
+
+static void sim_run(const struct sim *sm, double seconds)
+{
+	static unsigned pending;
+	long frames = (long)(seconds * 60), last_f = 0;
+
+	for (long i = 0; i < frames; i++) {
+		long f = cpu_freq_khz();
+		double w = sm->base_ms * 1296000.0 / (f > 0 ? f : 1296000);
+		double period = SIM_PERIOD_NS / 1e6;
+
+		w += sm->noise_ms * ((rnd16() & 1023) / 511.5 - 1);
+		if (sm->heavy_every && i % sm->heavy_every == sm->heavy_every - 1)
+			w *= sm->heavy_mul;
+		if (sm->burst_every && i % sm->burst_every < sm->burst_len)
+			w *= sm->burst_mul;
+		if (f != last_f) {
+			/* Battery current grows with the clock. */
+			char v[24];
+
+			snprintf(v, sizeof(v), "%ld\n", -(200000 + 300 * f / 1000));
+			put(sim_ps, "current_avg", v);
+			last_f = f;
+		}
+		cpuctl_game_frame((int64_t)(w * 1e6), pending, sim_t);
+		/* Reported with the next frame, as the flip events do. */
+		pending = w > period - 0.3 ? (unsigned)((w + 0.3) / period) : 0;
+		sim_t += SIM_PERIOD_NS * (1 + pending);
+		battery_poll(sim_t);
+	}
+}
+
+/* Field col (0 based) of the first perf.csv row containing key. */
+static double csv_field(const char *csv, const char *key, int col)
+{
+	const char *p = strstr(csv, key);
+
+	if (!p)
+		return -1;
+	while (p > csv && p[-1] != '\n')
+		p--;
+	for (int i = 0; i < col && p; i++) {
+		p = strchr(p, ',');
+		if (p)
+			p++;
+	}
+	return p ? atof(p) : -1;
+}
+
+static void test_cpuctl(const char *base)
+{
+	static char csv[65536];
+	char fake[300], path[400];
+	struct cpuctl_counters k;
+	int learned, n;
+	static const struct sim light = { 6, 0.3, 200, 1.3, 0, 0, 0 };
+	static const struct sim heavy = { 11, 0.3, 0, 0, 0, 0, 0 };
+	static const struct sim bursty = { 6, 0.3, 0, 0, 900, 60, 2.0 };
+	static const struct sim mid = { 9, 0.2, 0, 0, 0, 0, 0 };
+	static const struct sim rising = { 11.6, 0.1, 0, 0, 0, 0, 0 };
+
+	snprintf(fake, sizeof(fake), "%s/cpufreq", base);
+	snprintf(sim_ps, sizeof(sim_ps), "%s/power_supply/rk817-battery", base);
+	put(sim_ps, "voltage_avg", "3912000\n");
+	CHECK(cpuctl_fake_sysfs(fake) == 0, "fake cpufreq sysfs");
+	cpuctl_init(fake);
+	CHECK(cpuctl_opp_count() == 5 && cpuctl_opp_khz(0) == 600000 &&
+	      cpuctl_opp_khz(4) == 1296000, "OPP list");
+	cpuctl_set_mode(CPU_MODE_ADAPTIVE);
+	CHECK(cpuctl_mode_step(CPU_MODE_ADAPTIVE, 1) == CPU_MODE_MAX &&
+	      cpuctl_mode_step(CPU_MODE_MAX, 1) == 600 &&
+	      cpuctl_mode_step(1200, 1) == CPU_MODE_ADAPTIVE &&
+	      cpuctl_mode_step(CPU_MODE_ADAPTIVE, -1) == 1200, "mode order");
+
+	/* Light load: steps down to the lowest OPP with margin and stays. */
+	cpuctl_game_start("sim.gba", 1e9 / SIM_PERIOD_NS, 0, sim_t);
+	CHECK(cpu_freq_khz() == 1296000, "start at the top: %ld", cpu_freq_khz());
+	sim_run(&light, 90);
+	cpuctl_counters(&k);
+	log_msg("selftest: cpuctl light: %ld kHz, %u changes (%u down, %u up), "
+		"missed %u", cpu_freq_khz(), k.changes, k.downs, k.ups, k.missed);
+	CHECK(cpu_freq_khz() == 816000, "light load ends at %ld", cpu_freq_khz());
+	CHECK(k.downs == 3 && k.ups == 0 && k.missed == 0,
+	      "light load: %u down %u up %u missed", k.downs, k.ups, k.missed);
+	CHECK(sim_read_long(fake, "uclamp_min") == 644, "util_min for 816 MHz");
+	/* Menu: no floor; resume: back. */
+	cpuctl_game_pause();
+	CHECK(sim_read_long(fake, "uclamp_min") == 0 && cpu_freq_khz() == 600000,
+	      "menu without floor");
+	sim_t += 30 * 1000000000LL;
+	cpuctl_game_resume();
+	CHECK(cpu_freq_khz() == 816000, "resume at %ld", cpu_freq_khz());
+	sim_run(&light, 5);
+	learned = cpuctl_game_end();
+	CHECK(learned == 816, "learned %d MHz", learned);
+	CHECK(sim_read_long(fake, "uclamp_min") == 0, "no floor after the game");
+
+	/* The learned start misses with a heavier load: top, and forgotten. */
+	cpuctl_game_start("sim.gba", 1e9 / SIM_PERIOD_NS, learned, sim_t);
+	CHECK(cpu_freq_khz() == 816000, "learned start %ld", cpu_freq_khz());
+	sim_run(&heavy, 120);
+	cpuctl_counters(&k);
+	log_msg("selftest: cpuctl heavy: %ld kHz, %u changes, %u jumps, missed "
+		"%u (cpu %u)", cpu_freq_khz(), k.changes, k.jumps, k.missed,
+		k.missed_cpu);
+	CHECK(k.jumps == 1 && k.missed <= WARMUP_MISSES_MAX && k.changes <= 3,
+	      "heavy: %u jumps %u missed %u changes", k.jumps, k.missed,
+	      k.changes);
+	CHECK(cpu_freq_khz() >= 1200000, "heavy load at %ld", cpu_freq_khz());
+	learned = cpuctl_game_end();
+	CHECK(learned == 0, "failed start forgotten: %d", learned);
+
+	/* Bursts that only fit the top OPP: the hold backs off. */
+	cpuctl_game_start("sim.gba", 1e9 / SIM_PERIOD_NS, 0, sim_t);
+	sim_run(&bursty, 600);
+	cpuctl_counters(&k);
+	log_msg("selftest: cpuctl bursts: %u changes, %u jumps, missed %u, hold "
+		"%lld s", k.changes, k.jumps, k.missed,
+		(long long)(k.hold_ns / 1000000000LL));
+	CHECK(k.jumps >= 2 && k.jumps <= 8, "bursts: %u jumps", k.jumps);
+	CHECK(k.hold_ns >= 80 * 1000000000LL, "hold did not back off");
+	CHECK(k.missed <= 2 * k.jumps, "bursts: %u missed", k.missed);
+	cpuctl_game_end();
+
+	/* Rising load steps up before missing. */
+	cpuctl_game_start("sim.gba", 1e9 / SIM_PERIOD_NS, 1008, sim_t);
+	sim_run(&mid, 30);
+	CHECK(cpu_freq_khz() == 1008000, "mid load at %ld", cpu_freq_khz());
+	sim_run(&rising, 10);
+	cpuctl_counters(&k);
+	CHECK(k.ups == 1 && k.missed == 0 && cpu_freq_khz() == 1200000,
+	      "rising: %u ups %u missed at %ld", k.ups, k.missed, cpu_freq_khz());
+
+	/* Live mode changes. */
+	cpuctl_set_mode(CPU_MODE_MAX);
+	CHECK(cpu_freq_khz() == 1296000 &&
+	      sim_read_long(fake, "uclamp_min") == 1024, "max mode");
+	sim_run(&light, 30);
+	CHECK(cpu_freq_khz() == 1296000, "max mode stays");
+	cpuctl_set_mode(600);
+	CHECK(sim_read_long(fake, "uclamp_min") == 474, "util_min for 600 MHz");
+	cpuctl_set_mode(1008);
+	CHECK(sim_read_long(fake, "uclamp_min") == 796, "util_min for 1008 MHz");
+	cpuctl_set_mode(1200);
+	CHECK(sim_read_long(fake, "uclamp_min") == 948, "util_min for 1200 MHz");
+	cpuctl_set_mode(816);
+	sim_run(&light, 20);
+	CHECK(cpu_freq_khz() == 816000, "fixed 816");
+	cpuctl_game_end();
+	cpuctl_set_mode(CPU_MODE_ADAPTIVE);
+
+	snprintf(path, sizeof(path), "%s/log/perf.csv", base);
+	n = read_file(path, csv, sizeof(csv) - 1);
+	CHECK(n > 0, "no perf.csv");
+	csv[n > 0 ? n : 0] = 0;
+	{
+		int header = 0, all = 0;
+
+		for (char *p = csv; (p = strstr(p, "\ntime,")) || 0; p++)
+			header++;
+		header += !strncmp(csv, "time,", 5);
+		for (char *p = csv; (p = strstr(p, ",all,")); p++)
+			all++;
+		CHECK(header == 1 && all == 5, "perf.csv: %d headers, %d summaries",
+		      header, all);
+	}
+	/* avg_mA (column 16) of the 816 MHz row: 200 + 0.3 * 816. */
+	CHECK(fabs(csv_field(csv, ",adaptive,816000,", 16) - 445) < 2,
+	      "816 MHz battery current %.0f", csv_field(csv, ",adaptive,816000,",
+							16));
+	CHECK(csv_field(csv, ",max,1296000,", 5) >= 1800, "max mode row");
+	CHECK(csv_field(csv, ",fixed,816000,", 5) >= 1200, "fixed mode row");
+}
+
 /* Render the menus to <dir>/ui-*.raw (480x320 RGB565) for a visual check. */
 static void test_ui(const char *dir)
 {
@@ -631,6 +868,7 @@ int selftest(const char *dir)
 	test_files(dir);
 	test_settings(dir);
 	test_battery(dir);
+	test_cpuctl(dir);
 	test_ui(dir);
 	log_msg("selftest: %s (%d failures)", failures ? "FAILED" : "passed",
 		failures);

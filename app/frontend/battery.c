@@ -26,6 +26,7 @@ static struct {
 	int scanned, found_logged;
 	struct battery b;
 	int64_t next_poll, next_log;
+	unsigned seq;
 } s;
 
 static void log_uevent(const char *path, const char *name)
@@ -147,6 +148,7 @@ void battery_poll(int64_t now)
 	if (!s.bat[0])
 		battery_init(s.scanned ? s.root : "/sys/class/power_supply");
 	battery_read(&s.b);
+	s.b.seq = ++s.seq;
 	if (s.b.valid && now >= s.next_log) {
 		s.next_log = now + LOG_NS;
 		battery_format(&s.b, buf, sizeof(buf));

@@ -423,7 +423,6 @@ int core_load(const char *rom_path, char *err, size_t errlen)
 		c.info.width, c.info.height, c.info.fps, c.info.sample_rate,
 		c.have_bios ? bios : "HLE (built in)");
 	save_load();
-	cpu_set_governor("performance");
 	return 0;
 }
 
@@ -439,7 +438,6 @@ void core_unload(void)
 	free(c.last);
 	c.last = NULL;
 	c.sram = NULL;
-	cpu_set_governor("schedutil");
 	log_msg("core: unloaded (%u save writes)", c.saves_written);
 	c.saves_written = 0;
 }

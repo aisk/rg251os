@@ -1000,6 +1000,11 @@ void audio_take_stats(struct audio_stats *st)
 	a.st.fill_min = -1;
 }
 
+unsigned audio_xruns_total(void)
+{
+	return a.xruns_total;
+}
+
 int64_t audio_take_time_ns(void)
 {
 	int64_t t = a.time_ns;

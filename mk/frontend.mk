@@ -17,7 +17,7 @@ LIBRETRO_INCLUDE := $(if $(MGBA_INCLUDE),$(MGBA_INCLUDE),$(EXTERNAL)/mgba/src/pl
 
 FRONTEND_SRCS := main.c log.c sys.c display.c blit.c draw.c audio.c \
 	resample.c input.c romlist.c core.c menu.c perf.c selftest.c \
-	settings.c fx.c battery.c
+	settings.c fx.c battery.c cpuctl.c
 FRONTEND_OBJS := $(addprefix $(FRONTEND_BUILD)/obj/,$(FRONTEND_SRCS:.c=.o))
 FRONTEND_STUB_OBJ := $(FRONTEND_BUILD)/obj/stub_core.o
 
@@ -80,12 +80,21 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	test $$(grep -c 'save: wrote' $(FRONTEND_TEST_DIR)/stub/log/frontend.txt) -ge 3
 	grep -q 'core: unloaded ([1-9][0-9]* save writes)' \
 		$(FRONTEND_TEST_DIR)/stub/log/frontend.txt
-	printf 'grid=on\ngrid_dim=50\ngrid_boost=15\n' > \
+	# Game statistics: one CSV header, a summary row per game, and the
+	# simulated cpufreq floor was applied.
+	test $$(grep -c '^time,' $(FRONTEND_TEST_DIR)/stub/log/perf.csv) -eq 1
+	test $$(grep -c ',all,' $(FRONTEND_TEST_DIR)/stub/log/perf.csv) -eq 1
+	grep -q 'perf summary: adaptive all' $(FRONTEND_TEST_DIR)/stub/log/frontend.txt
+	grep -q 'cpufreq: target .* observed' $(FRONTEND_TEST_DIR)/stub/log/frontend.txt
+	printf 'grid=on\ngrid_dim=50\ngrid_boost=15\ncpu=max\n' > \
 		$(FRONTEND_TEST_DIR)/stub/config/settings.txt
 	printf 'color=gba\n' > $(FRONTEND_TEST_DIR)/stub/config/roms/test.txt
 	$(QEMU_AARCH64) $(FRONTEND_STUB_ELF) --headless $(FRONTEND_TEST_DIR)/stub \
 		$(FRONTEND_TEST_ROM) 600
 	grep -q 'save: loaded' $(FRONTEND_TEST_DIR)/stub/log/frontend.txt
 	grep -q 'fx: color gba, grid on' $(FRONTEND_TEST_DIR)/stub/log/frontend.txt
+	test $$(grep -c '^time,' $(FRONTEND_TEST_DIR)/stub/log/perf.csv) -eq 1
+	test $$(grep -c ',all,' $(FRONTEND_TEST_DIR)/stub/log/perf.csv) -eq 2
+	grep -q ',max,1296000,' $(FRONTEND_TEST_DIR)/stub/log/perf.csv
 	$(QEMU_AARCH64) $(FRONTEND_ELF) --headless $(FRONTEND_TEST_DIR)/core \
 		$(FRONTEND_TEST_ROM) 3000

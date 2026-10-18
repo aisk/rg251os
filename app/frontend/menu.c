@@ -2,10 +2,12 @@
  * Menus on the 480x320 logical canvas, 8x8 font at 2x (30 columns).
  *
  * ROM list: up/down (left/right page), A or START starts, SELECT opens
- * the global settings (Volume, Brightness, LCD grid, Grid darkness, Dot
- * boost). In game, SELECT+START opens the in-game menu: Resume, Volume,
- * Brightness, Settings, Quit to ROM list, Power off; B or SELECT+START
- * again resumes. The in-game Settings screen shows the game with the
+ * the global settings (Volume, Brightness, CPU, LCD grid, Grid darkness,
+ * Dot boost). In game, SELECT+START opens the in-game menu: Resume,
+ * Volume, Brightness, CPU, Settings, Quit to ROM list, Power off; B or
+ * SELECT+START again resumes. CPU is the global CPU mode (Adaptive, Max
+ * or a fixed frequency, see cpuctl.c); changed in game it applies as soon
+ * as the game resumes. The in-game Settings screen shows the game with the
  * effects applied (live preview) under a panel with Color (this game),
  * LCD grid, Grid darkness and Dot boost. In menus, up/down select,
  * left/right change a value, A activates, B goes back. The battery level
@@ -17,6 +19,7 @@
 
 #include "audio.h"
 #include "battery.h"
+#include "cpuctl.h"
 #include "fe.h"
 #include "fx.h"
 #include "libretro.h"
@@ -78,6 +81,12 @@ static void volume_label(char *buf, size_t size)
 		snprintf(buf, size, "mute");
 	else
 		snprintf(buf, size, "%ddB", -(255 - settings.volume) * 3 / 8);
+}
+
+static void cpu_step(int d)
+{
+	settings.cpu = cpuctl_mode_step(settings.cpu, d);
+	cpuctl_set_mode(settings.cpu);
 }
 
 static void brightness_step(int d)
@@ -226,8 +235,8 @@ void romlist_menu_draw(struct canvas *c)
 /* -------------------------------------------------------- in-game menu */
 
 enum {
-	IG_RESUME, IG_VOLUME, IG_BRIGHTNESS, IG_SETTINGS, IG_QUIT, IG_POWEROFF,
-	IG_COUNT
+	IG_RESUME, IG_VOLUME, IG_BRIGHTNESS, IG_CPU, IG_SETTINGS, IG_QUIT,
+	IG_POWEROFF, IG_COUNT
 };
 
 void ingame_menu_enter(const char *rom_name)
@@ -255,6 +264,8 @@ int ingame_menu_update(uint32_t pressed)
 		volume_step(d);
 	if (d && ig.sel == IG_BRIGHTNESS)
 		brightness_step(d);
+	if (d && ig.sel == IG_CPU)
+		cpu_step(d);
 	if (pressed & (BIT(A) | BIT(START))) {
 		switch (ig.sel) {
 		case IG_RESUME:
@@ -274,8 +285,8 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 		      int w, int h)
 {
 	static const char *const items[IG_COUNT] = {
-		"Resume", "Volume", "Brightness", "Settings", "Quit to ROM list",
-		"Power off",
+		"Resume", "Volume", "Brightness", "CPU", "Settings",
+		"Quit to ROM list", "Power off",
 	};
 	int bx = 56, by = 48, bw = c->w - 112, bh = 40 + IG_COUNT * 30;
 
@@ -299,6 +310,11 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 		} else if (i == IG_BRIGHTNESS) {
 			draw_textf(c, bx + bw - 16 - 16 * 6, y, 2, col, "%5d%%",
 				   settings.brightness);
+		} else if (i == IG_CPU) {
+			char v[16];
+
+			cpuctl_mode_label(settings.cpu, v, sizeof(v));
+			draw_text(c, bx + bw - 16 - 16 * (int)strlen(v), y, 2, col, v);
 		}
 	}
 }
@@ -306,17 +322,18 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 /* ------------------------------------------------------------ settings */
 
 enum {
-	SI_VOLUME, SI_BRIGHTNESS, SI_COLOR, SI_GRID, SI_GRID_DIM, SI_GRID_BOOST,
-	SI_BACK,
+	SI_VOLUME, SI_BRIGHTNESS, SI_CPU, SI_COLOR, SI_GRID, SI_GRID_DIM,
+	SI_GRID_BOOST, SI_BACK,
 };
 
 static const char *const si_names[] = {
-	"Volume", "Brightness", "Color", "LCD grid", "Grid darkness",
+	"Volume", "Brightness", "CPU", "Color", "LCD grid", "Grid darkness",
 	"Dot boost", "Back",
 };
 
 static const uint8_t si_romlist[] = {
-	SI_VOLUME, SI_BRIGHTNESS, SI_GRID, SI_GRID_DIM, SI_GRID_BOOST, SI_BACK,
+	SI_VOLUME, SI_BRIGHTNESS, SI_CPU, SI_GRID, SI_GRID_DIM, SI_GRID_BOOST,
+	SI_BACK,
 };
 static const uint8_t si_ingame[] = {
 	SI_COLOR, SI_GRID, SI_GRID_DIM, SI_GRID_BOOST, SI_BACK,
@@ -343,6 +360,9 @@ static void settings_change(int item, int d)
 		break;
 	case SI_BRIGHTNESS:
 		brightness_step(d);
+		break;
+	case SI_CPU:
+		cpu_step(d);
 		break;
 	case SI_COLOR:
 		rom_settings.color = (rom_settings.color + COLOR_COUNT + d) %
@@ -395,6 +415,9 @@ static void settings_value(int item, char *buf, size_t size)
 		break;
 	case SI_BRIGHTNESS:
 		snprintf(buf, size, "%d%%", settings.brightness);
+		break;
+	case SI_CPU:
+		cpuctl_mode_label(settings.cpu, buf, size);
 		break;
 	case SI_COLOR:
 		snprintf(buf, size, "%s", color_mode_labels[rom_settings.color]);
@@ -498,7 +521,7 @@ void settings_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 	draw_text(c, 8, 8, 2, COL_HI, "Settings");
 	draw_battery(c, c->w - 8, 8);
 	draw_fill(c, 0, 30, c->w, 2, COL_SEL);
-	settings_rows(c, 0, 44, c->w, 26);
+	settings_rows(c, 0, 42, c->w, 23);
 	frame = test_pattern(&w, &h);
 	draw_image_fx(c, 0, c->h - 2 * h, frame, w, w, h, fx);
 }

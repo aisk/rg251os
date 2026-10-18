@@ -1,7 +1,7 @@
 /*
  * PID 1 duties and small system helpers: mounts, status LED, kernel log
  * dumps, child reaping, power off, sysfs access, atomic file writes,
- * backlight, CPU frequency and temperature.
+ * backlight, CPU info, temperature and the power domain summary.
  */
 #include <dirent.h>
 #include <errno.h>
@@ -400,20 +400,38 @@ void cpu_info_log(void)
 }
 
 /*
- * In game the CPU is pinned to its top frequency. schedutil sees the time
- * spent waiting for vblank as idle and settles at 816 MHz, where a frame
- * no longer fits in one refresh; missed vblanks then halve the load it
- * sees and it never climbs back up.
+ * The power domain summary shows whether the GPU and VPU domains are
+ * really off. Best effort: debugfs is mounted if needed (audio.c may have
+ * done it already), nothing is logged as an error.
  */
-void cpu_set_governor(const char *gov)
+void genpd_log(const char *when)
 {
-	write_str("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", gov);
-	log_msg("cpu0 governor %s", gov);
-}
+	static const char *const path =
+		"/sys/kernel/debug/pm_genpd/pm_genpd_summary";
+	struct stat dbg, sys;
+	char *buf, *line, *save;
+	int n;
 
-long cpu_freq_khz(void)
-{
-	return read_sysfs_long("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", -1);
+	if (!fe_is_init)
+		return;
+	if (stat("/sys/kernel/debug", &dbg) == 0 && stat("/sys", &sys) == 0 &&
+	    dbg.st_dev == sys.st_dev)
+		mount("debugfs", "/sys/kernel/debug", "debugfs", 0, NULL);
+	buf = malloc(16384);
+	if (!buf)
+		return;
+	n = read_file(path, buf, 16383);
+	if (n <= 0) {
+		log_verbose("genpd (%s): no %s", when, path);
+		free(buf);
+		return;
+	}
+	buf[n] = 0;
+	log_verbose("genpd (%s): pm_genpd_summary:", when);
+	for (line = strtok_r(buf, "\n", &save); line;
+	     line = strtok_r(NULL, "\n", &save))
+		log_verbose("genpd: %s", line);
+	free(buf);
 }
 
 long soc_temp_mc(void)

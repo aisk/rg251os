@@ -20,8 +20,12 @@
  * Before PID 1 starts the kernel shows its heartbeat trigger (see dts).
  *
  * Logs on the GBA partition (log/): frontend.txt (this program; the
- * previous boot's is frontend-prev.txt), dmesg-5s.txt, dmesg-20s.txt and
- * dmesg-poweroff.txt.
+ * previous boot's is frontend-prev.txt), dmesg-5s.txt, dmesg-20s.txt,
+ * dmesg-poweroff.txt, and perf.csv (per game and CPU frequency timing and
+ * power statistics, appended at the end of every game, see cpuctl.c).
+ *
+ * CPU frequency: schedutil throughout; in game cpuctl.c sets a floor from
+ * the frame times (CPU mode setting: adaptive, max or a fixed OPP).
  *
  * Keys: SELECT+START in game opens the in-game menu (the RG351P has no
  * menu/function button; SELECT is also the hotkey enabler in AmberELEC
@@ -45,12 +49,14 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "audio.h"
 #include "battery.h"
 #include "blit.h"
 #include "core.h"
+#include "cpuctl.h"
 #include "display.h"
 #include "draw.h"
 #include "fe.h"
@@ -94,6 +100,7 @@ static struct {
 	unsigned missed;
 	unsigned xrun_total;
 	unsigned reports;
+	int genpd_logged;
 	struct audio_stats last_as;
 } m = { .cv = { .w = 480, .h = 320 } };
 
@@ -137,6 +144,13 @@ static void save_settings(void)
 	}
 }
 
+/* Game statistics out and the learned start OPP into the ROM settings. */
+static void end_game_stats(void)
+{
+	if (cpuctl_in_game())
+		rom_settings.cpu_start = cpuctl_game_end();
+}
+
 static void fatal(const char *title, const char *msg)
 {
 	snprintf(m.fatal_title, sizeof(m.fatal_title), "%s", title);
@@ -145,6 +159,7 @@ static void fatal(const char *title, const char *msg)
 	log_sync();
 	if (core_loaded())
 		core_unload();
+	end_game_stats();
 	audio_pause();
 	m.st = ST_FATAL;
 }
@@ -154,6 +169,7 @@ static void do_poweroff(void)
 	led_set_red(1);
 	audio_pause();
 	core_unload();
+	end_game_stats();
 	save_settings();
 	log_msg("uptime %lld ms, dumping dmesg", (long long)boot_ms());
 	log_sync();
@@ -182,6 +198,8 @@ static void start_game(const char *path)
 	rom_settings_load(m.rom_name);
 	m.saved_rom = rom_settings;
 	fx_update();
+	cpuctl_game_start(m.rom_name, display_ready() ? di->refresh_hz : 60.0,
+			  rom_settings.cpu_start, now_ns());
 	m.st = ST_GAME;
 	m.suppress = input_buttons();
 	display_take_missed();
@@ -193,6 +211,7 @@ static void quit_game(void)
 {
 	audio_pause();
 	core_unload();
+	end_game_stats();
 	save_settings();
 	rom_settings_load(NULL);
 	m.saved_rom = rom_settings;
@@ -206,6 +225,7 @@ static void quit_game(void)
 static void open_menu(uint32_t buttons)
 {
 	audio_pause();
+	cpuctl_game_pause();
 	core_save_sync();
 	ingame_menu_enter(m.rom_name);
 	m.suppress = buttons;
@@ -220,6 +240,7 @@ static void resume_game(uint32_t buttons)
 	m.suppress = buttons;
 	m.st = ST_GAME;
 	display_take_missed();
+	cpuctl_game_resume();
 }
 
 static void open_settings(uint32_t buttons)
@@ -249,7 +270,7 @@ static int menu_hotkey(uint32_t buttons)
 
 static void perf_report(void)
 {
-	char run[48], blit[48], aud[48], bat[24] = "n/a";
+	char run[48], blit[48], aud[48], bat[80] = "n/a", cpu[96];
 	const struct battery *b = battery_get();
 	struct audio_stats as;
 	long khz = cpu_freq_khz(), mc = soc_temp_mc();
@@ -257,8 +278,13 @@ static void perf_report(void)
 
 	if (mc != -1)
 		snprintf(temp, sizeof(temp), "%.1f C", mc / 1000.0);
+	/* RK817 current is negative while discharging. */
 	if (b->valid)
-		snprintf(bat, sizeof(bat), "%d%% %.3f V", b->capacity, b->uv / 1e6);
+		snprintf(bat, sizeof(bat), "%d%% %.3f V %+.0f mA %.0f mW%s",
+			 b->capacity, b->uv / 1e6, b->ua / 1e3,
+			 (b->ua < 0 ? -b->ua : b->ua) * (double)b->uv / 1e9,
+			 b->online ? " (charger)" : "");
+	cpuctl_format(cpu, sizeof(cpu));
 
 	audio_take_stats(&as);
 	m.xrun_total += as.xruns;
@@ -268,10 +294,16 @@ static void perf_report(void)
 	perf_format(&m.p_audio, aud, sizeof(aud));
 	log_msg("perf: %llu frames, ms avg/p99/max: run %s blit %s audio %s; "
 		"missed vblanks %u, underruns %u, overflow %u frames, fill %d..%d, "
-		"drc %.4f, codec %.0f Hz, cpu0 %ld MHz, temp %s, bat %s",
+		"drc %.4f, codec %.0f Hz, cpu0 %ld MHz, %s, temp %s, bat %s, "
+		"backlight %d%%",
 		(unsigned long long)m.perf_frames, run, blit, aud, m.missed,
 		as.xruns, as.overflows, as.fill_min, as.fill_max, as.adj,
-		as.hw_rate, khz > 0 ? khz / 1000 : -1, temp, bat);
+		as.hw_rate, khz > 0 ? khz / 1000 : -1, cpu, temp, bat,
+		settings.brightness);
+	if (!m.genpd_logged) {
+		m.genpd_logged = 1;
+		genpd_log("in game");
+	}
 	m.perf_frames = 0;
 	m.missed = 0;
 	if (++m.reports % 6 == 0 && fe_is_init)
@@ -296,6 +328,7 @@ static void game_frame(uint32_t buttons, int64_t now)
 	const uint16_t *fr;
 	int64_t t0, t1, t2, t3, push;
 	int fw, fh, fp, pitch, scale;
+	unsigned missed;
 	uint16_t *dst;
 
 	if (menu_hotkey(buttons)) {
@@ -329,7 +362,10 @@ static void game_frame(uint32_t buttons, int64_t now)
 	perf_add(&m.p_audio, audio_take_time_ns() + push);
 	perf_add(&m.p_blit, t3 - t2);
 	m.perf_frames++;
-	m.missed += display_take_missed();
+	missed = display_take_missed();
+	m.missed += missed;
+	/* Work: CPU time until the frame is ready for the flip. */
+	cpuctl_game_frame(t3 - t0, missed, now);
 	if (now >= m.next_perf) {
 		perf_report();
 		m.next_perf = now + PERF_INTERVAL_NS;
@@ -424,6 +460,20 @@ static void frame(int64_t now)
 
 /* --------------------------------------------------------------- setup */
 
+/* CLOCK_REALTIME comes from the RK817 RTC (RTC_HCTOSYS) if it was set. */
+static void clock_log(void)
+{
+	struct timespec ts;
+	struct tm tm;
+	char buf[32] = "?";
+
+	clock_gettime(CLOCK_REALTIME, &ts);
+	if (gmtime_r(&ts.tv_sec, &tm))
+		strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S UTC", &tm);
+	log_msg("clock: realtime %s%s", buf,
+		ts.tv_sec > 1704067200 ? "" : " (RTC not set, perf.csv uses boot time)");
+}
+
 static void startup(void)
 {
 	struct utsname u;
@@ -452,6 +502,9 @@ static void startup(void)
 	fx_update();
 	backlight_init(settings.brightness);
 	cpu_info_log();
+	cpuctl_init(NULL);
+	cpuctl_set_mode(settings.cpu);
+	clock_log();
 	battery_init("/sys/class/power_supply");
 	if (display_init())
 		m.next_drm_try = now_ns() + 200000000LL;
@@ -477,6 +530,7 @@ static void timers(int64_t now)
 	if (!m.dumped5 && up >= 5000) {
 		m.dumped5 = 1;
 		klog_dump_async("dmesg-5s.txt");
+		genpd_log("5 s");
 	}
 	if (!m.dumped20 && up >= 20000) {
 		m.dumped20 = 1;
@@ -577,11 +631,18 @@ static int headless(const char *data, const char *rom, long frames)
 	settings_load();
 	rom_settings_load(strrchr(rom, '/') ? strrchr(rom, '/') + 1 : rom);
 	fx_update();
+	/* Simulated cpufreq: real work times, fake 60 Hz clock. */
+	snprintf(path, sizeof(path), "%s/fake-cpufreq", fe_data_dir);
+	cpuctl_fake_sysfs(path);
+	cpuctl_init(path);
+	cpuctl_set_mode(settings.cpu);
 	if (core_load(rom, err, sizeof(err))) {
 		log_msg("headless: %s", err);
 		return 1;
 	}
 	audio_set_source(core_info()->sample_rate, core_info()->fps, 60.0186);
+	cpuctl_game_start(strrchr(rom, '/') ? strrchr(rom, '/') + 1 : rom,
+			  60.0186, rom_settings.cpu_start, 0);
 	for (long i = 0; i < frames; i++) {
 		/* Tap A for 10 frames every 2 s of emulated time. */
 		uint32_t b = i % 120 < 10 ? BIT(A) : 0;
@@ -600,6 +661,7 @@ static int headless(const char *data, const char *rom, long frames)
 		perf_add(&m.p_audio, audio_take_time_ns() + push);
 		perf_add(&m.p_blit, now_ns() - t2);
 		m.perf_frames++;
+		cpuctl_game_frame(now_ns() - t0, 0, (int64_t)(i + 1) * 16661000LL);
 		/* Fake time for the save timer: 60 frames per second. */
 		core_save_tick((int64_t)i * 16661000LL);
 		while ((pid = sys_reap(&st)) > 0)
@@ -618,6 +680,14 @@ static int headless(const char *data, const char *rom, long frames)
 		frames, fw, fh, fp, as->adj, as->fill_min, as->fill_max,
 		m.xrun_total);
 	core_unload();
+	{
+		int learned = cpuctl_game_end();
+
+		if (learned != rom_settings.cpu_start) {
+			rom_settings.cpu_start = learned;
+			rom_settings_save();
+		}
+	}
 	snprintf(path, sizeof(path), "%s/native.raw", fe_data_dir);
 	write_file_atomic(path, native, sizeof(native));
 	return m.xrun_total ? 2 : 0;

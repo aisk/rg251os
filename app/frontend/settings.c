@@ -2,8 +2,10 @@
  * Persistent settings on the GBA partition, as key=value text that can be
  * edited on a PC:
  *
- *   config/settings.txt          global: volume, brightness, LCD grid
- *   config/roms/<rom name>.txt   per game: color correction
+ *   config/settings.txt          global: volume, brightness, LCD grid,
+ *                                CPU mode (cpu=adaptive|max|<MHz>)
+ *   config/roms/<rom name>.txt   per game: color correction, and the
+ *                                learned start OPP (cpu_start=<MHz>)
  *
  * <rom name> is the ROM file name without ".gba". Unknown keys, bad values,
  * comments (#), blank lines and CRLF line ends are ignored, so a missing or
@@ -12,9 +14,10 @@
  * that file is still read when config/settings.txt is missing.
  *
  * A per ROM file is only written once something was changed for that
- * game, so a future default source (rom_settings_defaults(), e.g. a ROM
- * database turning color correction on for known titles) still applies to
- * every game the user has not touched.
+ * game, and only with the fields that were in the file or differ from the
+ * defaults, so a future default source (rom_settings_defaults(), e.g. a
+ * ROM database turning color correction on for known titles) still
+ * applies to every game whose color the user has not touched.
  */
 #include <ctype.h>
 #include <stdio.h>
@@ -37,23 +40,33 @@ const struct settings settings_defaults = {
 	.grid = 0,
 	.grid_dim = 50,
 	.grid_boost = 0,
+	.cpu = CPU_MODE_ADAPTIVE,
 };
 struct settings settings = settings_defaults;
 struct rom_settings rom_settings;
 
 static char rom_base[128];  /* current game, "" when none */
+static unsigned rom_in_file;  /* fields present in the ROM's file */
 
 static const char *const on_off[] = { "off", "on" };
+static const char *const cpu_modes[] = { "adaptive", "max" };
 
+/*
+ * Value i < nnames is written as names[i]; nnames 0 means names cover
+ * min..max. Other values are numbers in min..max.
+ */
 struct field {
 	const char *key;
 	size_t off;
 	int min, max;
-	const char *const *names;  /* value i is written as names[i] */
+	const char *const *names;
+	int nnames;
 };
 
 #define F(type, member, lo, hi, n) \
-	{ #member, offsetof(struct type, member), lo, hi, n }
+	{ #member, offsetof(struct type, member), lo, hi, n, 0 }
+#define FN(type, member, lo, hi, n) \
+	{ #member, offsetof(struct type, member), lo, hi, n, ARRAY_SIZE(n) }
 
 static const struct field global_fields[] = {
 	F(settings, volume, 0, 255, NULL),
@@ -61,11 +74,18 @@ static const struct field global_fields[] = {
 	F(settings, grid, 0, 1, on_off),
 	F(settings, grid_dim, 0, 90, NULL),
 	F(settings, grid_boost, 0, 100, NULL),
+	FN(settings, cpu, 300, 5000, cpu_modes),
 };
 
 static const struct field rom_fields[] = {
 	F(rom_settings, color, 0, COLOR_COUNT - 1, color_mode_names),
+	F(rom_settings, cpu_start, 0, 5000, NULL),
 };
+
+static int field_nnames(const struct field *f)
+{
+	return f->nnames ? f->nnames : f->max + 1;
+}
 
 static int parse_value(const struct field *f, const char *v, int *out)
 {
@@ -73,7 +93,7 @@ static int parse_value(const struct field *f, const char *v, int *out)
 	long n;
 
 	if (f->names)
-		for (int i = 0; i <= f->max; i++)
+		for (int i = 0; i < field_nnames(f); i++)
 			if (!strcasecmp(v, f->names[i])) {
 				*out = i;
 				return 0;
@@ -97,9 +117,9 @@ static int parse_value(const struct field *f, const char *v, int *out)
 	return 0;
 }
 
-/* Returns the number of fields set. */
+/* Returns the number of fields set; marks them in *mask if not NULL. */
 static int parse_fields(void *obj, const struct field *fields, size_t nf,
-			const char *text)
+			const char *text, unsigned *mask)
 {
 	int count = 0;
 
@@ -132,6 +152,8 @@ static int parse_fields(void *obj, const struct field *fields, size_t nf,
 					    parse_value(&fields[i], val, &v))
 						continue;
 					*(int *)((char *)obj + fields[i].off) = v;
+					if (mask)
+						*mask |= 1u << i;
 					count++;
 				}
 			}
@@ -141,8 +163,9 @@ static int parse_fields(void *obj, const struct field *fields, size_t nf,
 	return count;
 }
 
+/* Writes the fields in mask. */
 static int format_fields(const void *obj, const struct field *fields,
-			 size_t nf, char *buf, size_t size)
+			 size_t nf, unsigned mask, char *buf, size_t size)
 {
 	size_t n = 0;
 
@@ -150,7 +173,9 @@ static int format_fields(const void *obj, const struct field *fields,
 	for (size_t i = 0; i < nf && n < size; i++) {
 		int v = *(const int *)((const char *)obj + fields[i].off);
 
-		if (fields[i].names && v >= 0 && v <= fields[i].max)
+		if (!(mask & 1u << i))
+			continue;
+		if (fields[i].names && v >= 0 && v < field_nnames(&fields[i]))
 			n += snprintf(buf + n, size - n, "%s=%s\n", fields[i].key,
 				      fields[i].names[v]);
 		else
@@ -160,7 +185,7 @@ static int format_fields(const void *obj, const struct field *fields,
 }
 
 static int load_file(const char *path, void *obj, const struct field *fields,
-		     size_t nf)
+		     size_t nf, unsigned *mask)
 {
 	char buf[2048];
 	int n = read_file(path, buf, sizeof(buf) - 1);
@@ -168,42 +193,48 @@ static int load_file(const char *path, void *obj, const struct field *fields,
 	if (n < 0)
 		return -1;
 	buf[n] = 0;
-	return parse_fields(obj, fields, nf, buf);
+	return parse_fields(obj, fields, nf, buf, mask);
 }
 
 /* ---------------------------------------------------------------- global */
 
 int settings_parse(struct settings *s, const char *text)
 {
-	return parse_fields(s, global_fields, ARRAY_SIZE(global_fields), text);
+	return parse_fields(s, global_fields, ARRAY_SIZE(global_fields), text,
+			    NULL);
 }
 
 int settings_format(const struct settings *s, char *buf, size_t size)
 {
-	return format_fields(s, global_fields, ARRAY_SIZE(global_fields), buf,
-			     size);
+	return format_fields(s, global_fields, ARRAY_SIZE(global_fields), ~0u,
+			     buf, size);
 }
 
 void settings_load(void)
 {
-	char path[300];
+	char path[300], cpu[16];
 	const char *from = "config/settings.txt";
 	int n;
 
 	settings = settings_defaults;
 	snprintf(path, sizeof(path), "%s/config/settings.txt", fe_data_dir);
-	n = load_file(path, &settings, global_fields, ARRAY_SIZE(global_fields));
+	n = load_file(path, &settings, global_fields, ARRAY_SIZE(global_fields),
+		      NULL);
 	if (n < 0) {
 		from = "settings.txt (old location)";
 		snprintf(path, sizeof(path), "%s/settings.txt", fe_data_dir);
 		n = load_file(path, &settings, global_fields,
-			      ARRAY_SIZE(global_fields));
+			      ARRAY_SIZE(global_fields), NULL);
 	}
+	if (settings.cpu >= (int)ARRAY_SIZE(cpu_modes))
+		snprintf(cpu, sizeof(cpu), "%d MHz", settings.cpu);
+	else
+		snprintf(cpu, sizeof(cpu), "%s", cpu_modes[settings.cpu]);
 	log_msg("settings: %s, %d values: volume %d, brightness %d%%, grid %s "
-		"dim %d%% boost %d%%", n < 0 ? "defaults (no file)" : from,
+		"dim %d%% boost %d%%, cpu %s", n < 0 ? "defaults (no file)" : from,
 		n < 0 ? 0 : n, settings.volume, settings.brightness,
 		settings.grid ? "on" : "off", settings.grid_dim,
-		settings.grid_boost);
+		settings.grid_boost, cpu);
 }
 
 void settings_save(void)
@@ -224,16 +255,18 @@ void rom_settings_defaults(const char *rom_name, struct rom_settings *r)
 	 * known to be authored for the unlit screen); same for all today. */
 	(void)rom_name;
 	r->color = COLOR_OFF;
+	r->cpu_start = 0;
 }
 
 int rom_settings_parse(struct rom_settings *r, const char *text)
 {
-	return parse_fields(r, rom_fields, ARRAY_SIZE(rom_fields), text);
+	return parse_fields(r, rom_fields, ARRAY_SIZE(rom_fields), text, NULL);
 }
 
 int rom_settings_format(const struct rom_settings *r, char *buf, size_t size)
 {
-	return format_fields(r, rom_fields, ARRAY_SIZE(rom_fields), buf, size);
+	return format_fields(r, rom_fields, ARRAY_SIZE(rom_fields), ~0u, buf,
+			     size);
 }
 
 static void rom_path(char *buf, size_t size)
@@ -248,6 +281,7 @@ void rom_settings_load(const char *rom_name)
 	int n;
 
 	rom_base[0] = 0;
+	rom_in_file = 0;
 	rom_settings_defaults(rom_name, &rom_settings);
 	if (!rom_name)
 		return;
@@ -256,21 +290,34 @@ void rom_settings_load(const char *rom_name)
 		len -= 4;
 	snprintf(rom_base, sizeof(rom_base), "%.*s", (int)len, rom_name);
 	rom_path(path, sizeof(path));
-	n = load_file(path, &rom_settings, rom_fields, ARRAY_SIZE(rom_fields));
-	log_msg("settings: %s: %s, color %s", rom_base,
+	n = load_file(path, &rom_settings, rom_fields, ARRAY_SIZE(rom_fields),
+		      &rom_in_file);
+	log_msg("settings: %s: %s, color %s, cpu_start %d MHz", rom_base,
 		n < 0 ? "defaults (no file)" : "loaded",
-		color_mode_names[rom_settings.color]);
+		color_mode_names[rom_settings.color], rom_settings.cpu_start);
 }
 
 void rom_settings_save(void)
 {
+	struct rom_settings def;
+	unsigned mask = rom_in_file;
 	char path[400], buf[256];
 	int n;
 
 	if (!rom_base[0])
 		return;
-	n = rom_settings_format(&rom_settings, buf, sizeof(buf));
+	rom_settings_defaults(rom_base, &def);
+	for (size_t i = 0; i < ARRAY_SIZE(rom_fields); i++)
+		if (*(int *)((char *)&rom_settings + rom_fields[i].off) !=
+		    *(int *)((char *)&def + rom_fields[i].off))
+			mask |= 1u << i;
+	if (!mask)
+		return;
+	n = format_fields(&rom_settings, rom_fields, ARRAY_SIZE(rom_fields),
+			  mask, buf, sizeof(buf));
 	rom_path(path, sizeof(path));
-	if (n > 0 && write_file_atomic(path, buf, n) == 0)
+	if (n > 0 && write_file_atomic(path, buf, n) == 0) {
+		rom_in_file = mask;
 		log_msg("settings: saved %s", path);
+	}
 }

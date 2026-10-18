@@ -39,6 +39,8 @@ void audio_set_volume(int raw);
 void audio_take_stats(struct audio_stats *st);
 /* Time spent resampling and writing since the last call. */
 int64_t audio_take_time_ns(void);
+/* Underruns since start, never reset. */
+unsigned audio_xruns_total(void);
 
 /* Apply "Control Name=value" lines (from <data>/mixer.txt). */
 int audio_apply_mixer_text(const char *text);
