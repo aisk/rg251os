@@ -91,6 +91,7 @@
 #include "romdb.h"
 #include "sdgrow.h"
 #include "sleep.h"
+#include "sysinfo.h"
 
 #define HOTKEY (JOY_BIT(SELECT) | JOY_BIT(START))
 #define PERF_INTERVAL_NS (10 * 1000000000LL)
@@ -102,7 +103,8 @@ int selftest(const char *dir);
 int selftest_core_switch(const char *data, long frames);
 
 enum state {
-	ST_ROMLIST, ST_GAME, ST_MENU, ST_SETTINGS, ST_FATAL, ST_POWEROFF
+	ST_ROMLIST, ST_GAME, ST_MENU, ST_SETTINGS, ST_FATAL, ST_POWEROFF,
+	ST_SYSINFO
 };
 
 static struct {
@@ -121,6 +123,7 @@ static struct {
 	int blink;
 	char fatal_title[64], fatal_msg[256];
 	enum state settings_from;  /* ST_ROMLIST or ST_MENU */
+	enum state sysinfo_from;   /* ST_SETTINGS or ST_MENU */
 	/* As last loaded or saved, to save only what changed. */
 	struct settings saved;
 	struct rom_settings saved_rom;
@@ -408,8 +411,18 @@ static void perf_report(void);
 
 static const char *const state_names[] = {
 	"ROM list", "game", "in-game menu", "settings", "error screen",
-	"power off",
+	"power off", "system info",
 };
+
+/* From the ROM list's settings or the in-game menu (the game stays
+ * paused); B goes back there. */
+static void open_sysinfo(uint32_t buttons, int64_t now)
+{
+	m.sysinfo_from = m.st;
+	sysinfo_enter(state_names[m.st], now);
+	m.suppress = buttons;
+	m.st = ST_SYSINFO;
+}
 
 /* Blocks until the power key goes down (or, in the headless test, after
  * a simulated press). */
@@ -702,6 +715,9 @@ static void frame(int64_t now)
 		case UI_SETTINGS:
 			open_settings(buttons);
 			break;
+		case UI_SYSINFO:
+			open_sysinfo(buttons, now);
+			break;
 		case UI_QUIT:
 			quit_game();
 			break;
@@ -727,18 +743,46 @@ static void frame(int64_t now)
 			resume_game(buttons);
 			break;
 		}
-		if (settings_menu_update(pressed) == UI_BACK)
+		switch (settings_menu_update(pressed)) {
+		case UI_BACK:
 			close_settings(buttons);
+			break;
+		case UI_SYSINFO:
+			open_sysinfo(buttons, now);
+			break;
+		}
 		fr = NULL;
 		fw = fh = fp = 0;
 		if (m.settings_from == ST_MENU)
 			fr = core_frame(&fw, &fh, &fp);
-		if (m.st == ST_SETTINGS)
+		if (m.st == ST_SYSINFO)
+			sysinfo_draw(&m.cv);
+		else if (m.st == ST_SETTINGS)
 			settings_menu_draw(&m.cv, fr, fp, fw, fh);
 		else if (m.st == ST_MENU)
 			ingame_menu_draw(&m.cv, fr, fp, fw, fh);
 		else
 			romlist_menu_draw(&m.cv);
+		blit_canvas();
+		break;
+	case ST_SYSINFO:
+		pressed = ui_repeat(buttons & ~m.suppress, now);
+		if (m.sysinfo_from == ST_MENU && menu_hotkey(buttons)) {
+			resume_game(buttons);
+			break;
+		}
+		if (sysinfo_update(pressed, now) == UI_BACK) {
+			m.suppress = buttons;
+			m.st = m.sysinfo_from;
+		}
+		if (m.st == ST_SYSINFO) {
+			sysinfo_draw(&m.cv);
+		} else if (m.st == ST_MENU) {
+			fr = core_frame(&fw, &fh, &fp);
+			ingame_menu_draw(&m.cv, fr, fp, fw, fh);
+		} else {
+			settings_menu_draw(&m.cv, NULL, 0, 0, 0);
+		}
 		blit_canvas();
 		break;
 	case ST_FATAL:

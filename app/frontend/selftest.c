@@ -27,6 +27,7 @@
 #include "romlist.h"
 #include "sdgrow.h"
 #include "sleep.h"
+#include "sysinfo.h"
 
 static int failures;
 
@@ -1473,7 +1474,7 @@ static int count_color(const uint16_t *px, int y0, int y1, uint16_t col)
 /*
  * In-game menu: Restart game is the 2nd row and needs a second A within
  * 3 s (180 updates, one per vblank); moving away or waiting cancels, B
- * resumes. All 10 rows fit in the box, which ends above the bottom edge.
+ * resumes. All 11 rows fit in the box, which ends above the bottom edge.
  */
 static void test_ingame_restart(const char *dir)
 {
@@ -1485,7 +1486,7 @@ static void test_ingame_restart(const char *dir)
 	ingame_menu_enter("Game");
 	ingame_menu_update(JOY_BIT(DOWN));
 	ingame_menu_draw(&cv, NULL, 0, 0, 0);
-	/* Row 1 at y 96 (box at 36, 36 px name, 24 px rows). */
+	/* Row 1 at y 92 (box at 34, 36 px name, 22 px rows). */
 	plain = count_color(px, 92, 116, COL_HI);
 	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_NONE, "restart: first A arms");
 	ingame_menu_draw(&cv, NULL, 0, 0, 0);
@@ -1551,6 +1552,122 @@ static void test_ingame_restart(const char *dir)
 	      "restart: last row is Power off");
 }
 
+/* Each directory of a path under base, then the file. */
+static void put_path(const char *base, const char *rel, const char *val)
+{
+	char path[512];
+
+	snprintf(path, sizeof(path), "%s/%s", base, rel);
+	for (char *p = path + strlen(base) + 1; (p = strchr(p, '/')); p++) {
+		*p = 0;
+		mkdir(path, 0755);
+		*p = '/';
+	}
+	write_text(path, val);
+}
+
+/* Rows [y, y + 16) from x match text drawn there on the background. */
+static int row_shows(const uint16_t *px, int x, int y, const char *text)
+{
+	static uint16_t ref[480 * 320];
+	struct canvas rc = { ref, 480, 320 };
+	int w = 16 * (int)strlen(text);
+
+	draw_fill(&rc, 0, 0, 480, 320, COL_BG);
+	draw_text(&rc, x, y, 2, COL_FG, text);
+	for (int r = y; r < y + 16; r++)
+		if (memcmp(px + r * 480 + x, ref + r * 480 + x, w * 2))
+			return 0;
+	return 1;
+}
+
+/*
+ * System info: /proc/stat and /proc/meminfo parsing, then the page on a
+ * fake /proc and /sys (two cores, the two PX30 tsadc zones, one hwmon
+ * sensor, one cpufreq policy): CPU usage since boot, then from the
+ * deltas after a second, the temperatures, and B goes back.
+ */
+static void test_sysinfo(const char *dir)
+{
+	static const char stat0[] =
+		"cpu  100 0 100 700 100 0 0 0 0 0\n"
+		"cpu0 50 0 50 350 50 0 0 0 0 0\n"
+		"cpu1 50 0 50 350 50 0 0 0 0 0\n"
+		"intr 12345 0 0\nctxt 999\n";
+	static const char stat1[] =
+		"cpu  250 50 100 900 100 0 0 0 0 0\n"
+		"cpu0 50 0 50 550 50 0 0 0 0 0\n"
+		"cpu1 200 50 50 350 50 0 0 0 0 0\n";
+	static uint16_t px[480 * 320];
+	struct canvas cv = { px, 480, 320 };
+	struct cpu_times t[4], u[4];
+	char root[300], path[400];
+	int n;
+
+	memset(t, 0, sizeof(t));
+	n = sysinfo_parse_stat(stat0, t, 4);
+	CHECK(n == 3 && t[0].busy == 200 && t[0].total == 1000 &&
+	      t[2].busy == 100 && t[2].total == 500,
+	      "sysinfo: stat parse %d %llu/%llu", n, t[0].busy, t[0].total);
+	CHECK(sysinfo_parse_stat("cpu0 1 2 3 4\n", u, 4) == 0,
+	      "sysinfo: no total line");
+	/* A core past max is ignored, the rest still counts. */
+	CHECK(sysinfo_parse_stat(stat0, u, 2) == 2, "sysinfo: max cores");
+	memset(u, 0, sizeof(u));
+	sysinfo_parse_stat(stat1, u, 4);
+	CHECK(sysinfo_usage(&t[0], &u[0]) == 50 && sysinfo_usage(&t[1], &u[1]) == 0 &&
+	      sysinfo_usage(&t[2], &u[2]) == 100,
+	      "sysinfo: usage %d %d %d", sysinfo_usage(&t[0], &u[0]),
+	      sysinfo_usage(&t[1], &u[1]), sysinfo_usage(&t[2], &u[2]));
+	CHECK(sysinfo_usage(&t[0], &t[0]) == -1, "sysinfo: no time passed");
+	CHECK(sysinfo_meminfo_kb("MemTotal:     1003456 kB\nMemFree: 1 kB\n"
+				 "MemAvailable:   803456 kB\n", "MemAvailable") ==
+	      803456, "sysinfo: MemAvailable");
+	CHECK(sysinfo_meminfo_kb("MemTotal: 5 kB\n", "Mem") == -1 &&
+	      sysinfo_meminfo_kb("MemTotal: 5 kB\n", "MemAvailable") == -1,
+	      "sysinfo: missing meminfo key");
+
+	snprintf(root, sizeof(root), "%s/sysinfo", dir);
+	mkdir(root, 0755);
+	put_path(root, "proc/stat", stat0);
+	put_path(root, "proc/meminfo", "MemTotal: 1003520 kB\n"
+		 "MemAvailable: 798720 kB\n");
+	put_path(root, "sys/class/thermal/thermal_zone0/type", "soc-thermal\n");
+	put_path(root, "sys/class/thermal/thermal_zone0/temp", "45200\n");
+	put_path(root, "sys/class/thermal/thermal_zone1/type", "gpu-thermal\n");
+	put_path(root, "sys/class/thermal/thermal_zone1/temp", "44800\n");
+	put_path(root, "sys/class/thermal/cooling_device0/type", "cpufreq\n");
+	put_path(root, "sys/class/hwmon/hwmon0/name", "batt\n");
+	put_path(root, "sys/class/hwmon/hwmon0/temp1_input", "30000\n");
+	put_path(root, "sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq",
+		 "1296000\n");
+	sysinfo_set_root(root);
+	sysinfo_enter("selftest", 0);
+	sysinfo_draw(&cv);
+	/* CPU, Cores, Freq, Memory, Temp rows from y 40, 20 px apart. */
+	CHECK(row_shows(px, 136, 40, " 20%  Adaptive"), "sysinfo: CPU since boot");
+	CHECK(row_shows(px, 136, 60, " 20%   20%"), "sysinfo: cores since boot");
+	CHECK(row_shows(px, 136, 80, "1296 MHz"), "sysinfo: frequency");
+	CHECK(row_shows(px, 136, 100, "200 / 980 MB"), "sysinfo: memory");
+	CHECK(row_shows(px, 136, 120, "soc 45.2C  gpu 44.8C"),
+	      "sysinfo: thermal zones");
+	CHECK(row_shows(px, 136, 140, "batt 30.0C"), "sysinfo: hwmon wraps");
+	put_path(root, "proc/stat", stat1);
+	CHECK(sysinfo_update(0, 500000000LL) == UI_NONE, "sysinfo: stays open");
+	sysinfo_draw(&cv);
+	CHECK(row_shows(px, 136, 40, " 20%  Adaptive"),
+	      "sysinfo: not refreshed before 1 s");
+	sysinfo_update(0, 1000000000LL);
+	sysinfo_draw(&cv);
+	CHECK(row_shows(px, 136, 40, " 50%  Adaptive") &&
+	      row_shows(px, 136, 60, "  0%  100%"), "sysinfo: usage from deltas");
+	snprintf(path, sizeof(path), "%s/ui-sysinfo.raw", dir);
+	write_file_atomic(path, px, sizeof(px));
+	CHECK(sysinfo_update(JOY_BIT(B), 1100000000LL) == UI_BACK,
+	      "sysinfo: B goes back");
+	sysinfo_set_root(NULL);
+}
+
 /* Render the menus to <dir>/ui-*.raw (480x320 RGB565) for a visual check. */
 static void test_ui(const char *dir)
 {
@@ -1590,8 +1707,8 @@ static void test_ui(const char *dir)
 	settings_menu_draw(&cv, NULL, 0, 0, 0);
 	snprintf(path, sizeof(path), "%s/ui-settings.raw", dir);
 	write_file_atomic(path, px, sizeof(px));
-	/* Volume, Brightness, CPU, Audio, Debug log, Back: no grid rows
-	 * outside a game. */
+	/* Volume, Brightness, CPU, Audio, Debug log, System info, Back: no
+	 * grid rows outside a game. */
 	settings_menu_update(JOY_BIT(DOWN));
 	settings_menu_update(JOY_BIT(DOWN));
 	settings_menu_update(JOY_BIT(A));
@@ -1599,8 +1716,11 @@ static void test_ui(const char *dir)
 	settings.audio = settings_defaults.audio;
 	settings_menu_update(JOY_BIT(DOWN));
 	settings_menu_update(JOY_BIT(DOWN));
+	CHECK(settings_menu_update(JOY_BIT(A)) == UI_SYSINFO,
+	      "settings: 6th row is System info");
+	settings_menu_update(JOY_BIT(DOWN));
 	CHECK(settings_menu_update(JOY_BIT(A)) == UI_BACK,
-	      "settings: 6th row is Back");
+	      "settings: 7th row is Back");
 	settings_menu_enter(1);
 	for (int i = 0; i < 5; i++)
 		settings_menu_update(JOY_BIT(DOWN));
@@ -2037,6 +2157,7 @@ int selftest(const char *dir)
 	test_ingame_restart(dir);
 	test_romlist_folders(dir);
 	test_ui(dir);
+	test_sysinfo(dir);
 	log_msg("selftest: %s (%d failures)", failures ? "FAILED" : "passed",
 		failures);
 	return failures ? 1 : 0;

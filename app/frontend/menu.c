@@ -14,9 +14,10 @@
  * quitting it comes back to the same ROM; a folder that is gone by then
  * falls back to its parent. Nothing of this is kept across boots. SELECT
  * opens the global settings (Volume, Brightness, CPU, Audio mode
- * Simple/Adaptive and Debug log on/off, see log.c). In game, SELECT+START
- * opens the in-game menu: Resume, Restart game, Volume, Brightness, CPU,
- * Core, Frame blend, Settings, Quit to ROM list, Power off; B or
+ * Simple/Adaptive, Debug log on/off, see log.c, and System info, the read
+ * only page of sysinfo.c). In game, SELECT+START opens the in-game menu:
+ * Resume, Restart game, Volume, Brightness, CPU, Core, Frame blend,
+ * Settings, System info, Quit to ROM list, Power off; B or
  * SELECT+START again resumes. Restart game starts the game over like the
  * console's reset button (its save written first); the first A only turns
  * the row into "Press A to restart", a second A within 3 s does it,
@@ -482,12 +483,12 @@ void romlist_menu_draw(struct canvas *c)
 
 enum {
 	IG_RESUME, IG_RESET, IG_VOLUME, IG_BRIGHTNESS, IG_CPU, IG_CORE,
-	IG_BLEND, IG_SETTINGS, IG_QUIT, IG_POWEROFF, IG_COUNT
+	IG_BLEND, IG_SETTINGS, IG_SYSINFO, IG_QUIT, IG_POWEROFF, IG_COUNT
 };
-/* Name and rows in a 36 + 10 * 24 px box from y 36 to 312, below the
+/* Name and rows in a 36 + 11 * 22 px box from y 34 to 312, below the
  * battery. */
 #define IG_HEAD_H 36
-#define IG_ROW_H 24
+#define IG_ROW_H 22
 /* Restart game armed: frames (the menu is updated on every vblank) left
  * for the confirming A. */
 #define IG_CONFIRM_FRAMES (3 * 60)
@@ -584,6 +585,8 @@ int ingame_menu_update(uint32_t pressed)
 			break;
 		case IG_SETTINGS:
 			return UI_SETTINGS;
+		case IG_SYSINFO:
+			return UI_SYSINFO;
 		case IG_QUIT:
 			return UI_QUIT;
 		case IG_POWEROFF:
@@ -598,9 +601,10 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 {
 	static const char *const items[IG_COUNT] = {
 		"Resume", "Restart game", "Volume", "Brightness", "CPU", "Core",
-		"Frame blend", "Settings", "Quit to ROM list", "Power off",
+		"Frame blend", "Settings", "System info", "Quit to ROM list",
+		"Power off",
 	};
-	int bx = 56, by = 36, bw = c->w - 112;
+	int bx = 56, by = 34, bw = c->w - 112;
 	int bh = IG_HEAD_H + IG_COUNT * IG_ROW_H;
 	int cols = (bw - 24) / 16;
 
@@ -658,16 +662,17 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 
 enum {
 	SI_VOLUME, SI_BRIGHTNESS, SI_CPU, SI_COLOR, SI_GRID, SI_GRID_DIM,
-	SI_GRID_BOOST, SI_AUDIO, SI_DEBUG, SI_BACK,
+	SI_GRID_BOOST, SI_AUDIO, SI_DEBUG, SI_SYSINFO, SI_BACK,
 };
 
 static const char *const si_names[] = {
 	"Volume", "Brightness", "CPU", "Color", "LCD grid", "Grid darkness",
-	"Dot boost", "Audio", "Debug log", "Back",
+	"Dot boost", "Audio", "Debug log", "System info", "Back",
 };
 
 static const uint8_t si_romlist[] = {
-	SI_VOLUME, SI_BRIGHTNESS, SI_CPU, SI_AUDIO, SI_DEBUG, SI_BACK,
+	SI_VOLUME, SI_BRIGHTNESS, SI_CPU, SI_AUDIO, SI_DEBUG, SI_SYSINFO,
+	SI_BACK,
 };
 static const uint8_t si_ingame[] = {
 	SI_COLOR, SI_GRID, SI_GRID_DIM, SI_GRID_BOOST, SI_DEBUG, SI_BACK,
@@ -744,6 +749,8 @@ int settings_menu_update(uint32_t pressed)
 	if (pressed & (JOY_BIT(A) | JOY_BIT(START))) {
 		if (item == SI_BACK)
 			return UI_BACK;
+		if (item == SI_SYSINFO)
+			return UI_SYSINFO;
 		if (item == SI_GRID || item == SI_COLOR || item == SI_AUDIO ||
 		    item == SI_DEBUG)
 			settings_change(item, 1);
