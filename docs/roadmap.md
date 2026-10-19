@@ -63,4 +63,5 @@
 - **日志被覆盖**：用户经常在出问题后重启再拷卡，所以改成每次开机一个目录，保留最近 20 个。
 - **GPU 电源域一直开着**：要在 DTS 里把 gpu、vpu、vpu_mmu 都关掉，genpd 才会断电。
 - **串口控制台**会让开机多卡约 0.9 秒，所以去掉了 console，加了 quiet。
+- **换内核版本后 .config 没有重新合并**：kbuild 的 syncconfig 会悄悄给新符号取默认值，被改名或隐藏的符号也不报错。现在 `mk/linux.mk` 把内核版本记进 `.fragments`，版本一变就重跑 allnoconfig 加 merge_config。检查符号没生效的 grep 同时认新版 merge_config.sh 的 `WARNING:` 前缀和 `differs:` 写法。
 - **主线 U-Boot 在 RG351P 上没有任何输出**，所有组合都试过，见 hardware-research.md。

@@ -18,11 +18,16 @@ endif
 LINUX_MAKE := $(MAKE) -C $(LINUX_SRC) O=$(LINUX_BUILD) ARCH=arm64 \
 	CROSS_COMPILE=$(CROSS_COMPILE) -j$(JOBS)
 
-# The fragment list is recorded so toggling LINUX_DEBUG regenerates .config
+# The fragment list and the kernel version are recorded so toggling
+# LINUX_DEBUG or moving the submodule to another release regenerates
+# .config (otherwise kbuild's syncconfig would silently take defaults)
+LINUX_VERSION := $(shell sed -n 's/^\(VERSION\|PATCHLEVEL\|SUBLEVEL\) = //p' \
+	$(LINUX_SRC)/Makefile | paste -sd.)
 LINUX_FRAGMENTS_STAMP := $(LINUX_BUILD)/.fragments
 $(shell mkdir -p $(LINUX_BUILD); \
-	echo '$(LINUX_FRAGMENTS)' | cmp -s - $(LINUX_FRAGMENTS_STAMP) || \
-	echo '$(LINUX_FRAGMENTS)' > $(LINUX_FRAGMENTS_STAMP))
+	echo '$(LINUX_FRAGMENTS) $(LINUX_VERSION)' | \
+	cmp -s - $(LINUX_FRAGMENTS_STAMP) || \
+	echo '$(LINUX_FRAGMENTS) $(LINUX_VERSION)' > $(LINUX_FRAGMENTS_STAMP))
 
 # allnoconfig first creates the O= wrapper Makefile, then merge_config.sh
 # runs from the build dir so its temp files never land in external/linux.
@@ -32,7 +37,7 @@ $(LINUX_CONFIG): $(LINUX_FRAGMENTS) $(LINUX_FRAGMENTS_STAMP) $(TOOLCHAIN_STAMP)
 	cd $(LINUX_BUILD) && ARCH=arm64 CROSS_COMPILE=$(CROSS_COMPILE) \
 		$(LINUX_SRC)/scripts/kconfig/merge_config.sh -n $(LINUX_FRAGMENTS) \
 		> $(LINUX_BUILD)/merge_config.log
-	@if grep -A2 '^Value requested' $(LINUX_BUILD)/merge_config.log; then \
+	@if grep -E -A2 'Value requested|differs:' $(LINUX_BUILD)/merge_config.log; then \
 		rm -f $@; echo "linux: config fragment symbols did not stick"; exit 1; fi
 	touch $@
 
