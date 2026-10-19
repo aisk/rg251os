@@ -19,6 +19,7 @@
 - 电源键休眠：是否真的进了深度睡眠（日志 `sleep #N: result: suspended to RAM`），唤醒后屏幕、USB 手柄、SD 卡、声音是否正常，唤醒时有没有 pop 声，深睡时指示灯是否熄灭。
 - 首次开机扩展 GBA 分区：`sdgrow:` 日志，扩展后 Windows 和 macOS 能否读写。
 - ROM 名称识别：名字是否正确，冷缓存下扫描耗时（`romdb: scanned N ROMs in X ms`），大 ROM 首次算 CRC 的耗时。
+- ROM 列表的子文件夹：真卡（vfat）上文件夹的识别和排序，进出文件夹和退出游戏后的选中项，每层扫描的耗时（`roms: folder /<路径>: N ROMs, M folders (X ms)`），子文件夹里需要算 CRC 的 ROM 改名是否正常，`config/romdb-cache.txt` 里子文件夹的条目是否带路径并且在别的文件夹扫描后保留。注意存档和单游戏设置只按文件名，不同文件夹里的同名 ROM 会共用。
 - `color=auto` 的效果是否合适。现在是 2004 年及以前用 `gba`，2005 年以后用 `sp101`，年份未知用 `off`。按 2005 年分界是推断出来的，没有出处。例外表 `color_exceptions[]` 是空的，遇到不合适的游戏再加。
 - Frame blend 开启后的实际开销（用 perf.csv 对比开关时的 `work_avg`）。
 - adaptive 音频去掉开机校准以后，第一局开头有没有爆音或 underrun。
@@ -42,6 +43,7 @@
 - 设置时间的菜单项，配合 RTC 游戏。
 - 前端自己实现帧间混合（smart 模式只混合闪烁的像素，以及 mGBA 下也能用）。
 - 中文文件名：vfat 挂载用 utf8，再加一套 CJK 字体。
+- 记住上次所在的文件夹和选中的 ROM，跨开机恢复。现在只在本次开机内保留。
 - zip 格式 ROM。
 - 震动卡带（`gpsp_rumble`），需要前端驱动 pwm-vibrator。
 - mGBA 的性能：多线程视频、LTO、PGO。

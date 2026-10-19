@@ -233,12 +233,12 @@ GBA 分区（下面写作 `<data>`）里的文件
 
 | 路径 | 用途 |
 |---|---|
-| `roms/*.gba` | ROM |
-| `saves/<rom>.sav` | 存档，两个核心通用；没有 `.sav` 时会读同名的 RetroArch `.srm`，之后写回 `.sav` |
+| `roms/*.gba` | ROM，可以放在任意深度的子文件夹里 |
+| `saves/<rom>.sav` | 存档，两个核心通用，只按文件名（不含文件夹）；没有 `.sav` 时会读同名的 RetroArch `.srm`，之后写回 `.sav` |
 | `bios/gba_bios.bin` | 可选的 GBA BIOS。没有的话 gpSP 用内置 BIOS，mGBA 用 HLE |
 | `config/settings.txt` | 全局设置：音量、亮度、LCD 网格、CPU 模式、音频模式、调试日志 |
-| `config/roms/<rom>.txt` | 单个游戏的设置：`color`（auto、off、gba、gba-light、sp101）、`core`、`blend`（gpSP 的帧混合）、学到的起始频率 `cpu_start`。只写和默认值不同的项 |
-| `config/romdb-cache.txt` | ROM 识别时算过的 CRC32 缓存，按文件名、大小和 mtime |
+| `config/roms/<rom>.txt` | 单个游戏的设置：`color`（auto、off、gba、gba-light、sp101）、`core`、`blend`（gpSP 的帧混合）、学到的起始频率 `cpu_start`。只写和默认值不同的项。和存档一样只按文件名，不同文件夹里的同名 ROM 共用 |
+| `config/romdb-cache.txt` | ROM 识别时算过的 CRC32 缓存，按相对 `roms/` 的路径（顶层的 ROM 就是文件名，和旧缓存兼容）、大小和 mtime |
 | `mixer.txt` | 可选，开机时应用的 ALSA mixer 设置，行前可加 `speaker:` 或 `headphones:` |
 | `log/boot-NNNN/` | 每次开机一个目录，保留最近 20 个，有 `frontend.txt` 和各个时间点的 dmesg；`log/LATEST.txt` 指向最新的一个 |
 | `log/perf.csv` | 每局游戏的性能、功耗和音频统计，跨开机追加 |
@@ -257,6 +257,7 @@ GBA 分区（下面写作 `<data>`）里的文件
 - 色彩校正默认 `auto`，按首次发行年份选：2004 年及以前 `gba`，2005 年以后 `sp101`，年份未知 `off`。
 - Frame blend（gpSP 的 50:50 帧混合）默认关，按游戏在菜单里开，切换立即生效。mGBA 的 libretro 接口没有这个功能。
 - LCD 网格效果每次开机随机选 2x2 里的一个像素当亮点。
+- ROM 列表支持子文件夹：文件夹排在 ROM 前面，名字后面带 `/`，黄色显示。A 进入，B 回上一层并选中刚才的文件夹，顶层按 B 没有反应。标题栏在文件夹里显示相对 `roms/` 的路径，太长时从左边截掉。每次进入文件夹只扫描这一层。退出游戏回到原来的文件夹和 ROM，但当前文件夹和选中项不跨开机保存。
 - 按键：ROM 列表里按 SELECT 进设置，游戏中 SELECT+START 打开菜单。
 - 电源键短按休眠，先尝试挂起到内存，内核挂不起来就退回浅睡眠（关背光和屏幕，CPU 降到最低频率），再按一次唤醒。长按 2 秒保存并关机。
 - 指示灯：内核阶段是 heartbeat 闪烁，前端启动时变红，第一帧出来后变绿，低电量时绿灯里隔 2 秒闪一下红，出错时红绿交替。

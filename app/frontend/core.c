@@ -9,9 +9,10 @@
  * directory). Both keep battery saves (SRAM, flash, EEPROM) in a 128KiB
  * buffer exposed as RETRO_MEMORY_SAVE_RAM, prefilled with 0xFF. mGBA reads
  * it into the emulated cartridge on the first retro_run, gpSP emulates
- * straight out of it. So the frontend copies <data>/saves/<rom>.sav into
- * that buffer after retro_load_game and before the first retro_run, and
- * writes it back when it changed. The layout in the buffer is the same
+ * straight out of it. So the frontend copies <data>/saves/<rom>.sav (by
+ * file name only, whatever folder of roms/ the ROM is in, see settings.c)
+ * into that buffer after retro_load_game and before the first retro_run,
+ * and writes it back when it changed. The layout in the buffer is the same
  * for both (raw SRAM, flash banks in order, EEPROM 8 byte blocks with the
  * first bit in bit 7), so one .sav works with either core. What gets
  * written is the real size: mGBA's retro_get_memory_size() reports it once

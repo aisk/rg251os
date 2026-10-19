@@ -71,8 +71,11 @@ void romdb_match(const char *file, const struct gba_header *h, uint64_t size,
  * CRC when allow_crc and still needed, and caches it. Fills id->title.
  * Returns 0, or -1 when the file cannot be read (title: the file name). */
 int romdb_identify(const char *path, int allow_crc, struct rom_id *id);
-/* Finish a PENDING id with the file's CRC (also cached). */
-void romdb_resolve(const char *file, struct rom_id *id, uint32_t crc);
+/* The cache key of a ROM path: relative to <data>/roms ("a/b/x.gba"), or
+ * the file name for a path elsewhere. Points into path. */
+const char *romdb_key(const char *path);
+/* Finish a PENDING id with the file's CRC (also cached under key). */
+void romdb_resolve(const char *key, struct rom_id *id, uint32_t crc);
 void romdb_log(const char *file, const struct rom_id *id);
 
 /* CRC32 (zlib's), incrementally: crc = romdb_crc32(crc, buf, len), 0 to
@@ -80,16 +83,17 @@ void romdb_log(const char *file, const struct rom_id *id);
 uint32_t romdb_crc32(uint32_t crc, const void *buf, size_t len);
 int romdb_crc_file(const char *path, uint32_t *crc);
 
-/* CRC cache, <data>/config/romdb-cache.txt: one "crc size mtime name"
- * line per ROM whose CRC was needed. */
+/* CRC cache, <data>/config/romdb-cache.txt: one "crc size mtime key"
+ * line per ROM whose CRC was needed (key: see romdb_key). */
 void romdb_cache_load(void);
 int romdb_cache_get(const char *file, uint64_t size, int64_t mtime,
 		    uint32_t *crc);
 void romdb_cache_put(const char *file, uint64_t size, int64_t mtime,
 		     uint32_t crc);
-/* Writes the cache if it changed; prune: drop files not looked up since
- * the last load (after a full scan of the ROM folder). */
-void romdb_cache_save(int prune);
+/* Writes the cache if it changed; prune (a key prefix, "" or "a/b/"):
+ * drop the keys directly in that folder not looked up since the last
+ * load (after a full scan of the folder), NULL: keep everything. */
+void romdb_cache_save(const char *prune);
 void romdb_cache_reset(void);  /* forget it (tests) */
 
 /*

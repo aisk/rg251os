@@ -13,9 +13,12 @@
  *                                the core (core=mgba|gpsp) and gpSP's
  *                                frame blending (blend=off|on)
  *
- * <rom name> is the ROM file name without ".gba". Unknown keys, bad values,
- * comments (#), blank lines and CRLF line ends are ignored, so a missing or
- * damaged file just leaves the defaults. Files are replaced atomically.
+ * <rom name> is the ROM file name without ".gba", whichever folder of
+ * roms/ it is in: moving a ROM to another folder keeps its settings (and
+ * its save, core.c), and two ROMs with the same file name in different
+ * folders share them. Unknown keys, bad values, comments (#), blank lines
+ * and CRLF line ends are ignored, so a missing or damaged file just leaves
+ * the defaults. Files are replaced atomically.
  * Before config/ existed the global settings lived in <data>/settings.txt;
  * that file is still read when config/settings.txt is missing.
  *

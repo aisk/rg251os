@@ -684,22 +684,51 @@ static void test_romlist(const char *base)
 	static const char *const files[] = {
 		"b.gba", "A.GBA", "._a.gba", "c.txt", ".hidden.gba", "z.Gba", "gba",
 	};
-	char dir[300];
+	/* Folders, nested; hidden ones skipped, empty ones listed. */
+	static const char *const dirs[] = {
+		"Zelda", "action", "action/inner", ".hidden", "empty",
+	};
+	char dir[300], sub[340];
 	struct romlist rl = { 0 };
 
 	snprintf(dir, sizeof(dir), "%s/roms", base);
 	mkdir(dir, 0755);
 	for (size_t i = 0; i < ARRAY_SIZE(files); i++)
 		touch(dir, files[i]);
-	CHECK(romlist_scan(&rl, dir) == 3, "romlist found %d", rl.count);
-	if (rl.count == 3) {
-		CHECK(!strcmp(rl.roms[0].file, "A.GBA"), "order 0: %s", rl.roms[0].file);
-		CHECK(!strcmp(rl.roms[1].file, "b.gba"), "order 1: %s", rl.roms[1].file);
-		CHECK(!strcmp(rl.roms[2].file, "z.Gba"), "order 2: %s", rl.roms[2].file);
-		CHECK(!strcmp(rl.roms[0].id.title, "A") &&
-		      rl.roms[0].id.how == ROMDB_UNKNOWN, "empty file: %s",
-		      rl.roms[0].id.title);
+	for (size_t i = 0; i < ARRAY_SIZE(dirs); i++) {
+		snprintf(sub, sizeof(sub), "%s/%s", dir, dirs[i]);
+		mkdir(sub, 0755);
 	}
+	snprintf(sub, sizeof(sub), "%s/action", dir);
+	touch(sub, "x.gba");
+	snprintf(sub, sizeof(sub), "%s/action/inner", dir);
+	touch(sub, "deep.gba");
+	CHECK(romlist_scan(&rl, dir) == 6 && rl.dirs == 3, "romlist found %d "
+	      "(%d folders)", rl.count, rl.dirs);
+	if (rl.count == 6) {
+		CHECK(!strcmp(rl.roms[0].file, "action") && rl.roms[0].dir &&
+		      !strcmp(rl.roms[0].id.title, "action/"), "order 0: %s",
+		      rl.roms[0].file);
+		CHECK(!strcmp(rl.roms[1].file, "empty"), "order 1: %s", rl.roms[1].file);
+		CHECK(!strcmp(rl.roms[2].file, "Zelda"), "order 2: %s", rl.roms[2].file);
+		CHECK(!strcmp(rl.roms[3].file, "A.GBA") && !rl.roms[3].dir,
+		      "order 3: %s", rl.roms[3].file);
+		CHECK(!strcmp(rl.roms[4].file, "b.gba"), "order 4: %s", rl.roms[4].file);
+		CHECK(!strcmp(rl.roms[5].file, "z.Gba"), "order 5: %s", rl.roms[5].file);
+		CHECK(!strcmp(rl.roms[3].id.title, "A") &&
+		      rl.roms[3].id.how == ROMDB_UNKNOWN, "empty file: %s",
+		      rl.roms[3].id.title);
+	}
+	snprintf(sub, sizeof(sub), "%s/action", dir);
+	CHECK(romlist_scan(&rl, sub) == 2 && rl.dirs == 1 &&
+	      !strcmp(rl.roms[0].file, "inner") && !strcmp(rl.roms[1].file, "x.gba"),
+	      "romlist in a folder: %d", rl.count);
+	snprintf(sub, sizeof(sub), "%s/action/inner", dir);
+	CHECK(romlist_scan(&rl, sub) == 1 && !rl.dirs &&
+	      !strcmp(rl.roms[0].file, "deep.gba"), "romlist two deep: %d",
+	      rl.count);
+	snprintf(sub, sizeof(sub), "%s/empty", dir);
+	CHECK(romlist_scan(&rl, sub) == 0, "empty folder");
 	romlist_free(&rl);
 	snprintf(dir, sizeof(dir), "%s/empty-roms", base);
 	mkdir(dir, 0755);
@@ -934,7 +963,7 @@ static void test_romdb(const char *base)
 	romdb_cache_load();
 	romdb_cache_put("a.gba", 100, 5, 0xdeadbeef);
 	romdb_cache_put("b c.gba", 200, 6, 0x00000001);
-	romdb_cache_save(0);
+	romdb_cache_save(NULL);
 	romdb_cache_reset();
 	CHECK(romdb_cache_get("a.gba", 100, 5, &crc) == 0 && crc == 0xdeadbeef,
 	      "cache round trip");
@@ -945,7 +974,7 @@ static void test_romdb(const char *base)
 	CHECK(romdb_cache_get("c.gba", 100, 5, &crc) < 0, "cache: other file");
 	romdb_cache_load();
 	romdb_cache_get("b c.gba", 200, 6, &crc);
-	romdb_cache_save(1);
+	romdb_cache_save("");
 	romdb_cache_reset();
 	CHECK(romdb_cache_get("a.gba", 100, 5, &crc) < 0 &&
 	      romdb_cache_get("b c.gba", 200, 6, &crc) == 0, "cache pruned");
@@ -1034,6 +1063,114 @@ static void test_romdb(const char *base)
 	romdb_identify(path, 0, &id);
 	CHECK(id.how == ROMDB_CRC && id.have_crc, "identify from cache");
 	romdb_cache_reset();
+
+	/* In a folder of roms/: cached under its path relative to roms/,
+	 * kept when another folder is scanned, found again from the cache. */
+	snprintf(path, sizeof(path), "%s/roms/action/x.gba", base);
+	CHECK(!strcmp(romdb_key(path), "action/x.gba"), "key: %s",
+	      romdb_key(path));
+	snprintf(path, sizeof(path), "%s/roms/top.gba", base);
+	CHECK(!strcmp(romdb_key(path), "top.gba"), "key at the top: %s",
+	      romdb_key(path));
+	CHECK(!strcmp(romdb_key("/elsewhere/a.gba"), "a.gba"), "key elsewhere");
+	snprintf(path, sizeof(path), "%s/config/romdb-cache.txt", base);
+	unlink(path);
+	snprintf(dir, sizeof(dir), "%s/roms/crc", base);
+	mkdir(dir, 0755);
+	snprintf(path, sizeof(path), "%s/aw.gba", dir);
+	write_rom(path, "AWRE", 0, vc ? vc->crc : 0, 1);
+	CHECK(romlist_scan(&rl, dir) == 1 && rl.pending == 1, "folder: pending %d",
+	      rl.pending);
+	for (int i = 0; rl.pending && i < 1000; i++)
+		romlist_step(&rl, 8000000);
+	CHECK(rl.count == 1 && rl.roms[0].id.how == ROMDB_CRC, "folder: crc");
+	snprintf(path, sizeof(path), "%s/roms", base);
+	romlist_scan(&rl, path);
+	romdb_cache_reset();
+	romlist_scan(&rl, dir);
+	CHECK(rl.count == 1 && rl.pending == 0 && rl.roms[0].id.have_crc &&
+	      rl.roms[0].id.how == ROMDB_CRC, "folder: cached after scanning "
+	      "the top (pending %d)", rl.pending);
+	romlist_free(&rl);
+	snprintf(path, sizeof(path), "%s/aw.gba", dir);
+	unlink(path);
+	rmdir(dir);
+	romdb_cache_reset();
+}
+
+/* The ROM list's folders in the menu: A opens one, B goes up with it
+ * selected, the folder and ROM are kept over a game (romlist_menu_enter
+ * again), a folder that is gone falls back to the top. Uses the roms/
+ * of test_romlist. */
+static void test_romlist_folders(const char *base)
+{
+	static uint16_t px[480 * 320];
+	struct canvas cv = { px, 480, 320 };
+	char path[512], want[512], gone[400];
+	const uint32_t a = JOY_BIT(A), b = JOY_BIT(B);
+
+	romlist_menu_enter();
+	CHECK(romlist_menu_update(a, path, sizeof(path)) == UI_NONE,
+	      "folders: A on action/ opens it");
+	CHECK(romlist_menu_update(a, path, sizeof(path)) == UI_NONE,
+	      "folders: A on inner/ opens it");
+	romlist_menu_draw(&cv);
+	snprintf(path, sizeof(path), "%s/ui-romlist-folder.raw", base);
+	write_file_atomic(path, px, sizeof(px));
+	snprintf(want, sizeof(want), "%s/roms/action/inner/deep.gba", base);
+	CHECK(romlist_menu_update(a, path, sizeof(path)) == UI_START_ROM &&
+	      !strcmp(path, want), "folders: start %s", path);
+	/* Back from the game: same folder, same ROM. */
+	romlist_menu_enter();
+	CHECK(romlist_menu_update(a, path, sizeof(path)) == UI_START_ROM &&
+	      !strcmp(path, want), "folders: after the game %s", path);
+	/* B: up to action/ with inner/ selected. */
+	CHECK(romlist_menu_update(b, path, sizeof(path)) == UI_NONE, "folders: B");
+	CHECK(romlist_menu_update(a, path, sizeof(path)) == UI_NONE &&
+	      romlist_menu_update(a, path, sizeof(path)) == UI_START_ROM &&
+	      !strcmp(path, want), "folders: inner/ reselected: %s", path);
+	romlist_menu_update(b, path, sizeof(path));
+	romlist_menu_update(JOY_BIT(DOWN), path, sizeof(path));
+	snprintf(want, sizeof(want), "%s/roms/action/x.gba", base);
+	CHECK(romlist_menu_update(a, path, sizeof(path)) == UI_START_ROM &&
+	      !strcmp(path, want), "folders: start %s", path);
+	/* Up to the top with action/ selected; B there does nothing. */
+	romlist_menu_update(b, path, sizeof(path));
+	CHECK(romlist_menu_update(b, path, sizeof(path)) == UI_NONE,
+	      "folders: B at the top");
+	romlist_menu_update(a, path, sizeof(path));
+	romlist_menu_update(JOY_BIT(DOWN), path, sizeof(path));
+	CHECK(romlist_menu_update(a, path, sizeof(path)) == UI_START_ROM &&
+	      !strcmp(path, want), "folders: action/ reselected: %s", path);
+	/* The empty folder: B still goes up. */
+	romlist_menu_update(b, path, sizeof(path));
+	romlist_menu_update(JOY_BIT(DOWN), path, sizeof(path));
+	romlist_menu_update(a, path, sizeof(path));
+	romlist_menu_draw(&cv);
+	snprintf(path, sizeof(path), "%s/ui-romlist-empty.raw", base);
+	write_file_atomic(path, px, sizeof(px));
+	CHECK(romlist_menu_update(a, path, sizeof(path)) == UI_NONE,
+	      "folders: A in an empty folder");
+	romlist_menu_update(b, path, sizeof(path));
+	romlist_menu_update(JOY_BIT(UP), path, sizeof(path));
+	romlist_menu_update(a, path, sizeof(path));
+	CHECK(romlist_menu_update(JOY_BIT(DOWN), path, sizeof(path)) == UI_NONE &&
+	      romlist_menu_update(a, path, sizeof(path)) == UI_START_ROM &&
+	      !strcmp(path, want), "folders: up from empty/: %s", path);
+	/* A folder removed while a game ran: back at the top. */
+	romlist_menu_update(b, path, sizeof(path));
+	snprintf(gone, sizeof(gone), "%s/roms/gone", base);
+	mkdir(gone, 0755);
+	romlist_menu_enter();
+	romlist_menu_update(JOY_BIT(DOWN), path, sizeof(path));
+	romlist_menu_update(JOY_BIT(DOWN), path, sizeof(path));
+	romlist_menu_update(a, path, sizeof(path));
+	rmdir(gone);
+	romlist_menu_enter();
+	romlist_menu_update(JOY_BIT(UP), path, sizeof(path));
+	snprintf(want, sizeof(want), "%s/roms/z.Gba", base);
+	CHECK(romlist_menu_update(a, path, sizeof(path)) == UI_START_ROM &&
+	      !strcmp(path, want), "folders: gone folder: %s", path);
 }
 
 static void test_files(const char *base)
@@ -1898,6 +2035,7 @@ int selftest(const char *dir)
 	test_cpuctl(dir);
 	test_marquee();
 	test_ingame_restart(dir);
+	test_romlist_folders(dir);
 	test_ui(dir);
 	log_msg("selftest: %s (%d failures)", failures ? "FAILED" : "passed",
 		failures);

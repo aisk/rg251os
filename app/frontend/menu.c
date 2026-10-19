@@ -1,12 +1,19 @@
 /*
  * Menus on the 480x320 logical canvas, 8x8 font at 2x (30 columns).
  *
- * ROM list: the ROMs by their No-Intro names (romdb.c; the file name
- * when unknown, " *" after the name of a modified ROM, long names cut
- * with "~"; the selected one, and the game's name above the in-game
- * menu, scroll after 1 s to show the rest, see marquee_offset), up/down
- * (left/right page), A or START starts, SELECT opens
- * the global settings (Volume, Brightness, CPU, Audio mode
+ * ROM list: one folder of roms/ at a time, its subfolders first (as
+ * "name/", in yellow), then the ROMs by their No-Intro names (romdb.c;
+ * the file name when unknown, " *" after the name of a modified ROM,
+ * long names cut with "~"; the selected one, and the game's name above
+ * the in-game menu, scroll after 1 s to show the rest, see
+ * marquee_offset), up/down (left/right page), A or START starts a ROM or
+ * opens a folder, B goes up to the parent folder with the folder left
+ * selected (nothing at the top), the header shows the folder's path
+ * relative to roms/ instead of "GBA", cut from the left with "~" when
+ * long. The folder and the selected entry are kept while a game runs, so
+ * quitting it comes back to the same ROM; a folder that is gone by then
+ * falls back to its parent. Nothing of this is kept across boots. SELECT
+ * opens the global settings (Volume, Brightness, CPU, Audio mode
  * Simple/Adaptive and Debug log on/off, see log.c). In game, SELECT+START
  * opens the in-game menu: Resume, Restart game, Volume, Brightness, CPU,
  * Core, Frame blend, Settings, Quit to ROM list, Power off; B or
@@ -60,6 +67,8 @@ struct marquee {
 
 static struct romlist roms;
 static int sel, top;
+/* The folder shown, relative to roms/: "" at the top, "a/b" inside. */
+static char cur_dir[ROMLIST_PATH];
 static char message[96];
 static struct marquee list_mq = { .sel = -1 };
 
@@ -173,17 +182,95 @@ void romlist_menu_message(const char *msg)
 	snprintf(message, sizeof(message), "%s", msg ? msg : "");
 }
 
-void romlist_menu_enter(void)
+/* The selected row in view, the list not scrolled past its end. */
+static void list_scroll(void)
 {
-	char dir[300];
+	if (sel < top)
+		top = sel;
+	if (sel >= top + LIST_ROWS)
+		top = sel - LIST_ROWS + 1;
+	if (top > roms.count - LIST_ROWS)
+		top = roms.count > LIST_ROWS ? roms.count - LIST_ROWS : 0;
+}
+
+/* Scan cur_dir (or the first parent that still exists) and select the
+ * entry named select (a folder if dir), else the row at index fallback. */
+static void list_open(const char *select, int dir, int fallback)
+{
+	int64_t t0 = now_ns();
+	char path[ROMLIST_PATH];
+	char *up;
 	int n;
 
-	snprintf(dir, sizeof(dir), "%s/roms", fe_data_dir);
-	n = romlist_scan(&roms, dir);
-	log_msg("roms: %d in %s", n, dir);
+	for (;;) {
+		n = snprintf(path, sizeof(path), "%s/roms%s%s", fe_data_dir,
+			     cur_dir[0] ? "/" : "", cur_dir) < (int)sizeof(path) ?
+		    romlist_scan(&roms, path) : -1;
+		if (n >= 0 || !cur_dir[0])
+			break;
+		log_msg("roms: folder %s cannot be opened, going up", cur_dir);
+		up = strrchr(cur_dir, '/');
+		if (up)
+			*up = 0;
+		else
+			cur_dir[0] = 0;
+	}
+	sel = fallback;
+	for (int i = 0; select && select[0] && i < roms.count; i++)
+		if (roms.roms[i].dir == dir && !strcmp(roms.roms[i].file, select))
+			sel = i;
 	if (sel >= roms.count)
 		sel = roms.count ? roms.count - 1 : 0;
+	list_scroll();
 	list_mq.sel = -1;
+	if (n < 0)
+		log_msg("roms: %s cannot be opened", path);
+	else
+		log_msg("roms: folder /%s: %d ROMs, %d folders (%.1f ms), "
+			"selected %s", cur_dir, n - roms.dirs, roms.dirs,
+			(now_ns() - t0) / 1e6,
+			roms.count ? roms.roms[sel].file : "nothing");
+}
+
+void romlist_menu_enter(void)
+{
+	char name[256] = "";
+	int dir = 0;
+
+	/* The same folder and entry as before (a game started from it). */
+	if (roms.count) {
+		snprintf(name, sizeof(name), "%s", roms.roms[sel].file);
+		dir = roms.roms[sel].dir;
+	}
+	list_open(name, dir, sel);
+}
+
+/* Into the selected folder, or B: up to the parent with the folder left
+ * selected. */
+static void folder_enter(const char *name)
+{
+	size_t n = strlen(cur_dir);
+
+	if (n + 1 + strlen(name) >= sizeof(cur_dir)) {
+		romlist_menu_message("Folder path too long");
+		log_msg("roms: %s/%s: path too long", cur_dir, name);
+		return;
+	}
+	snprintf(cur_dir + n, sizeof(cur_dir) - n, "%s%s", n ? "/" : "", name);
+	top = 0;
+	list_open(NULL, 0, 0);
+}
+
+static void folder_up(void)
+{
+	char *cut = strrchr(cur_dir, '/'), name[ROMLIST_PATH];
+
+	snprintf(name, sizeof(name), "%s", cut ? cut + 1 : cur_dir);
+	if (cut)
+		*cut = 0;
+	else
+		cur_dir[0] = 0;
+	list_open(name, 1, 0);
 }
 
 /* Missing CRCs, 8 ms per frame; the selection stays on its ROM when the
@@ -197,17 +284,14 @@ static void romlist_work(void)
 	for (int i = 0; i < roms.count; i++)
 		if (roms.roms[i].file == cur)
 			sel = i;
-	if (sel < top)
-		top = sel;
-	if (sel >= top + LIST_ROWS)
-		top = sel - LIST_ROWS + 1;
+	list_scroll();
 }
 
 int romlist_menu_update(uint32_t pressed, char *path, size_t size)
 {
 	romlist_work();
 	if (!roms.count)
-		pressed &= JOY_BIT(SELECT);
+		pressed &= JOY_BIT(SELECT) | JOY_BIT(B);
 	if (pressed & JOY_BIT(UP))
 		sel = sel > 0 ? sel - 1 : roms.count - 1;
 	if (pressed & JOY_BIT(DOWN))
@@ -216,18 +300,28 @@ int romlist_menu_update(uint32_t pressed, char *path, size_t size)
 		sel = sel > LIST_ROWS ? sel - LIST_ROWS : 0;
 	if (pressed & JOY_BIT(RIGHT))
 		sel = sel + LIST_ROWS < roms.count ? sel + LIST_ROWS : roms.count - 1;
-	if (sel < top)
-		top = sel;
-	if (sel >= top + LIST_ROWS)
-		top = sel - LIST_ROWS + 1;
+	list_scroll();
 	if (pressed & JOY_BIT(SELECT)) {
 		message[0] = 0;
 		list_mq.sel = -1;  /* not drawn meanwhile */
 		return UI_SETTINGS;
 	}
+	if ((pressed & JOY_BIT(B)) && cur_dir[0]) {
+		message[0] = 0;
+		folder_up();
+		return UI_NONE;
+	}
+	if ((pressed & (JOY_BIT(A) | JOY_BIT(START))) && roms.roms[sel].dir) {
+		message[0] = 0;
+		folder_enter(roms.roms[sel].file);
+		return UI_NONE;
+	}
 	if (pressed & (JOY_BIT(A) | JOY_BIT(START))) {
-		snprintf(path, size, "%s/roms/%s", fe_data_dir,
-			 roms.roms[sel].file);
+		if (snprintf(path, size, "%s/%s", roms.dir, roms.roms[sel].file) >=
+		    (int)size) {
+			romlist_menu_message("ROM path too long");
+			return UI_NONE;
+		}
 		message[0] = 0;
 		return UI_START_ROM;
 	}
@@ -314,17 +408,42 @@ void draw_rom_name(struct canvas *c, int x, int y, uint16_t col,
 	draw_text(c, x, y, 2, col, buf);
 }
 
+/* "GBA" at the top, else the folder's path, its start cut with "~" to
+ * keep the innermost folder in view; then the position. */
+static void list_header(struct canvas *c)
+{
+	const char *head = cur_dir[0] ? cur_dir : "GBA";
+	char pos[24] = "", buf[32];
+	int right = draw_battery(c, c->w - 8, 8);
+	int cols, n = strlen(head);
+
+	if (roms.count)
+		snprintf(pos, sizeof(pos), "%d/%d", sel + 1, roms.count);
+	cols = (right - 16 - 8 - 16 * ((int)strlen(pos) + 1)) / 16;
+	if (cols > (int)sizeof(buf) - 1)
+		cols = sizeof(buf) - 1;
+	if (cols < 2)
+		cols = 2;
+	if (n > cols)
+		snprintf(buf, sizeof(buf), "~%s", head + n - (cols - 1));
+	else
+		snprintf(buf, sizeof(buf), "%s", head);
+	draw_text(c, 8, 8, 2, COL_HI, buf);
+	if (pos[0])
+		draw_text(c, 8 + 16 * ((int)strlen(buf) + 1), 8, 2, COL_DIM, pos);
+}
+
 void romlist_menu_draw(struct canvas *c)
 {
+	const char *keys;
+
 	draw_fill(c, 0, 0, c->w, c->h, COL_BG);
-	draw_text(c, 8, 8, 2, COL_HI, "GBA");
-	if (roms.count)
-		draw_textf(c, 8 + 16 * 4, 8, 2, COL_DIM, "%d/%d", sel + 1,
-			   roms.count);
-	draw_battery(c, c->w - 8, 8);
+	list_header(c);
 	draw_fill(c, 0, 30, c->w, 2, COL_SEL);
 
-	if (!roms.count) {
+	if (!roms.count && cur_dir[0]) {
+		draw_text(c, 16, 80, 2, COL_FG, "Empty folder.");
+	} else if (!roms.count) {
 		draw_text(c, 16, 80, 2, COL_FG, "No ROMs found.");
 		draw_text(c, 16, 120, 2, COL_DIM, "Copy .gba files to the");
 		draw_text(c, 16, 144, 2, COL_DIM, "roms folder on the GBA");
@@ -333,6 +452,7 @@ void romlist_menu_draw(struct canvas *c)
 	for (int i = 0; i < LIST_ROWS && top + i < roms.count; i++) {
 		const char *name = roms.roms[top + i].id.title;
 		int y = LIST_Y + i * ROW_H, offset = 0;
+		uint16_t col = top + i == sel ? COL_FG : COL_DIM;
 
 		if (top + i == sel) {
 			draw_fill(c, 0, y - 1, c->w, ROW_H, COL_SEL);
@@ -340,15 +460,22 @@ void romlist_menu_draw(struct canvas *c)
 			 * its final name, starts over. */
 			offset = marquee_step(&list_mq, sel, name, COLS);
 		}
-		draw_rom_name(c, 8, y, top + i == sel ? COL_FG : COL_DIM, name,
-			      COLS, offset);
+		if (roms.roms[top + i].dir)
+			col = COL_HI;
+		draw_rom_name(c, 8, y, col, name, COLS, offset);
 	}
+	if (cur_dir[0])
+		keys = !roms.count ? "B:up  SELECT:settings" :
+		       roms.roms[sel].dir ? "A:open B:up SELECT:settings" :
+		       "A:start B:up SELECT:settings";
+	else
+		keys = !roms.count ? "SELECT:settings" :
+		       roms.roms[sel].dir ? "A:open  SELECT:settings" :
+		       "A:start  SELECT:settings";
 	if (message[0])
 		draw_text(c, 8, c->h - 18, 2, COL_ERR, message);
 	else
-		draw_text(c, 8, c->h - 18, 2, COL_DIM,
-			  roms.count ? "A:start  SELECT:settings" :
-			  "SELECT:settings");
+		draw_text(c, 8, c->h - 18, 2, COL_DIM, keys);
 }
 
 /* -------------------------------------------------------- in-game menu */

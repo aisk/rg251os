@@ -10,9 +10,11 @@
  * tells apart only by content, Virtual Console and collection builds,
  * unrelated prototypes reusing a code), the CRC32 of the whole file
  * decides. It is computed once and kept in config/romdb-cache.txt, keyed
- * by file name, size and modification time; the ROM list computes missing
- * ones a slice at a time while it is shown (romlist.c), a game start
- * computes its own. A CRC matching none of the code's entries means a
+ * by the path relative to <data>/roms (romdb_key: the bare file name for
+ * ROMs directly in roms/, as before folders existed, so older caches
+ * still match), size and modification time; the ROM list computes missing
+ * ones a slice at a time while it shows their folder (romlist.c), a game
+ * start computes its own. A CRC matching none of the code's entries means a
  * modified ROM: it gets the most likely entry's name with " *" after it.
  * ROMs whose code is not in the table can still be found by CRC among the
  * entries without a code (homebrew, cheat devices) when one of them has
@@ -445,7 +447,15 @@ void romdb_cache_put(const char *file, uint64_t size, int64_t mtime,
 	cache.dirty = 1;
 }
 
-void romdb_cache_save(int prune)
+/* A key directly in the folder prefix ("" or "a/b/"), not deeper. */
+static int in_folder(const char *file, const char *prefix)
+{
+	size_t n = strlen(prefix);
+
+	return !strncmp(file, prefix, n) && !strchr(file + n, '/');
+}
+
+void romdb_cache_save(const char *prune)
 {
 	char path[300], *buf;
 	size_t n = 0, cap = 64;
@@ -454,7 +464,7 @@ void romdb_cache_save(int prune)
 	if (!cache.loaded)
 		return;
 	for (int i = 0; i < cache.count; i++) {
-		if (prune && !cache.e[i].seen)
+		if (prune && !cache.e[i].seen && in_folder(cache.e[i].file, prune))
 			cache.dirty = 1;
 		cap += strlen(cache.e[i].file) + 48;
 	}
@@ -467,7 +477,7 @@ void romdb_cache_save(int prune)
 	for (int i = 0; i < cache.count; i++) {
 		const struct cache_ent *e = &cache.e[i];
 
-		if (prune && !e->seen)
+		if (prune && !e->seen && in_folder(e->file, prune))
 			continue;
 		n += snprintf(buf + n, cap - n, "%08x %llu %lld %s\n", e->crc,
 			      (unsigned long long)e->size, (long long)e->mtime,
@@ -484,9 +494,20 @@ void romdb_cache_save(int prune)
 
 /* ----------------------------------------------------------- identify */
 
+const char *romdb_key(const char *path)
+{
+	size_t n = strlen(fe_data_dir);
+	const char *s = strrchr(path, '/');
+
+	if (!strncmp(path, fe_data_dir, n) && !strncmp(path + n, "/roms/", 6))
+		return path + n + 6;
+	return s ? s + 1 : path;
+}
+
 int romdb_identify(const char *path, int allow_crc, struct rom_id *id)
 {
 	const char *file = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
+	const char *key = romdb_key(path);
 	uint8_t buf[0xc0];
 	struct stat st;
 	int fd = open(path, O_RDONLY | O_CLOEXEC), err = 0;
@@ -509,21 +530,23 @@ int romdb_identify(const char *path, int allow_crc, struct rom_id *id)
 	romdb_match(file, &id->hdr, id->size, NULL, id);
 	if (id->how != ROMDB_PENDING)
 		return err;
-	if (romdb_cache_get(file, id->size, id->mtime, &id->crc) == 0) {
+	if (romdb_cache_get(key, id->size, id->mtime, &id->crc) == 0) {
 		id->have_crc = 1;
 		romdb_match(file, &id->hdr, id->size, &id->crc, id);
 	} else if (allow_crc && romdb_crc_file(path, &id->crc) == 0) {
-		romdb_resolve(file, id, id->crc);
-		romdb_cache_save(0);
+		romdb_resolve(key, id, id->crc);
+		romdb_cache_save(NULL);
 	}
 	return err;
 }
 
-void romdb_resolve(const char *file, struct rom_id *id, uint32_t crc)
+void romdb_resolve(const char *key, struct rom_id *id, uint32_t crc)
 {
+	const char *file = strrchr(key, '/') ? strrchr(key, '/') + 1 : key;
+
 	id->crc = crc;
 	id->have_crc = 1;
-	romdb_cache_put(file, id->size, id->mtime, crc);
+	romdb_cache_put(key, id->size, id->mtime, crc);
 	romdb_match(file, &id->hdr, id->size, &id->crc, id);
 }
 
