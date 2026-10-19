@@ -24,7 +24,7 @@
 - Frame blend 开启后的实际开销（用 perf.csv 对比开关时的 `work_avg`）。
 - adaptive 音频去掉开机校准以后，第一局开头有没有爆音或 underrun。
 - 开机时 LED 心跳闪烁，前端起来后接管。
-- 系统信息页（ROM 列表的设置里和游戏菜单里的 System info）：打开时日志里有 `sysinfo:` 开头的几行，看找到了哪些温度传感器。按 DTS 和内核配置应该有 tsadc 的两个 thermal zone（`soc-thermal`、`gpu-thermal`），没有 hwmon（没开 `CONFIG_HWMON`），RK817 的驱动不报电池温度。另外确认 CPU 占用、频率、内存和剩余空间的数字是否合理。
+- 系统信息页（ROM 列表的设置里和游戏菜单里的 System info）：打开时日志里有 `sysinfo:` 开头的几行，看找到了哪些温度传感器。2026-10-19 实机上 tsadc 的两个 thermal zone（`soc-thermal`、`gpu-thermal`）都能看到，GPU 节点关掉了 `gpu-thermal` 也照样注册。没有 hwmon（没开 `CONFIG_HWMON`），RK817 的驱动不报电池温度。还要确认 CPU 占用、频率、内存和剩余空间的数字是否合理。
 
 ## 已知问题
 
