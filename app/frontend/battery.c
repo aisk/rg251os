@@ -127,12 +127,12 @@ int battery_read(struct battery *b)
 	return b->valid ? 0 : -1;
 }
 
-void battery_poll(int64_t now)
+int64_t battery_poll(int64_t now)
 {
 	char buf[128];
 
 	if (now < s.next_poll)
-		return;
+		return s.next_poll;
 	s.next_poll = now + POLL_NS;
 	if (!s.bat[0])
 		battery_init(s.scanned ? s.root : "/sys/class/power_supply");
@@ -143,6 +143,7 @@ void battery_poll(int64_t now)
 		battery_format(&s.b, buf, sizeof(buf));
 		log_msg("battery: %s", buf);
 	}
+	return s.next_poll;
 }
 
 const struct battery *battery_get(void)

@@ -28,8 +28,9 @@ struct battery {
  * their properties once. Safe to call again (rescans).
  */
 void battery_init(const char *dir);
-/* Rereads every few seconds; rescans while nothing was found. */
-void battery_poll(int64_t now);
+/* Rereads every few seconds; rescans while nothing was found. Returns
+ * when it is due again. */
+int64_t battery_poll(int64_t now);
 /* Reads now; returns 0 when a battery was read. */
 int battery_read(struct battery *b);
 const struct battery *battery_get(void);

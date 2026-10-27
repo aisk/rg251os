@@ -3,7 +3,10 @@
  * columns), laid out from its size (menu.h), as the pages of ui.c. The
  * in-game menu and both settings pages are lists of rows (struct row: a
  * label, how its value steps and reads, what A does), run and drawn by
- * the same code; a row shared by several menus is defined once.
+ * the same code; a row shared by several menus is defined once. A page
+ * is drawn only when it changed (ui.c): a key, the marquee moving, an
+ * armed row running out, a ROM getting its name, the header clock's
+ * minute; main.c adds the battery and the volume keys.
  *
  * ROM list: one folder of roms/ at a time, its subfolders first (as
  * "name/", in yellow), then the ROMs by their No-Intro names (romdb.c;
@@ -81,10 +84,13 @@
 #define MSG_LINE (FONT_H + 2)
 #define MSG_FOOT (FONT_H + 4)
 
-/* A scrolling name: frames drawn since it was selected. */
+/* A scrolling name, advanced by update (marquee_update) and drawn at the
+ * offset it reached: MQ_STEP_NS steps since it was selected. */
 struct marquee {
 	int sel;  /* -1: start over */
-	unsigned frames;
+	unsigned steps;
+	int64_t at;  /* the time steps counts up to */
+	int offset;
 	char name[ROMDB_NAME_MAX + 2];
 };
 
@@ -99,17 +105,15 @@ static struct marquee list_mq = { .sel = -1 };
 /*
  * Two-press confirmation for the rows that restart the game or power off:
  * the first A arms the row (its label then asks for another A), a second
- * A on that row within CONFIRM_FRAMES acts. Selecting another row or
- * waiting disarms it.
+ * A on that row within CONFIRM_NS acts. Selecting another row or waiting
+ * disarms it.
  */
 struct confirm {
 	int row;
-	int frames;  /* left for the confirming A, 0: not armed */
+	int64_t until;  /* the confirming A before this, 0: not armed */
 };
 
-/* Restart and power off armed: frames (the menus are updated on every
- * vblank) left for the confirming A. */
-#define CONFIRM_FRAMES (3 * 60)
+#define CONFIRM_NS 3000000000LL
 
 /* ------------------------------------------------------------- helpers */
 
@@ -153,13 +157,26 @@ static int level_step(const int *levels, int n, int cur, int d)
 	return levels[0];
 }
 
-/* Battery icon and percent, right aligned at x_right; returns left x. */
+/* Battery icon and percent, right aligned at x_right; returns left x
+ * (battery_left without drawing). */
+#define BAT_ICON_W 26
+
+static int battery_left(int x_right)
+{
+	char label[16];
+
+	battery_label(battery_get(), label, sizeof(label));
+	if (!label[0])
+		return x_right;
+	return x_right - BAT_ICON_W - 3 - 6 - draw_text_width(label);
+}
+
 static int draw_battery(struct canvas *c, int x_right, int y)
 {
 	const struct battery *b = battery_get();
 	char label[16];
 	uint16_t col = COL_DIM;
-	int iw = 26, ih = 14, x, fill, iy = y + (FONT_H - ih) / 2;
+	int iw = BAT_ICON_W, ih = 14, x, fill, iy = y + (FONT_H - ih) / 2;
 
 	battery_label(b, label, sizeof(label));
 	if (!label[0])
@@ -183,6 +200,7 @@ static int draw_battery(struct canvas *c, int x_right, int y)
 void romlist_menu_message(const char *msg)
 {
 	snprintf(message, sizeof(message), "%s", msg ? msg : "");
+	ui_redraw();
 }
 
 /* The selected row in view, the list not scrolled past its end. */
@@ -226,6 +244,7 @@ static void list_open(const char *select, int dir, int fallback)
 		sel = roms.count ? roms.count - 1 : 0;
 	list_scroll();
 	list_mq.sel = -1;
+	list_mq.offset = 0;
 	if (n < 0)
 		log_msg("roms: %s cannot be opened", path);
 	else
@@ -283,24 +302,30 @@ static void folder_up(void)
 	list_open(name, 1, 0);
 }
 
-/* Missing CRCs, 8 ms per frame; the selection stays on its ROM when the
- * list is sorted again. */
-static void romlist_work(void)
+/* Missing CRCs, 8 ms per update: once per vblank while the list is being
+ * drawn, otherwise woken every 8 ms for it. The selection stays on its
+ * ROM when the list is sorted again, which is drawn. */
+#define CRC_SLICE_NS 8000000LL
+
+static void romlist_work(int64_t now)
 {
 	const char *cur = roms.count ? roms.roms[sel].file : NULL;
 
-	if (!roms.pending || !romlist_step(&roms, 8000000))
+	if (!roms.pending)
 		return;
-	for (int i = 0; i < roms.count; i++)
-		if (roms.roms[i].file == cur)
-			sel = i;
-	list_scroll();
+	if (romlist_step(&roms, CRC_SLICE_NS)) {
+		for (int i = 0; i < roms.count; i++)
+			if (roms.roms[i].file == cur)
+				sel = i;
+		list_scroll();
+		ui_redraw();
+	}
+	if (roms.pending)
+		ui_wake_at(now + CRC_SLICE_NS);
 }
 
-static struct ui_result romlist_menu_update(uint32_t pressed, int64_t now)
+static struct ui_result romlist_keys(uint32_t pressed)
 {
-	(void)now;
-	romlist_work();
 	if (!roms.count)
 		pressed &= JOY_BIT(SELECT) | JOY_BIT(B);
 	if (pressed & JOY_BIT(UP))
@@ -339,6 +364,28 @@ static struct ui_result romlist_menu_update(uint32_t pressed, int64_t now)
 	return UI_STAY;
 }
 
+static void marquee_update(struct marquee *mq, int idx, const char *name,
+			   int cols, int64_t now);
+
+/* The header's time (when set) is drawn as the minute changes, the
+ * selected name's marquee as it moves. */
+static struct ui_result romlist_menu_update(uint32_t pressed, int64_t now)
+{
+	struct ui_result r;
+	struct tm tm;
+
+	if (realtime_utc(&tm))
+		ui_redraw_at(ui_clock_tick(now, CLOCK_REALTIME, 60));
+	romlist_work(now);
+	r = romlist_keys(pressed);
+	if (roms.pending)  /* a folder just opened */
+		ui_wake_at(now + CRC_SLICE_NS);
+	if (r.act == UI_NONE && roms.count)
+		marquee_update(&list_mq, sel, roms.roms[sel].id.title, LIST_COLS,
+			       now);
+	return r;
+}
+
 /* A name's length as shown, without a file name's ".gba". */
 static int name_len(const char *name)
 {
@@ -346,47 +393,68 @@ static int name_len(const char *name)
 }
 
 /*
- * The scroll offset of a name excess pixels wider than its row, frames
- * after it was selected: 0 (cut with "~") for MQ_PAUSE frames, then one
- * pixel per frame (60 px/s, about 4 characters a second, smooth on the
- * 60 Hz panel) until its end shows, held MQ_PAUSE frames, then from the
- * start again. Counted in frames drawn (the menus are drawn on every
- * vblank) rather than in time, so every frame moves by exactly one pixel.
+ * The scroll offset of a name excess pixels wider than its row, steps of
+ * MQ_STEP_NS after it was selected: 0 (cut with "~") for MQ_PAUSE steps
+ * (1 s), then one pixel per step (60 px/s, about 4 characters a second,
+ * smooth on the 60 Hz panel) until its end shows, held MQ_PAUSE steps,
+ * then from the start again.
  */
 #define MQ_PAUSE 60
+#define MQ_STEP_NS 16666667LL
 
-int marquee_offset(int excess, unsigned frames)
+int marquee_offset(int excess, unsigned steps)
 {
 	unsigned t;
 
 	if (excess <= 0)
 		return 0;
-	t = frames % (2 * MQ_PAUSE + (unsigned)excess);
+	t = steps % (2 * MQ_PAUSE + (unsigned)excess);
 	if (t < MQ_PAUSE)
 		return 0;
 	t -= MQ_PAUSE;
 	return t < (unsigned)excess ? (int)t : excess;
 }
 
-/* Frames drawn since this name was selected, counting this one. */
-static unsigned marquee_tick(struct marquee *mq, int idx, const char *name)
+/*
+ * The marquee of name (row idx) in cols columns at now: a new selection or
+ * name starts over. Steps are counted in time, rounded to the nearest, so
+ * a redraw on every vblank (60.02 Hz) moves one pixel each (once in about
+ * 50 s one stays put) and the pace does not depend on how often this runs.
+ * A new offset is drawn; the next one is asked for (ui_wake_at) for when it
+ * is due, which in the pauses is a second away.
+ */
+static void marquee_update(struct marquee *mq, int idx, const char *name,
+			   int cols, int64_t now)
 {
+	int excess = FONT_W * (name_len(name) - cols), off;
+	unsigned k;
+
 	if (mq->sel != idx || strcmp(mq->name, name)) {
 		mq->sel = idx;
 		snprintf(mq->name, sizeof(mq->name), "%s", name);
-		mq->frames = 0;
-	} else {
-		mq->frames++;
+		mq->steps = 0;
+		mq->at = now;
+	} else if (now - mq->at >= MQ_STEP_NS / 2) {
+		k = (unsigned)((now - mq->at + MQ_STEP_NS / 2) / MQ_STEP_NS);
+		mq->steps += k;
+		mq->at += k * MQ_STEP_NS;
 	}
-	return mq->frames;
+	off = marquee_offset(excess, mq->steps);
+	if (off != mq->offset) {
+		mq->offset = off;
+		ui_redraw();
+	}
+	if (excess <= 0)
+		return;
+	for (k = 1; marquee_offset(excess, mq->steps + k) == off; k++)
+		;
+	ui_wake_at(mq->at + k * MQ_STEP_NS - MQ_STEP_NS / 2);
 }
 
-/* The scroll offset of name in cols columns, shown in this frame. */
-static int marquee_step(struct marquee *mq, int idx, const char *name,
-			int cols)
+/* The offset to draw idx's name at: 0 until its update. */
+static int marquee_shown(const struct marquee *mq, int idx)
 {
-	return marquee_offset(FONT_W * (name_len(name) - cols),
-			      marquee_tick(mq, idx, name));
+	return mq->sel == idx ? mq->offset : 0;
 }
 
 /* A ROM name in cols columns: cut with "~", a modified ROM's " *" kept;
@@ -477,9 +545,7 @@ static void romlist_menu_draw(struct canvas *c, const struct game_view *g)
 
 		if (top + i == sel) {
 			draw_fill(c, 0, y - ROW_PAD, c->w, ROW_H, COL_SEL);
-			/* A new selection, or the selected ROM getting
-			 * its final name, starts over. */
-			offset = marquee_step(&list_mq, sel, name, LIST_COLS);
+			offset = marquee_shown(&list_mq, sel);
 		}
 		if (roms.roms[top + i].dir)
 			col = COL_HI;
@@ -506,29 +572,35 @@ const struct page romlist_page = {
 
 /* -------------------------------------------------------- confirmation */
 
-/* Once per update, before the input: count down, disarm off the row. */
-static void confirm_tick(struct confirm *cf, int row)
+/* On every update, before the input: disarmed (and drawn so) once the
+ * time is up or off the row, otherwise woken when it will be up. */
+static void confirm_tick(struct confirm *cf, int row, int64_t now)
 {
-	if (cf->frames > 0)
-		cf->frames--;
-	if (row != cf->row)
-		cf->frames = 0;
+	if (!cf->until)
+		return;
+	if (now >= cf->until || row != cf->row) {
+		cf->until = 0;
+		ui_redraw();
+	} else {
+		ui_wake_at(cf->until);
+	}
 }
 
 static int confirm_armed(const struct confirm *cf, int row)
 {
-	return cf->frames > 0 && cf->row == row;
+	return cf->until && cf->row == row;
 }
 
 /* An A on the row: 1 when it confirms, otherwise it arms the row. */
-static int confirm_press(struct confirm *cf, int row)
+static int confirm_press(struct confirm *cf, int row, int64_t now)
 {
 	if (confirm_armed(cf, row)) {
-		cf->frames = 0;
+		cf->until = 0;
 		return 1;
 	}
 	cf->row = row;
-	cf->frames = CONFIRM_FRAMES;
+	cf->until = now + CONFIRM_NS;
+	ui_wake_at(cf->until);
 	return 0;
 }
 
@@ -581,7 +653,7 @@ static void menu_open(struct menu *mn, const struct row *const *rows,
 	mn->rows = rows;
 	mn->count = count;
 	mn->sel = 0;
-	mn->confirm.frames = 0;
+	mn->confirm.until = 0;
 	mn->back = back;
 }
 
@@ -607,7 +679,7 @@ static void row_step(struct menu *mn, const struct row *r, int d)
 		return;
 	}
 	/* A pending choice changed again: confirm it again. */
-	mn->confirm.frames = 0;
+	mn->confirm.until = 0;
 	if (r->option)
 		core_options_changed();
 	fx_update();
@@ -627,7 +699,8 @@ static void row_value(const struct row *r, char *buf, size_t size)
 		snprintf(buf, size, "%d", *r->field);
 }
 
-static struct ui_result menu_update(struct menu *mn, uint32_t pressed)
+static struct ui_result menu_update(struct menu *mn, uint32_t pressed,
+				    int64_t now)
 {
 	const struct row *r;
 
@@ -636,7 +709,7 @@ static struct ui_result menu_update(struct menu *mn, uint32_t pressed)
 	if (pressed & JOY_BIT(DOWN))
 		mn->sel = (mn->sel + 1) % mn->count;
 	r = mn->rows[mn->sel];
-	confirm_tick(&mn->confirm, mn->sel);
+	confirm_tick(&mn->confirm, mn->sel, now);
 	if (pressed & JOY_BIT(B))
 		return mn->back;
 	if (pressed & JOY_BIT(LEFT))
@@ -651,7 +724,8 @@ static struct ui_result menu_update(struct menu *mn, uint32_t pressed)
 	}
 	if (r->flags & ROW_TOGGLE)
 		row_step(mn, r, 1);
-	if ((r->flags & ROW_CONFIRM) && !confirm_press(&mn->confirm, mn->sel))
+	if ((r->flags & ROW_CONFIRM) &&
+	    !confirm_press(&mn->confirm, mn->sel, now))
 		return UI_STAY;
 	return r->press;
 }
@@ -859,12 +933,23 @@ static void ingame_menu_enter(const char *from, int64_t now)
 	(void)now;
 	menu_open(&ig.menu, ig_rows, ARRAY_SIZE(ig_rows), UI_ACT(UI_RESUME));
 	ig.mq.sel = -1;
+	ig.mq.offset = 0;
+}
+
+/* The game's name in the box's columns left of the battery, which is
+ * right aligned like the values. */
+static int ig_name_cols(void)
+{
+	return (battery_left(IG_BOX_X + IG_BOX_W - FONT_W) - FONT_W -
+		(IG_BOX_X + 12)) / FONT_W;
 }
 
 static struct ui_result ingame_menu_update(uint32_t pressed, int64_t now)
 {
-	(void)now;
-	return menu_update(&ig.menu, pressed);
+	struct ui_result r = menu_update(&ig.menu, pressed, now);
+
+	marquee_update(&ig.mq, 0, ig.name, ig_name_cols(), now);
+	return r;
 }
 
 static void ingame_menu_draw(struct canvas *c, const struct game_view *g)
@@ -876,12 +961,10 @@ static void ingame_menu_draw(struct canvas *c, const struct game_view *g)
 	draw_image_dim(c, g->px, g->pitch, g->w, g->h);
 	draw_fill(c, bx, by, bw, IG_BOX_H, COL_BOX);
 	draw_frame(c, bx, by, bw, IG_BOX_H, COL_SEL);
-	/* The name in the columns left of the battery, which is right
-	 * aligned like the values. */
-	cols = (draw_battery(c, bx + bw - FONT_W, ny) - FONT_W - (bx + 12)) /
-	       FONT_W;
+	draw_battery(c, bx + bw - FONT_W, ny);
+	cols = ig_name_cols();
 	draw_rom_name(c, bx + 12, ny, COL_HI, ig.name, cols,
-		      marquee_step(&ig.mq, 0, ig.name, cols));
+		      marquee_shown(&ig.mq, 0));
 	menu_draw_rows(c, &ig.menu, bx, by + IG_HEAD_H, bw, IG_ROW_H, 0);
 }
 
@@ -925,8 +1008,7 @@ static void settings_game_enter(const char *from, int64_t now)
 
 static struct ui_result settings_menu_update(uint32_t pressed, int64_t now)
 {
-	(void)now;
-	return menu_update(&st, pressed);
+	return menu_update(&st, pressed, now);
 }
 
 static void settings_menu_draw(struct canvas *c, const struct game_view *g)

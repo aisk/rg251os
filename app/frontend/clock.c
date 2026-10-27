@@ -16,7 +16,8 @@
  * The page starts from the current time (2024-01-01 00:00 when the clock
  * is unset) with YYYY-MM-DD HH:MM fields: left/right pick a field, up/down
  * change it (with ui_repeat's key repeat; wrapping, the day clamped to the
- * month and leap years), A saves, B cancels. Saving sets the system clock
+ * month and leap years), A saves, B cancels. Below them the time now,
+ * drawn again as its seconds tick. Saving sets the system clock
  * (settimeofday) and then the RTC (RTC_SET_TIME, seconds 0), reads the RTC
  * back and logs each step with the old and new time ("clock: ..."). A
  * save that worked goes back to the settings; a failure stays on the page
@@ -321,11 +322,12 @@ const char *datetime_message(void)
 	return dt.msg;
 }
 
+/* Drawn on every key and as the time now (with seconds) ticks. */
 static struct ui_result datetime_update(uint32_t pressed, int64_t now)
 {
 	struct tm tm;
 
-	(void)now;
+	ui_redraw_at(ui_clock_tick(now, CLOCK_REALTIME, 1));
 	if (pressed & JOY_BIT(B)) {
 		log_msg("clock: date & time page closed without saving");
 		return UI_ACT(UI_BACK);

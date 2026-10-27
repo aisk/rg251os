@@ -11,21 +11,23 @@
  * a new log/boot-NNNN/ opened, settings loaded, then backlight, CPU
  * control, battery, display, input and audio; the ROM list once that is
  * done. The main loop is driven by page flip events: whenever the
- * previous frame is on screen, the current screen is drawn; in game that
+ * previous frame is on screen, the page stack runs (frame()); in game that
  * is one retro_run with the frame scaled 2x and rotated straight into the
  * back buffer, so emulation runs at the panel's 60.02 Hz and audio is
- * resampled to match (audio.c).
+ * resampled to match (audio.c). The menus are drawn only when something
+ * changed (ui.c); when one was not, nothing is flipped and the loop sleeps
+ * in poll() until input or the earliest of the times the page and the
+ * timers here need (idle_timeout, at most IDLE_MAX_MS).
  *
- * Screens are pages on ui.c's stack, which frame() runs once per vblank:
- * ROM list, game, in-game menu (SELECT+START, the RG351P has no menu
- * button), settings (SELECT in the ROM list, or from the in-game menu),
- * system info, date and time, the fatal error screen and the power off
- * message. The game, error and power off pages are here, and on_ui does
- * what the pages ask for: start a game, resume, quit, restart, power off.
- * A game ends by Quit to ROM list, Restart with another core or power
- * off: its save and resume state are written (core_state_save) before the
- * core is unloaded; Restart game resets the core in the same session; a
- * fatal error writes no state.
+ * Screens are pages on ui.c's stack: ROM list, game, in-game menu
+ * (SELECT+START, the RG351P has no menu button), settings (SELECT in the
+ * ROM list, or from the in-game menu), system info, date and time, the
+ * fatal error screen and the power off message. The game, error and
+ * power off pages are here, and on_ui does what the pages ask for: start
+ * a game, resume, quit, restart, power off. A game ends by Quit to ROM
+ * list, Restart with another core or power off: its save and resume state
+ * are written (core_state_save) before the core is unloaded; Restart game
+ * resets the core in the same session; a fatal error writes no state.
  *
  * Power key (timing in input.c): a short press sleeps (do_sleep: game
  * paused, save and state written, audio closed, backlight and panel off,
@@ -48,9 +50,11 @@
  * PID 1 runs the kernel shows its heartbeat trigger (see dts).
  *
  * Logs from here into log/boot-NNNN/: the 10 s perf line in game
- * (perf_report) and, with debug logging, dmesg-5s.txt, dmesg-20s.txt,
- * dmesg-game<N>-30s.txt, dmesg-game<N>-end.txt (also after a fatal
- * error) and dmesg-sleep<N>.txt; dmesg-poweroff.txt always.
+ * (perf_report) and, with debug logging, the menus' redraws and the time
+ * the loop slept, every 60 s in the menus and on leaving them
+ * (menu_stats), dmesg-5s.txt, dmesg-20s.txt, dmesg-game<N>-30s.txt,
+ * dmesg-game<N>-end.txt (also after a fatal error) and
+ * dmesg-sleep<N>.txt; dmesg-poweroff.txt always.
  *
  * Not PID 1 (testing on a PC or under qemu-user):
  *   frontend --selftest DIR            unit tests, using DIR as scratch
@@ -95,6 +99,9 @@
 #include "ui.h"
 
 #define PERF_INTERVAL_NS (10 * 1000000000LL)
+#define MENU_STATS_NS (60 * 1000000000LL)
+/* The longest sleep in the menus: children reaped, nothing else waits. */
+#define IDLE_MAX_MS 1000
 #define MAX_POLL 24
 #define HEADLESS_HZ 60.0186
 #define HEADLESS_FRAME_NS 16661000LL
@@ -125,6 +132,14 @@ static struct {
 	unsigned xrun_total;
 	unsigned reports;
 	struct audio_stats last_as;
+	/* The menus since since (0: in game): ui_frame calls, redraws, ns
+	 * slept in poll(). */
+	struct {
+		int64_t since, slept;
+		unsigned updates, draws;
+	} ms;
+	int64_t next_timer;     /* the earliest time timers() needs */
+	char bat_shown[24];     /* the battery as the menus show it */
 	unsigned games;        /* started this boot, numbers the dmesg dumps */
 	uint64_t game_frames;  /* frames of the current game */
 	int64_t game_start_ns;
@@ -195,6 +210,7 @@ void on_volume_key(int dir)
 {
 	log_verbose("volume key %+d", dir);
 	audio_volume_step(dir);
+	ui_redraw();  /* the Volume row */
 }
 
 void on_jack(int inserted)
@@ -257,8 +273,11 @@ static void fatal(const char *title, const char *msg)
 	ui_reset(&fatal_page, now_ns());
 }
 
+static void menu_stats(int64_t now, const char *why);
+
 static void do_poweroff(void)
 {
+	menu_stats(now_ns(), "power off");
 	led_set_red(1);
 	end_game("power off");
 	save_settings();
@@ -444,6 +463,7 @@ static void do_sleep(void)
 	int in_game = ui_top() == &game_page, light;
 	int64_t t0 = boot_ms(), t1;
 
+	menu_stats(now_ns(), "sleep");
 	m.sleeps++;
 	snprintf(marker, sizeof(marker), "frontend: sleep #%u: entering", m.sleeps);
 	log_msg("sleep #%u: entering from %s at %lld ms", m.sleeps,
@@ -499,6 +519,7 @@ static void do_sleep(void)
 	display_resync();
 	display_take_missed();
 	ui_suppress(input_buttons());
+	ui_redraw();
 	m.wake_frames = display_frames();
 	m.wake_pending = display_ready();
 	log_msg("sleep #%u: awake (%s), %lld ms since entering, restored in "
@@ -683,10 +704,54 @@ static void on_ui(enum ui_action act, const struct page *from)
 	}
 }
 
-static void frame(int64_t now)
+/* The page stack once; returns 1 when a menu was drawn and shown. */
+static int frame(int64_t now)
 {
-	if (ui_frame(&m.cv, input_buttons(), now))
+	int drew = ui_frame(&m.cv, input_buttons(), now);
+
+	if (drew)
 		blit_canvas();
+	m.ms.updates++;
+	m.ms.draws += drew;
+	return drew;
+}
+
+/*
+ * With debug logging, how often the menus were drawn and how much of the
+ * time the loop slept in poll() (waiting for a flip or idle), with the
+ * battery for its power draw: every MENU_STATS_NS in the menus, and why
+ * they were left (the game, sleep, power off). Starts over afterwards.
+ */
+static void menu_stats(int64_t now, const char *why)
+{
+	double s = (now - m.ms.since) / 1e9;
+	char bat[96];
+
+	if (m.ms.since && s > 0 && log_debug()) {
+		battery_format(battery_get(), bat, sizeof(bat));
+		log_msg("ui: menus for %.1f s (%s): %u redraws (%.1f/s), %u "
+			"updates, %.1f%% asleep in poll; bat %s", s, why,
+			m.ms.draws, m.ms.draws / s, m.ms.updates,
+			100.0 * m.ms.slept / (now - m.ms.since), bat);
+	}
+	m.ms.since = 0;
+}
+
+static void menu_stats_tick(int64_t now)
+{
+	if (ui_top()->game) {
+		if (m.ms.since)
+			menu_stats(now, "left for the game");
+		return;
+	}
+	if (m.ms.since && now - m.ms.since >= MENU_STATS_NS)
+		menu_stats(now, "every 60 s");
+	if (!m.ms.since) {
+		m.ms.since = now;
+		m.ms.slept = 0;
+		m.ms.updates = 0;
+		m.ms.draws = 0;
+	}
 }
 
 /* --------------------------------------------------------------- setup */
@@ -780,16 +845,27 @@ static void startup(void)
 	log_sync();
 }
 
+/* The earliest time timers() has something to do, for idle_timeout. */
+static void timer_at(int64_t t)
+{
+	if (t < m.next_timer)
+		m.next_timer = t;
+}
+
 static void timers(int64_t now)
 {
 	int64_t up = boot_ms();
+	char label[16], bat[24];
 	pid_t pid;
 	int st;
 
+	m.next_timer = INT64_MAX;
 	while ((pid = sys_reap(&st)) > 0)
 		core_child_exited(pid, st);
 
 	power_action(pwrkey_poll(&m.pk, now));
+	if (m.pk.down && !m.pk.fired)
+		timer_at(m.pk.down_ns + PWRKEY_LONG_NS);
 	if (m.wake_pending && display_frames() > m.wake_frames) {
 		m.wake_pending = 0;
 		log_msg("sleep #%u: first frame on screen %lld ms after resume",
@@ -805,6 +881,8 @@ static void timers(int64_t now)
 		klog_dump_async("dmesg-20s.txt");
 		log_sync();
 	}
+	if (log_debug() && (!m.dumped5 || !m.dumped20))
+		timer_at(now + ((m.dumped5 ? 20000 : 5000) - up) * 1000000LL);
 	if (!display_ready() && now >= m.next_drm_try) {
 		if (display_init()) {
 			m.next_drm_try = now + 200000000LL;
@@ -817,7 +895,15 @@ static void timers(int64_t now)
 		audio_init();
 		m.next_rescan = now + 2000000000LL;
 	}
-	battery_poll(now);
+	timer_at(m.next_rescan);
+	timer_at(battery_poll(now));
+	/* Drawn in the menus' headers: redrawn when that changes. */
+	battery_label(battery_get(), label, sizeof(label));
+	snprintf(bat, sizeof(bat), "%s%s", label, battery_low() ? " low" : "");
+	if (strcmp(bat, m.bat_shown)) {
+		snprintf(m.bat_shown, sizeof(m.bat_shown), "%s", bat);
+		ui_redraw();
+	}
 	if (!m.led_green && ui_top() != &fatal_page && display_frames() > 0) {
 		log_msg("up: first frame shown at %lld ms", (long long)up);
 		log_sync();
@@ -833,22 +919,47 @@ static void timers(int64_t now)
 			led_set_red(red);
 			m.led_red = red;
 		}
+		if (battery_low())
+			timer_at(now - now % 2000000000LL +
+				 (red ? 250000000LL : 2000000000LL));
 	}
 	if (ui_top() == &fatal_page && now >= m.next_blink) {
 		m.blink ^= 1;
 		led_set_red(m.blink);
 		m.next_blink = now + 500000000LL;
 	}
+	if (ui_top() == &fatal_page)
+		timer_at(m.next_blink);
 	if (m.poweroff_at && now >= m.poweroff_at)
 		do_poweroff();
+	if (m.poweroff_at)
+		timer_at(m.poweroff_at);
+}
+
+/*
+ * poll()'s timeout in ms in the menus when nothing was drawn (no flip to
+ * wait for): until the page's next time (ui_due) or the timers', at most
+ * IDLE_MAX_MS, rounded up so it does not wake just before.
+ */
+static int idle_timeout(int64_t now)
+{
+	int64_t t = ui_due();
+
+	if (m.next_timer < t)
+		t = m.next_timer;
+	if (t <= now)
+		return 0;
+	if (t - now >= IDLE_MAX_MS * 1000000LL)
+		return IDLE_MAX_MS;
+	return (int)((t - now + 999999) / 1000000);
 }
 
 static void run(void)
 {
 	for (;;) {
 		struct pollfd pfd[MAX_POLL];
-		int64_t now = now_ns();
-		int n = 0, timeout;
+		int64_t now = now_ns(), t0;
+		int n = 0, timeout, drew = 0, r;
 
 		if (m.sleep_req) {
 			m.sleep_req = 0;
@@ -856,8 +967,9 @@ static void run(void)
 			continue;
 		}
 		timers(now);
+		menu_stats_tick(now);
 		if (display_can_draw())
-			frame(now);
+			drew = frame(now);
 
 		if (display_ready()) {
 			pfd[n].fd = display_fd();
@@ -868,7 +980,15 @@ static void run(void)
 		timeout = display_poll_timeout(now_ns());
 		if (timeout > 100)
 			timeout = 100;
-		if (poll(pfd, n, timeout) <= 0)
+		/* A menu with nothing new: no flip coming, sleep. The game
+		 * always flips. */
+		if (!drew && display_can_draw() && !ui_top()->game)
+			timeout = idle_timeout(now_ns());
+		t0 = now_ns();
+		r = poll(pfd, n, timeout);
+		if (!ui_top()->game)
+			m.ms.slept += now_ns() - t0;
+		if (r <= 0)
 			continue;
 		if (display_ready()) {
 			if (pfd[0].revents & POLLIN)

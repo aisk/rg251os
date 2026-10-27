@@ -1,7 +1,8 @@
 /*
  * System info page, opened from the ROM list's settings and from the
  * in-game menu (the game stays paused meanwhile, as in every menu). Read
- * only, refreshed once per second, B goes back. Shows what the RG351P
+ * only, refreshed once per second (and drawn then and as the seconds of
+ * the clock and the uptime tick), B goes back. Shows what the RG351P
  * kernel exposes: CPU usage (total and per core, /proc/stat deltas; the
  * first second shows the average since boot), the current frequency of
  * each cpufreq policy and the CPU mode (cpuctl.c), memory used of total
@@ -311,6 +312,8 @@ static void sysinfo_enter(const char *from, int64_t now)
 	si.next = now + REFRESH_NS;
 }
 
+/* Drawn after each sample and as the seconds of the clock and the
+ * uptime tick (two clocks, so up to three times a second). */
 static struct ui_result sysinfo_update(uint32_t pressed, int64_t now)
 {
 	if (pressed & JOY_BIT(B))
@@ -318,7 +321,11 @@ static struct ui_result sysinfo_update(uint32_t pressed, int64_t now)
 	if (now >= si.next) {
 		sample();
 		si.next = now + REFRESH_NS;
+		ui_redraw();
 	}
+	ui_redraw_at(si.next);
+	ui_redraw_at(ui_clock_tick(now, CLOCK_REALTIME, 1));
+	ui_redraw_at(ui_clock_tick(now, CLOCK_BOOTTIME, 1));
 	return UI_STAY;
 }
 

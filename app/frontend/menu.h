@@ -57,8 +57,8 @@ void ingame_menu_set_name(const char *rom_name);
 void draw_rom_name(struct canvas *c, int x, int y, uint16_t col,
 		   const char *name, int cols, int offset);
 /* The scroll offset in pixels of the selected name, excess pixels wider
- * than its row, frames after it was selected (see menu.c). */
-int marquee_offset(int excess, unsigned frames);
+ * than its row, steps (60 a second) after it was selected (see menu.c). */
+int marquee_offset(int excess, unsigned steps);
 
 void message_draw(struct canvas *c, const char *title, const char *body,
 		  uint16_t col);

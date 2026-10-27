@@ -47,12 +47,16 @@ static int failures;
 
 /* The pages called directly, as ui_frame does: the action of a key press
  * (the page opened by UI_PUSH in opened, the ROM to start in path), and
- * a page drawn over a 240x160 game picture or none. */
+ * a page drawn over a 240x160 game picture or none. Each update is a
+ * vblank (PAGE_FRAME_NS, rounded up from 1/60 s) after the last. */
+#define PAGE_FRAME_NS 16666667LL
+
 static const struct page *opened;
+static int64_t page_t;
 
 static int page_key(const struct page *p, uint32_t pressed)
 {
-	struct ui_result r = p->update(pressed, 0);
+	struct ui_result r = p->update(pressed, page_t += PAGE_FRAME_NS);
 
 	opened = r.page;
 	return r.act;
@@ -86,7 +90,7 @@ static int dt_key(uint32_t pressed)
 static void ig_open(const char *name)
 {
 	ingame_menu_set_name(name);
-	ingame_page.enter(NULL, 0);
+	ingame_page.enter(NULL, page_t);
 }
 
 static void draw_page(const struct page *p, struct canvas *c,
@@ -1579,7 +1583,7 @@ static int count_color(const uint16_t *px, int y0, int y1, uint16_t col)
 
 /*
  * In-game menu: Restart game is the 2nd row and needs a second A within
- * 3 s (180 updates, one per vblank); moving away or waiting cancels, B
+ * 3 s (180 updates at 60 Hz); moving away or waiting cancels, B
  * resumes. All 11 rows fit in the box, which ends above the bottom edge.
  * Power off, the last row, asks the same way, and so does Power off in
  * the global settings.
@@ -2164,12 +2168,15 @@ static void test_pages(void)
 	struct canvas cv = { px, 480, 320 };
 	const uint32_t hot = JOY_BIT(SELECT) | JOY_BIT(START);
 	int64_t t = 0;
-	int drawn;
+	int drawn, idle = 1;
 
 #define PRESS(b, n) do { \
 	for (int i_ = 0; i_ < (n); i_++) { \
-		ui_frame(&cv, (b), t += 20000000); \
-		drawn = ui_frame(&cv, 0, t += 20000000); \
+		drawn = ui_frame(&cv, (b), t += 20000000); \
+		/* Not drawn again, but for the clocks shown. */ \
+		idle &= !ui_frame(&cv, 0, t += 20000000) || \
+			ui_top() == &sysinfo_page || \
+			ui_top() == &romlist_page; \
 	} \
 } while (0)
 
@@ -2227,7 +2234,204 @@ static void test_pages(void)
 	CHECK(ui_top() == &game && pg_from == &sysinfo_page,
 	      "pages: SELECT+START resumes from system info (%s)",
 	      ui_top()->name);
+	CHECK(idle, "pages: a release 20 ms after a press drew again");
 #undef PRESS
+	ui_set_handler(NULL);
+}
+
+/*
+ * Redraws only on a change, through ui_frame like main.c's loop. A frame
+ * drawn is on screen a vblank (RD_VBLANK_NS) later and ui_frame runs
+ * again then; one not drawn sleeps until ui_due (rounded up to a ms, at
+ * most 1 s) or the next simulated key. rd_run does that from *t to end
+ * with the buttons held, counting redraws and updates.
+ */
+#define RD_VBLANK_NS 16661000LL
+#define RD_MS 1000000LL
+
+static unsigned rd_updates;
+
+static int rd_run(struct canvas *cv, int64_t *t, int64_t end, uint32_t held)
+{
+	int draws = 0;
+
+	while (*t < end) {
+		int drew = ui_frame(cv, held, *t);
+		int64_t due = ui_due(), next;
+
+		rd_updates++;
+		draws += drew;
+		if (drew)
+			next = *t + RD_VBLANK_NS;
+		else if (due >= *t + 1000 * RD_MS)
+			next = *t + 1000 * RD_MS;
+		else
+			next = *t + (due > *t ? (due - *t + RD_MS - 1) / RD_MS : 1) *
+			       RD_MS;
+		*t = next < end ? next : end;
+	}
+	return draws;
+}
+
+/* A press for a vblank, then released: 1 when the press was drawn. */
+static int rd_press(struct canvas *cv, int64_t *t, uint32_t b)
+{
+	int drew = ui_frame(cv, b, *t);
+
+	*t += RD_VBLANK_NS;
+	ui_frame(cv, 0, *t);
+	*t += RD_VBLANK_NS;
+	return drew;
+}
+
+static void test_redraw(const char *base)
+{
+	static uint16_t px[480 * 320], ref[480 * 320];
+	struct canvas cv = { px, 480, 320 };
+	static const int64_t at[] = { 500, 1300, 2500, 4000, 6100, 9000 };
+	static const int64_t rates[] = { RD_VBLANK_NS, 4166667, 33333333 };
+	const struct romdb_entry *vc =
+		entry_named("Advance Wars (USA) (Virtual Console)");
+	const int64_t s = 1000 * RD_MS;
+	char path[400], dir[340];
+	int64_t t = 1000 * s, t0, armed;
+	struct tm tm;
+	int draws, clock = realtime_utc(&tm), bad = 0, moved = 0, scroll;
+
+	ui_set_handler(pg_handler);
+	/* Idle settings: no redraw in 10 s of vblanks, nothing to wake for;
+	 * one for a key press, none for its release or a key that is held
+	 * (but for the d-pad's key repeat, 350 ms then every 70 ms). */
+	ui_reset(&settings_page, t);
+	CHECK(ui_frame(&cv, 0, t += RD_VBLANK_NS), "redraw: a new page");
+	draws = 0;
+	for (int i = 0; i < 600; i++)
+		draws += ui_frame(&cv, 0, t += RD_VBLANK_NS);
+	CHECK(draws == 0 && ui_due() == INT64_MAX,
+	      "redraw: idle settings drew %d times in 600 frames", draws);
+	CHECK(ui_frame(&cv, JOY_BIT(DOWN), t += RD_VBLANK_NS) == 1 &&
+	      ui_frame(&cv, JOY_BIT(DOWN), t += RD_VBLANK_NS) == 0 &&
+	      ui_frame(&cv, 0, t += RD_VBLANK_NS) == 0,
+	      "redraw: press drawn once");
+	t0 = t;
+	ui_frame(&cv, JOY_BIT(DOWN), t);
+	CHECK(ui_due() == t0 + 350 * RD_MS, "redraw: woken for the key repeat");
+	t += RD_VBLANK_NS;
+	draws = rd_run(&cv, &t, t0 + s, JOY_BIT(DOWN));
+	/* Repeats at 350, 420 ... 980 ms. */
+	CHECK(draws == 10, "redraw: %d repeats drawn in 1 s held", draws);
+	ui_frame(&cv, 0, t);
+	CHECK(ui_due() == INT64_MAX, "redraw: released, nothing due");
+
+	/* Power off armed: drawn so, then nothing (but a wake a second, the
+	 * longest sleep) until 3 s later, when the label is drawn back and
+	 * the next A only arms it again. */
+	ui_reset(&settings_page, t);
+	ui_frame(&cv, 0, t);
+	for (int i = 0; i < 7; i++)
+		rd_press(&cv, &t, JOY_BIT(DOWN));
+	armed = t;
+	CHECK(rd_press(&cv, &t, JOY_BIT(A)), "redraw: armed drawn");
+	CHECK(ui_due() == armed + 3 * s, "redraw: woken when the arming ends");
+	rd_updates = 0;
+	draws = rd_run(&cv, &t, armed + 3 * s, 0);
+	CHECK(draws == 0 && rd_updates <= 4,
+	      "redraw: armed for 3 s: %d redraws, %u updates", draws,
+	      rd_updates);
+	CHECK(ui_frame(&cv, 0, t) == 1, "redraw: disarmed after 3 s, drawn");
+	pg_nacts = 0;
+	rd_press(&cv, &t, JOY_BIT(A));
+	CHECK(pg_nacts == 0, "redraw: A after the timeout only arms");
+	t += 3 * s;
+
+	/* The in-game menu's long name scrolls at the same pace whether
+	 * ui_frame runs on every vblank, at 240 Hz or at 30 Hz: the frames
+	 * drawn at the same times match. Drawn on every vblank only while it
+	 * moves, idle in the 1 s pauses. */
+	ingame_menu_set_name("A Very Long Game Name That Will Not Fit (USA, "
+			     "Europe) (Rev 1).gba");
+	for (size_t k = 0; k < ARRAY_SIZE(at); k++) {
+		for (size_t r = 0; r < ARRAY_SIZE(rates); r++) {
+			int64_t end;
+
+			ui_reset(&ingame_page, t0 = t);
+			end = t0 + at[k] * RD_MS;
+			if (!r) {
+				rd_run(&cv, &t, end, 0);
+			} else {
+				while (t < end) {
+					ui_frame(&cv, 0, t);
+					t = t + rates[r] < end ? t + rates[r] : end;
+				}
+			}
+			ui_redraw();
+			ui_frame(&cv, 0, t);
+			if (!r) {
+				/* It moved since the last time. */
+				moved += k && memcmp(ref, px, sizeof(px));
+				memcpy(ref, px, sizeof(px));
+			} else {
+				bad += !!memcmp(ref, px, sizeof(px));
+			}
+			t += s;
+		}
+	}
+	CHECK(!bad && moved == (int)ARRAY_SIZE(at) - 1,
+	      "redraw: marquee pace depends on the update rate (%d, moved %d)",
+	      bad, moved);
+	ui_reset(&ingame_page, t0 = t);
+	rd_updates = 0;
+	draws = rd_run(&cv, &t, t0 + 990 * RD_MS, 0);
+	CHECK(draws == 1 && rd_updates <= 3,
+	      "redraw: marquee pause: %d redraws, %u updates", draws, rd_updates);
+	t = t0 + 1100 * RD_MS;
+	ui_frame(&cv, 0, t);
+	scroll = draws = rd_run(&cv, &t, t0 + 1600 * RD_MS, 0);
+	CHECK(draws >= 29 && draws <= 31,
+	      "redraw: marquee: %d redraws in 0.5 s of scrolling", draws);
+	t += s;
+
+	/* System info: each sample and each second of the clock and of the
+	 * uptime, up to 3 a second; Date & time: each second. */
+	ui_reset(&sysinfo_page, t0 = t);
+	rd_updates = 0;
+	draws = rd_run(&cv, &t, t0 + 3 * s, 0);
+	CHECK(draws >= 4 && draws <= 10 && rd_updates < 40,
+	      "redraw: system info: %d redraws, %u updates in 3 s", draws,
+	      rd_updates);
+	log_msg("selftest: redraw: idle menus 0 redraws in 10 s, marquee %d in "
+		"0.5 s of scrolling, system info %d in 3 s (%u updates)", scroll,
+		draws, rd_updates);
+	ui_reset(&datetime_page, t0 = t);
+	draws = rd_run(&cv, &t, t0 + 3 * s, 0);
+	CHECK(draws >= 3 && draws <= 4,
+	      "redraw: date & time: %d redraws in 3 s", draws);
+
+	/* The ROM list: idle but for the clock in the header (once a minute
+	 * when set). Opening crcwait/ (the 2nd entry) with a ROM waiting for
+	 * its CRC: woken within 8 ms for it, drawn once it has its name. */
+	snprintf(dir, sizeof(dir), "%s/roms/crcwait", base);
+	mkdir(dir, 0755);
+	snprintf(path, sizeof(path), "%s/aw.gba", dir);
+	write_rom(path, "AWRE", 0, vc ? vc->crc : 0, 7);
+	ui_reset(&romlist_page, t);
+	ui_frame(&cv, 0, t);
+	draws = 0;
+	for (int i = 0; i < 600; i++)
+		draws += ui_frame(&cv, 0, t += RD_VBLANK_NS);
+	CHECK(draws <= clock, "redraw: idle ROM list drew %d times", draws);
+	rd_press(&cv, &t, JOY_BIT(LEFT));
+	rd_press(&cv, &t, JOY_BIT(DOWN));
+	CHECK(ui_frame(&cv, JOY_BIT(A), t) && ui_due() <= t + 8 * RD_MS,
+	      "redraw: folder with a CRC to compute opened");
+	t += RD_VBLANK_NS;
+	draws = rd_run(&cv, &t, t + 100 * RD_MS, 0);
+	CHECK(draws == 1 && ui_due() > t + 8 * RD_MS,
+	      "redraw: CRC done and drawn (%d redraws)", draws);
+	rd_press(&cv, &t, JOY_BIT(B));
+	unlink(path);
+	rmdir(dir);
+	romdb_cache_reset();
 	ui_set_handler(NULL);
 }
 
@@ -2642,6 +2846,7 @@ int selftest(const char *dir)
 	test_sysinfo(dir);
 	test_clock(dir);
 	test_pages();
+	test_redraw(dir);
 	log_msg("selftest: %s (%d failures)", failures ? "FAILED" : "passed",
 		failures);
 	return failures ? 1 : 0;
