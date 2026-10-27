@@ -32,6 +32,7 @@
 #include "settings.h"
 #include "sleep.h"
 #include "sysinfo.h"
+#include "ui.h"
 
 static int failures;
 
@@ -43,6 +44,58 @@ static int failures;
 		fputc('\n', stderr); \
 	} \
 } while (0)
+
+/* The pages called directly, as ui_frame does: the action of a key press
+ * (the page opened by UI_PUSH in opened, the ROM to start in path), and
+ * a page drawn over a 240x160 game picture or none. */
+static const struct page *opened;
+
+static int page_key(const struct page *p, uint32_t pressed)
+{
+	struct ui_result r = p->update(pressed, 0);
+
+	opened = r.page;
+	return r.act;
+}
+
+/* path: 512 bytes */
+static int rl_key(uint32_t pressed, char *path)
+{
+	int act = page_key(&romlist_page, pressed);
+
+	snprintf(path, 512, "%s", romlist_menu_rom());
+	return act;
+}
+
+static int ig_key(uint32_t pressed)
+{
+	return page_key(&ingame_page, pressed);
+}
+
+/* The global and the in-game settings share their update. */
+static int st_key(uint32_t pressed)
+{
+	return page_key(&settings_page, pressed);
+}
+
+static int dt_key(uint32_t pressed)
+{
+	return page_key(&datetime_page, pressed);
+}
+
+static void ig_open(const char *name)
+{
+	ingame_menu_set_name(name);
+	ingame_page.enter(NULL, 0);
+}
+
+static void draw_page(const struct page *p, struct canvas *c,
+		      const uint16_t *game)
+{
+	struct game_view g = { game, 240, 240, 160 };
+
+	p->draw(c, game ? &g : &(struct game_view){ 0 });
+}
 
 static uint32_t rnd_state = 12345;
 
@@ -1106,7 +1159,7 @@ static void test_romdb(const char *base)
 }
 
 /* The ROM list's folders in the menu: A opens one, B goes up with it
- * selected, the folder and ROM are kept over a game (romlist_menu_enter
+ * selected, the folder and ROM are kept over a game (the page entered
  * again), a folder that is gone falls back to the top. Uses the roms/
  * of test_romlist. */
 static void test_romlist_folders(const char *base)
@@ -1116,67 +1169,67 @@ static void test_romlist_folders(const char *base)
 	char path[512], want[512], gone[400];
 	const uint32_t a = JOY_BIT(A), b = JOY_BIT(B);
 
-	romlist_menu_enter();
-	CHECK(romlist_menu_update(a, path, sizeof(path)) == UI_NONE,
+	romlist_page.enter(NULL, 0);
+	CHECK(rl_key(a, path) == UI_NONE,
 	      "folders: A on action/ opens it");
-	CHECK(romlist_menu_update(a, path, sizeof(path)) == UI_NONE,
+	CHECK(rl_key(a, path) == UI_NONE,
 	      "folders: A on inner/ opens it");
-	romlist_menu_draw(&cv);
+	draw_page(&romlist_page, &cv, NULL);
 	snprintf(path, sizeof(path), "%s/ui-romlist-folder.raw", base);
 	write_file_atomic(path, px, sizeof(px));
 	snprintf(want, sizeof(want), "%s/roms/action/inner/deep.gba", base);
-	CHECK(romlist_menu_update(a, path, sizeof(path)) == UI_START_ROM &&
+	CHECK(rl_key(a, path) == UI_START_ROM &&
 	      !strcmp(path, want), "folders: start %s", path);
 	/* Back from the game: same folder, same ROM. */
-	romlist_menu_enter();
-	CHECK(romlist_menu_update(a, path, sizeof(path)) == UI_START_ROM &&
+	romlist_page.enter(NULL, 0);
+	CHECK(rl_key(a, path) == UI_START_ROM &&
 	      !strcmp(path, want), "folders: after the game %s", path);
 	/* B: up to action/ with inner/ selected. */
-	CHECK(romlist_menu_update(b, path, sizeof(path)) == UI_NONE, "folders: B");
-	CHECK(romlist_menu_update(a, path, sizeof(path)) == UI_NONE &&
-	      romlist_menu_update(a, path, sizeof(path)) == UI_START_ROM &&
+	CHECK(rl_key(b, path) == UI_NONE, "folders: B");
+	CHECK(rl_key(a, path) == UI_NONE &&
+	      rl_key(a, path) == UI_START_ROM &&
 	      !strcmp(path, want), "folders: inner/ reselected: %s", path);
-	romlist_menu_update(b, path, sizeof(path));
-	romlist_menu_update(JOY_BIT(DOWN), path, sizeof(path));
+	rl_key(b, path);
+	rl_key(JOY_BIT(DOWN), path);
 	snprintf(want, sizeof(want), "%s/roms/action/x.gba", base);
-	CHECK(romlist_menu_update(a, path, sizeof(path)) == UI_START_ROM &&
+	CHECK(rl_key(a, path) == UI_START_ROM &&
 	      !strcmp(path, want), "folders: start %s", path);
 	/* Up to the top with action/ selected; B there does nothing. */
-	romlist_menu_update(b, path, sizeof(path));
-	CHECK(romlist_menu_update(b, path, sizeof(path)) == UI_NONE,
+	rl_key(b, path);
+	CHECK(rl_key(b, path) == UI_NONE,
 	      "folders: B at the top");
-	romlist_menu_update(a, path, sizeof(path));
-	romlist_menu_update(JOY_BIT(DOWN), path, sizeof(path));
-	CHECK(romlist_menu_update(a, path, sizeof(path)) == UI_START_ROM &&
+	rl_key(a, path);
+	rl_key(JOY_BIT(DOWN), path);
+	CHECK(rl_key(a, path) == UI_START_ROM &&
 	      !strcmp(path, want), "folders: action/ reselected: %s", path);
 	/* The empty folder: B still goes up. */
-	romlist_menu_update(b, path, sizeof(path));
-	romlist_menu_update(JOY_BIT(DOWN), path, sizeof(path));
-	romlist_menu_update(a, path, sizeof(path));
-	romlist_menu_draw(&cv);
+	rl_key(b, path);
+	rl_key(JOY_BIT(DOWN), path);
+	rl_key(a, path);
+	draw_page(&romlist_page, &cv, NULL);
 	snprintf(path, sizeof(path), "%s/ui-romlist-empty.raw", base);
 	write_file_atomic(path, px, sizeof(px));
-	CHECK(romlist_menu_update(a, path, sizeof(path)) == UI_NONE,
+	CHECK(rl_key(a, path) == UI_NONE,
 	      "folders: A in an empty folder");
-	romlist_menu_update(b, path, sizeof(path));
-	romlist_menu_update(JOY_BIT(UP), path, sizeof(path));
-	romlist_menu_update(a, path, sizeof(path));
-	CHECK(romlist_menu_update(JOY_BIT(DOWN), path, sizeof(path)) == UI_NONE &&
-	      romlist_menu_update(a, path, sizeof(path)) == UI_START_ROM &&
+	rl_key(b, path);
+	rl_key(JOY_BIT(UP), path);
+	rl_key(a, path);
+	CHECK(rl_key(JOY_BIT(DOWN), path) == UI_NONE &&
+	      rl_key(a, path) == UI_START_ROM &&
 	      !strcmp(path, want), "folders: up from empty/: %s", path);
 	/* A folder removed while a game ran: back at the top. */
-	romlist_menu_update(b, path, sizeof(path));
+	rl_key(b, path);
 	snprintf(gone, sizeof(gone), "%s/roms/gone", base);
 	mkdir(gone, 0755);
-	romlist_menu_enter();
-	romlist_menu_update(JOY_BIT(DOWN), path, sizeof(path));
-	romlist_menu_update(JOY_BIT(DOWN), path, sizeof(path));
-	romlist_menu_update(a, path, sizeof(path));
+	romlist_page.enter(NULL, 0);
+	rl_key(JOY_BIT(DOWN), path);
+	rl_key(JOY_BIT(DOWN), path);
+	rl_key(a, path);
 	rmdir(gone);
-	romlist_menu_enter();
-	romlist_menu_update(JOY_BIT(UP), path, sizeof(path));
+	romlist_page.enter(NULL, 0);
+	rl_key(JOY_BIT(UP), path);
 	snprintf(want, sizeof(want), "%s/roms/z.Gba", base);
-	CHECK(romlist_menu_update(a, path, sizeof(path)) == UI_START_ROM &&
+	CHECK(rl_key(a, path) == UI_START_ROM &&
 	      !strcmp(path, want), "folders: gone folder: %s", path);
 }
 
@@ -1545,67 +1598,67 @@ static void test_ingame_restart(const char *dir)
 	const int srow7 = LIST_Y - ROW_PAD + 7 * ROW_H;
 	const int send = LIST_Y - ROW_PAD + 9 * ROW_H;
 
-	ingame_menu_enter("Game");
-	ingame_menu_update(JOY_BIT(DOWN));
-	ingame_menu_draw(&cv, NULL, 0, 0, 0);
+	ig_open("Game");
+	ig_key(JOY_BIT(DOWN));
+	draw_page(&ingame_page, &cv, NULL);
 	/* Row 1, its selection bar. */
 	plain = count_color(px, row1, row1 + IG_ROW_H, COL_HI);
-	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_NONE, "restart: first A arms");
-	ingame_menu_draw(&cv, NULL, 0, 0, 0);
+	CHECK(ig_key(JOY_BIT(A)) == UI_NONE, "restart: first A arms");
+	draw_page(&ingame_page, &cv, NULL);
 	armed = count_color(px, row1, row1 + IG_ROW_H, COL_HI);
 	CHECK(plain == 0 && armed > 0, "restart: armed row %d/%d highlighted",
 	      plain, armed);
 	snprintf(path, sizeof(path), "%s/ui-ingame-restart.raw", dir);
 	write_file_atomic(path, px, sizeof(px));
-	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_RESET,
+	CHECK(ig_key(JOY_BIT(A)) == UI_RESET,
 	      "restart: second A confirms");
-	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_NONE,
+	CHECK(ig_key(JOY_BIT(A)) == UI_NONE,
 	      "restart: disarmed after confirming");
 
 	/* Moving away and back cancels. */
-	ingame_menu_enter("Game");
-	ingame_menu_update(JOY_BIT(DOWN));
-	ingame_menu_update(JOY_BIT(A));
-	ingame_menu_update(JOY_BIT(DOWN));
-	ingame_menu_update(JOY_BIT(UP));
-	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_NONE,
+	ig_open("Game");
+	ig_key(JOY_BIT(DOWN));
+	ig_key(JOY_BIT(A));
+	ig_key(JOY_BIT(DOWN));
+	ig_key(JOY_BIT(UP));
+	CHECK(ig_key(JOY_BIT(A)) == UI_NONE,
 	      "restart: moving away cancels");
 	/* An A on the 179th frame after arming still confirms, on the
 	 * 180th it does not. */
-	ingame_menu_enter("Game");
-	ingame_menu_update(JOY_BIT(DOWN));
-	ingame_menu_update(JOY_BIT(A));
+	ig_open("Game");
+	ig_key(JOY_BIT(DOWN));
+	ig_key(JOY_BIT(A));
 	for (int i = 0; i < 178; i++)
-		ingame_menu_update(0);
-	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_RESET,
+		ig_key(0);
+	CHECK(ig_key(JOY_BIT(A)) == UI_RESET,
 	      "restart: confirmed within 3 s");
-	ingame_menu_enter("Game");
-	ingame_menu_update(JOY_BIT(DOWN));
-	ingame_menu_update(JOY_BIT(A));
+	ig_open("Game");
+	ig_key(JOY_BIT(DOWN));
+	ig_key(JOY_BIT(A));
 	for (int i = 0; i < 179; i++)
-		ingame_menu_update(0);
-	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_NONE,
+		ig_key(0);
+	CHECK(ig_key(JOY_BIT(A)) == UI_NONE,
 	      "restart: times out after 3 s");
 	/* That A armed it again; 180 frames later the label is back. */
 	for (int i = 0; i < 180; i++)
-		ingame_menu_update(0);
-	ingame_menu_draw(&cv, NULL, 0, 0, 0);
+		ig_key(0);
+	draw_page(&ingame_page, &cv, NULL);
 	CHECK(count_color(px, row1, row1 + IG_ROW_H, COL_HI) == 0,
 	      "restart: label back after 3 s");
 	/* B resumes; the menu opens again disarmed. */
-	CHECK(ingame_menu_update(JOY_BIT(B)) == UI_RESUME, "restart: B resumes");
-	ingame_menu_enter("Game");
-	ingame_menu_update(JOY_BIT(DOWN));
-	ingame_menu_draw(&cv, NULL, 0, 0, 0);
+	CHECK(ig_key(JOY_BIT(B)) == UI_RESUME, "restart: B resumes");
+	ig_open("Game");
+	ig_key(JOY_BIT(DOWN));
+	draw_page(&ingame_page, &cv, NULL);
 	CHECK(count_color(px, row1, row1 + IG_ROW_H, COL_HI) == 0,
 	      "restart: disarmed on entering");
 
 	/* Up from Resume wraps to Power off, the last row: its highlight
 	 * ends IG_TAIL above the box, whose frame ends on screen, the rest
 	 * is the dimmed game. */
-	ingame_menu_enter("Game");
-	act = ingame_menu_update(JOY_BIT(UP));
-	ingame_menu_draw(&cv, NULL, 0, 0, 0);
+	ig_open("Game");
+	act = ig_key(JOY_BIT(UP));
+	draw_page(&ingame_page, &cv, NULL);
 	CHECK(IG_BOX_Y > 0 && end <= 320 && act == UI_NONE &&
 	      px[(last + IG_ROW_H - 1) * 480 + 240] == COL_SEL &&
 	      px[(end - 3) * 480 + 240] == COL_BOX &&
@@ -1613,37 +1666,37 @@ static void test_ingame_restart(const char *dir)
 	      count_color(px, end, 320, COL_SEL) == 0 &&
 	      count_color(px, end, 320, COL_BOX) == 0,
 	      "restart: menu box fits on screen");
-	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_NONE,
+	CHECK(ig_key(JOY_BIT(A)) == UI_NONE,
 	      "power off: first A arms");
-	ingame_menu_draw(&cv, NULL, 0, 0, 0);
+	draw_page(&ingame_page, &cv, NULL);
 	CHECK(count_color(px, last, last + IG_ROW_H, COL_HI) > 0,
 	      "power off: armed row highlighted");
 	snprintf(path, sizeof(path), "%s/ui-ingame-poweroff.raw", dir);
 	write_file_atomic(path, px, sizeof(px));
-	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_POWEROFF,
+	CHECK(ig_key(JOY_BIT(A)) == UI_POWEROFF,
 	      "power off: second A confirms");
 	/* Armed on Restart game, A on Power off only arms that row. */
-	ingame_menu_enter("Game");
-	ingame_menu_update(JOY_BIT(DOWN));
-	ingame_menu_update(JOY_BIT(A));
-	ingame_menu_update(JOY_BIT(UP));
-	ingame_menu_update(JOY_BIT(UP));
-	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_NONE,
+	ig_open("Game");
+	ig_key(JOY_BIT(DOWN));
+	ig_key(JOY_BIT(A));
+	ig_key(JOY_BIT(UP));
+	ig_key(JOY_BIT(UP));
+	CHECK(ig_key(JOY_BIT(A)) == UI_NONE,
 	      "power off: not confirmed by another row's arming");
 	for (int i = 0; i < 179; i++)
-		ingame_menu_update(0);
-	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_NONE,
+		ig_key(0);
+	CHECK(ig_key(JOY_BIT(A)) == UI_NONE,
 	      "power off: times out after 3 s");
 
 	/* Global settings: Power off is the row before Back. */
-	settings_menu_enter(0);
+	settings_page.enter(NULL, 0);
 	for (int i = 0; i < 7; i++)
-		settings_menu_update(JOY_BIT(DOWN));
-	settings_menu_draw(&cv, NULL, 0, 0, 0);
+		st_key(JOY_BIT(DOWN));
+	draw_page(&settings_page, &cv, NULL);
 	plain = count_color(px, srow7, srow7 + ROW_H, COL_HI);
-	CHECK(settings_menu_update(JOY_BIT(A)) == UI_NONE,
+	CHECK(st_key(JOY_BIT(A)) == UI_NONE,
 	      "settings power off: first A arms");
-	settings_menu_draw(&cv, NULL, 0, 0, 0);
+	draw_page(&settings_page, &cv, NULL);
 	armed = count_color(px, srow7, srow7 + ROW_H, COL_HI);
 	CHECK(plain == 0 && armed > 0,
 	      "settings power off: armed row %d/%d highlighted", plain, armed);
@@ -1654,20 +1707,20 @@ static void test_ingame_restart(const char *dir)
 	      "settings: rows end above B:back");
 	snprintf(path, sizeof(path), "%s/ui-settings-poweroff.raw", dir);
 	write_file_atomic(path, px, sizeof(px));
-	CHECK(settings_menu_update(JOY_BIT(A)) == UI_POWEROFF,
+	CHECK(st_key(JOY_BIT(A)) == UI_POWEROFF,
 	      "settings power off: second A confirms");
-	settings_menu_update(JOY_BIT(A));
-	settings_menu_update(JOY_BIT(DOWN));
-	settings_menu_update(JOY_BIT(UP));
-	CHECK(settings_menu_update(JOY_BIT(A)) == UI_NONE,
+	st_key(JOY_BIT(A));
+	st_key(JOY_BIT(DOWN));
+	st_key(JOY_BIT(UP));
+	CHECK(st_key(JOY_BIT(A)) == UI_NONE,
 	      "settings power off: moving away cancels");
-	settings_menu_enter(0);
+	settings_page.enter(NULL, 0);
 	for (int i = 0; i < 7; i++)
-		settings_menu_update(JOY_BIT(DOWN));
-	settings_menu_update(JOY_BIT(A));
+		st_key(JOY_BIT(DOWN));
+	st_key(JOY_BIT(A));
 	for (int i = 0; i < 179; i++)
-		settings_menu_update(0);
-	CHECK(settings_menu_update(JOY_BIT(A)) == UI_NONE,
+		st_key(0);
+	CHECK(st_key(JOY_BIT(A)) == UI_NONE,
 	      "settings power off: times out after 3 s");
 }
 
@@ -1765,8 +1818,8 @@ static void test_sysinfo(const char *dir)
 	put_path(root, "sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq",
 		 "1296000\n");
 	sysinfo_set_root(root);
-	sysinfo_enter("selftest", 0);
-	sysinfo_draw(&cv);
+	sysinfo_page.enter("selftest", 0);
+	draw_page(&sysinfo_page, &cv, NULL);
 	/* CPU, Cores, Freq, Memory, Temp rows (the temperatures wrap). */
 	CHECK(SI_SHOWS(0, " 20%  Adaptive"), "sysinfo: CPU since boot");
 	CHECK(SI_SHOWS(1, " 20%   20%"), "sysinfo: cores since boot");
@@ -1776,17 +1829,18 @@ static void test_sysinfo(const char *dir)
 	      "sysinfo: thermal zones");
 	CHECK(SI_SHOWS(5, "batt 30.0C"), "sysinfo: hwmon wraps");
 	put_path(root, "proc/stat", stat1);
-	CHECK(sysinfo_update(0, 500000000LL) == UI_NONE, "sysinfo: stays open");
-	sysinfo_draw(&cv);
+	CHECK(sysinfo_page.update(0, 500000000LL).act == UI_NONE,
+	      "sysinfo: stays open");
+	draw_page(&sysinfo_page, &cv, NULL);
 	CHECK(SI_SHOWS(0, " 20%  Adaptive"),
 	      "sysinfo: not refreshed before 1 s");
-	sysinfo_update(0, 1000000000LL);
-	sysinfo_draw(&cv);
+	sysinfo_page.update(0, 1000000000LL);
+	draw_page(&sysinfo_page, &cv, NULL);
 	CHECK(SI_SHOWS(0, " 50%  Adaptive") &&
 	      SI_SHOWS(1, "  0%  100%"), "sysinfo: usage from deltas");
 	snprintf(path, sizeof(path), "%s/ui-sysinfo.raw", dir);
 	write_file_atomic(path, px, sizeof(px));
-	CHECK(sysinfo_update(JOY_BIT(B), 1100000000LL) == UI_BACK,
+	CHECK(sysinfo_page.update(JOY_BIT(B), 1100000000LL).act == UI_BACK,
 	      "sysinfo: B goes back");
 	sysinfo_set_root(NULL);
 }
@@ -1812,7 +1866,7 @@ static void dt_set(int field, int value)
 	struct tm tm;
 
 	for (int i = 0; i < 5 && datetime_field() != field; i++)
-		datetime_update(JOY_BIT(RIGHT));
+		dt_key(JOY_BIT(RIGHT));
 	for (int i = 0; i < 100; i++) {
 		int v;
 
@@ -1821,7 +1875,7 @@ static void dt_set(int field, int value)
 		    field == 2 ? tm.tm_mday : field == 3 ? tm.tm_hour : tm.tm_min;
 		if (v == value)
 			return;
-		datetime_update(JOY_BIT(UP));
+		dt_key(JOY_BIT(UP));
 	}
 	CHECK(0, "clock: field %d never reached %d", field, value);
 }
@@ -1871,11 +1925,11 @@ static void test_clock(const char *dir)
 	clock_set_backend(rtc, fake_settime);
 	clock_boot_log();
 
-	datetime_enter();
+	datetime_page.enter(NULL, 0);
 	CHECK(datetime_field() == 0 && !datetime_message()[0], "clock: enter");
-	datetime_update(JOY_BIT(LEFT));
+	dt_key(JOY_BIT(LEFT));
 	CHECK(datetime_field() == 4, "clock: left wraps to the minute");
-	datetime_update(JOY_BIT(RIGHT));
+	dt_key(JOY_BIT(RIGHT));
 	CHECK(datetime_field() == 0, "clock: right wraps to the year");
 	dt_set(0, 2024);
 	dt_set(1, 1);
@@ -1884,53 +1938,53 @@ static void test_clock(const char *dir)
 	dt_set(4, 0);
 	CHECK(dt_is(2024, 1, 31, 23, 0), "clock: fields set");
 	/* Jan 31 -> Feb 29 in a leap year -> Feb 28 the year after. */
-	datetime_update(JOY_BIT(LEFT));
-	datetime_update(JOY_BIT(LEFT));
-	datetime_update(JOY_BIT(LEFT));
+	dt_key(JOY_BIT(LEFT));
+	dt_key(JOY_BIT(LEFT));
+	dt_key(JOY_BIT(LEFT));
 	CHECK(datetime_field() == 1, "clock: on the month");
-	datetime_update(JOY_BIT(UP));
+	dt_key(JOY_BIT(UP));
 	CHECK(dt_is(2024, 2, 29, 23, 0), "clock: Feb 29 clamped in 2024");
-	datetime_update(JOY_BIT(LEFT));
-	datetime_update(JOY_BIT(UP));
+	dt_key(JOY_BIT(LEFT));
+	dt_key(JOY_BIT(UP));
 	CHECK(dt_is(2025, 2, 28, 23, 0), "clock: Feb 28 in 2025");
 	/* Wrapping: year, month, day in its month, hour, minute. */
-	datetime_update(JOY_BIT(DOWN));
-	datetime_update(JOY_BIT(DOWN));
+	dt_key(JOY_BIT(DOWN));
+	dt_key(JOY_BIT(DOWN));
 	CHECK(dt_is(2099, 2, 28, 23, 0), "clock: year wraps down");
-	datetime_update(JOY_BIT(UP));
+	dt_key(JOY_BIT(UP));
 	CHECK(dt_is(2024, 2, 28, 23, 0), "clock: year wraps up");
 	dt_set(2, 29);
-	datetime_update(JOY_BIT(UP));
+	dt_key(JOY_BIT(UP));
 	CHECK(dt_is(2024, 2, 1, 23, 0), "clock: day wraps after the 29th");
-	datetime_update(JOY_BIT(DOWN));
+	dt_key(JOY_BIT(DOWN));
 	CHECK(dt_is(2024, 2, 29, 23, 0), "clock: day wraps down");
-	datetime_update(JOY_BIT(LEFT));
-	datetime_update(JOY_BIT(DOWN));
+	dt_key(JOY_BIT(LEFT));
+	dt_key(JOY_BIT(DOWN));
 	CHECK(dt_is(2024, 1, 29, 23, 0), "clock: month down");
-	datetime_update(JOY_BIT(DOWN));
+	dt_key(JOY_BIT(DOWN));
 	CHECK(dt_is(2024, 12, 29, 23, 0), "clock: month wraps down");
-	datetime_update(JOY_BIT(UP));
+	dt_key(JOY_BIT(UP));
 	CHECK(dt_is(2024, 1, 29, 23, 0), "clock: month wraps up");
-	datetime_update(JOY_BIT(RIGHT));
-	datetime_update(JOY_BIT(RIGHT));
-	datetime_update(JOY_BIT(UP));
+	dt_key(JOY_BIT(RIGHT));
+	dt_key(JOY_BIT(RIGHT));
+	dt_key(JOY_BIT(UP));
 	CHECK(dt_is(2024, 1, 29, 0, 0), "clock: hour wraps");
-	datetime_update(JOY_BIT(RIGHT));
-	datetime_update(JOY_BIT(DOWN));
+	dt_key(JOY_BIT(RIGHT));
+	dt_key(JOY_BIT(DOWN));
 	CHECK(dt_is(2024, 1, 29, 0, 59), "clock: minute wraps");
 	/* B cancels: nothing set. */
-	CHECK(datetime_update(JOY_BIT(B)) == UI_BACK && fake_calls == 0,
+	CHECK(dt_key(JOY_BIT(B)) == UI_BACK && fake_calls == 0,
 	      "clock: cancel sets nothing");
 
 	/* A saves: the system clock gets the time with 0 seconds, the RTC
 	 * ioctl fails on a regular file, the page stays with the message. */
-	datetime_enter();
+	datetime_page.enter(NULL, 0);
 	dt_set(0, 2028);
 	dt_set(1, 2);
 	dt_set(2, 29);
 	dt_set(3, 13);
 	dt_set(4, 45);
-	CHECK(datetime_update(JOY_BIT(A)) == UI_NONE, "clock: failed save stays");
+	CHECK(dt_key(JOY_BIT(A)) == UI_NONE, "clock: failed save stays");
 	memset(&tm, 0, sizeof(tm));
 	tm.tm_year = 2028 - 1900;
 	tm.tm_mon = 1;
@@ -1943,16 +1997,16 @@ static void test_clock(const char *dir)
 	      (long long)fake_tv.tv_sec, (long long)want, fake_calls);
 	CHECK(!strncmp(datetime_message(), "Not saved to the RTC:\n", 22),
 	      "clock: message %s", datetime_message());
-	datetime_draw(&cv);
+	draw_page(&datetime_page, &cv, NULL);
 	for (int y = cv.h - 76; y < cv.h - 36; y++)
 		for (int x = 0; x < cv.w; x++)
 			red += px[y * cv.w + x] == COL_ERR;
 	CHECK(red > 100, "clock: message not drawn (%d red pixels)", red);
 	snprintf(msg, sizeof(msg), "%s/ui-datetime.raw", dir);
 	write_file_atomic(msg, px, sizeof(px));
-	datetime_update(JOY_BIT(UP));
+	dt_key(JOY_BIT(UP));
 	CHECK(!datetime_message()[0], "clock: an edit clears the message");
-	CHECK(datetime_update(JOY_BIT(B)) == UI_BACK, "clock: B after a failure");
+	CHECK(dt_key(JOY_BIT(B)) == UI_BACK, "clock: B after a failure");
 
 	/* No RTC device, then the system clock failing too. */
 	clock_set_backend(missing, fake_settime);
@@ -1998,60 +2052,60 @@ static void test_ui(const char *dir)
 
 	for (int i = 0; i < 240 * 160; i++)
 		game[i] = (uint16_t)(i * 37);
-	romlist_menu_enter();
-	romlist_menu_update(1u << 5 /* down */, path, sizeof(path));
-	romlist_menu_draw(&cv);
+	romlist_page.enter(NULL, 0);
+	page_key(&romlist_page, JOY_BIT(DOWN));
+	draw_page(&romlist_page, &cv, NULL);
 	snprintf(path, sizeof(path), "%s/ui-romlist.raw", dir);
 	write_file_atomic(path, px, sizeof(px));
-	ingame_menu_enter("Some Long Game Name (USA, Europe).gba");
-	ingame_menu_update(1u << 5);
-	ingame_menu_draw(&cv, game, 240, 240, 160);
+	ig_open("Some Long Game Name (USA, Europe).gba");
+	ig_key(1u << 5);
+	draw_page(&ingame_page, &cv, game);
 	snprintf(path, sizeof(path), "%s/ui-ingame.raw", dir);
 	write_file_atomic(path, px, sizeof(px));
 	/* With mGBA, Frame blend reads "gpSP only" and does not change. */
 	rom_settings.core = CORE_MGBA;
 	for (int i = 0; i < 5; i++)
-		ingame_menu_update(JOY_BIT(DOWN));
-	ingame_menu_update(JOY_BIT(A));
-	ingame_menu_update(JOY_BIT(RIGHT));
+		ig_key(JOY_BIT(DOWN));
+	ig_key(JOY_BIT(A));
+	ig_key(JOY_BIT(RIGHT));
 	CHECK(rom_settings.blend == 0, "blend unchanged with mGBA");
-	ingame_menu_draw(&cv, game, 240, 240, 160);
+	draw_page(&ingame_page, &cv, game);
 	snprintf(path, sizeof(path), "%s/ui-ingame-mgba.raw", dir);
 	write_file_atomic(path, px, sizeof(px));
 	rom_settings.core = CORE_GPSP;
-	ingame_menu_update(JOY_BIT(A));
+	ig_key(JOY_BIT(A));
 	CHECK(rom_settings.blend == 1, "blend toggled with gpSP");
 	rom_settings.blend = 0;
 
-	settings_menu_enter(0);
-	settings_menu_update(1u << 5);
-	settings_menu_draw(&cv, NULL, 0, 0, 0);
+	settings_page.enter(NULL, 0);
+	st_key(1u << 5);
+	draw_page(&settings_page, &cv, NULL);
 	snprintf(path, sizeof(path), "%s/ui-settings.raw", dir);
 	write_file_atomic(path, px, sizeof(px));
 	/* Volume, Brightness, CPU, Audio, Debug log, Date & time, System
 	 * info, Power off, Back: no grid rows outside a game. */
-	settings_menu_update(JOY_BIT(DOWN));
-	settings_menu_update(JOY_BIT(DOWN));
-	settings_menu_update(JOY_BIT(A));
+	st_key(JOY_BIT(DOWN));
+	st_key(JOY_BIT(DOWN));
+	st_key(JOY_BIT(A));
 	CHECK(settings.audio == AUDIO_SIMPLE, "settings: 4th row is Audio");
 	settings.audio = settings_defaults.audio;
-	settings_menu_update(JOY_BIT(DOWN));
-	settings_menu_update(JOY_BIT(DOWN));
-	CHECK(settings_menu_update(JOY_BIT(A)) == UI_DATETIME,
+	st_key(JOY_BIT(DOWN));
+	st_key(JOY_BIT(DOWN));
+	CHECK(st_key(JOY_BIT(A)) == UI_PUSH && opened == &datetime_page,
 	      "settings: 6th row is Date & time");
-	settings_menu_update(JOY_BIT(DOWN));
-	CHECK(settings_menu_update(JOY_BIT(A)) == UI_SYSINFO,
+	st_key(JOY_BIT(DOWN));
+	CHECK(st_key(JOY_BIT(A)) == UI_PUSH && opened == &sysinfo_page,
 	      "settings: 7th row is System info");
-	settings_menu_update(JOY_BIT(DOWN));
-	CHECK(settings_menu_update(JOY_BIT(A)) == UI_NONE,
+	st_key(JOY_BIT(DOWN));
+	CHECK(st_key(JOY_BIT(A)) == UI_NONE,
 	      "settings: 8th row is Power off (asks first)");
-	settings_menu_update(JOY_BIT(DOWN));
-	CHECK(settings_menu_update(JOY_BIT(A)) == UI_BACK,
+	st_key(JOY_BIT(DOWN));
+	CHECK(st_key(JOY_BIT(A)) == UI_BACK,
 	      "settings: 9th row is Back");
-	settings_menu_enter(1);
+	game_settings_page.enter(NULL, 0);
 	for (int i = 0; i < 5; i++)
-		settings_menu_update(JOY_BIT(DOWN));
-	CHECK(settings_menu_update(JOY_BIT(A)) == UI_BACK,
+		st_key(JOY_BIT(DOWN));
+	CHECK(st_key(JOY_BIT(A)) == UI_BACK,
 	      "in-game settings: 6th row is Back");
 
 	/* In game: a picture with detail, GBA colors and the grid. */
@@ -2064,8 +2118,8 @@ static void test_ui(const char *dir)
 	rom_settings.color = COLOR_GBA;
 	settings.grid = 1;
 	fx_update();
-	settings_menu_enter(1);
-	settings_menu_draw(&cv, game, 240, 240, 160);
+	game_settings_page.enter(NULL, 0);
+	draw_page(&game_settings_page, &cv, game);
 	snprintf(path, sizeof(path), "%s/ui-settings-ingame.raw", dir);
 	write_file_atomic(path, px, sizeof(px));
 	settings = settings_defaults;
@@ -2075,6 +2129,106 @@ static void test_ui(const char *dir)
 		     "(FAT). ROMs, saves and logs live there.", COL_ERR);
 	snprintf(path, sizeof(path), "%s/ui-fatal.raw", dir);
 	write_file_atomic(path, px, sizeof(px));
+}
+
+/*
+ * The page stack through ui_frame, as main.c's frame() runs it: ROM list,
+ * SELECT to the settings, System info, B, B; then a stand-in game with
+ * SELECT+START to the in-game menu, its Settings, B, B to resume, and
+ * SELECT+START from the in-game settings and from System info resumes too
+ * (but not over the ROM list). Every press is released for a frame.
+ */
+static int pg_acts[8], pg_nacts;
+static const struct page *pg_from;
+
+static void pg_handler(enum ui_action act, const struct page *from)
+{
+	if (pg_nacts < (int)ARRAY_SIZE(pg_acts))
+		pg_acts[pg_nacts++] = act;
+	pg_from = from;
+}
+
+static struct ui_result pg_game_update(uint32_t held, int64_t now)
+{
+	(void)held;
+	(void)now;
+	return ui_hotkey() ? UI_OPEN(&ingame_page) : UI_STAY;
+}
+
+static void test_pages(void)
+{
+	static const struct page game = {
+		"game", NULL, pg_game_update, NULL, 1,
+	};
+	static uint16_t px[480 * 320];
+	struct canvas cv = { px, 480, 320 };
+	const uint32_t hot = JOY_BIT(SELECT) | JOY_BIT(START);
+	int64_t t = 0;
+	int drawn;
+
+#define PRESS(b, n) do { \
+	for (int i_ = 0; i_ < (n); i_++) { \
+		ui_frame(&cv, (b), t += 20000000); \
+		drawn = ui_frame(&cv, 0, t += 20000000); \
+	} \
+} while (0)
+
+	ui_set_handler(pg_handler);
+	ui_reset(&romlist_page, t);
+	pg_nacts = 0;
+	PRESS(JOY_BIT(SELECT), 1);
+	CHECK(ui_top() == &settings_page && drawn && pg_nacts == 1 &&
+	      pg_acts[0] == UI_PUSH && pg_from == &romlist_page,
+	      "pages: SELECT opens the settings (%s)", ui_top()->name);
+	PRESS(JOY_BIT(DOWN), 6);
+	PRESS(JOY_BIT(A), 1);
+	CHECK(ui_top() == &sysinfo_page && !ui_in_game(),
+	      "pages: settings to system info (%s)", ui_top()->name);
+	PRESS(hot, 1);
+	CHECK(ui_top() == &sysinfo_page, "pages: no game to resume");
+	PRESS(JOY_BIT(B), 1);
+	CHECK(ui_top() == &settings_page && pg_acts[pg_nacts - 1] == UI_BACK &&
+	      pg_from == &sysinfo_page, "pages: B back to the settings");
+	PRESS(JOY_BIT(B), 1);
+	CHECK(ui_top() == &romlist_page && drawn &&
+	      pg_acts[pg_nacts - 1] == UI_BACK && pg_from == &settings_page,
+	      "pages: B back to the ROM list (%s)", ui_top()->name);
+
+	ig_open("Game");
+	ui_reset(&game, t);
+	PRESS(hot, 1);
+	CHECK(ui_top() == &ingame_page && drawn && ui_in_game(),
+	      "pages: SELECT+START opens the in-game menu (%s)",
+	      ui_top()->name);
+	PRESS(JOY_BIT(DOWN), 7);
+	PRESS(JOY_BIT(A), 1);
+	CHECK(ui_top() == &game_settings_page && drawn,
+	      "pages: in-game settings (%s)", ui_top()->name);
+	PRESS(JOY_BIT(B), 1);
+	CHECK(ui_top() == &ingame_page, "pages: B back to the in-game menu");
+	pg_nacts = 0;
+	PRESS(JOY_BIT(B), 1);
+	CHECK(ui_top() == &game && !drawn && pg_nacts == 1 &&
+	      pg_acts[0] == UI_RESUME && pg_from == &ingame_page,
+	      "pages: B resumes (%s)", ui_top()->name);
+	PRESS(hot, 1);
+	PRESS(JOY_BIT(DOWN), 7);
+	PRESS(JOY_BIT(A), 1);
+	PRESS(hot, 1);
+	CHECK(ui_top() == &game && pg_acts[pg_nacts - 1] == UI_RESUME &&
+	      pg_from == &game_settings_page,
+	      "pages: SELECT+START resumes from the in-game settings (%s)",
+	      ui_top()->name);
+	PRESS(hot, 1);
+	PRESS(JOY_BIT(DOWN), 8);
+	PRESS(JOY_BIT(A), 1);
+	CHECK(ui_top() == &sysinfo_page, "pages: in-game system info");
+	PRESS(hot, 1);
+	CHECK(ui_top() == &game && pg_from == &sysinfo_page,
+	      "pages: SELECT+START resumes from system info (%s)",
+	      ui_top()->name);
+#undef PRESS
+	ui_set_handler(NULL);
 }
 
 /* Per boot log directories: numbered, the newest 20 kept. */
@@ -2487,6 +2641,7 @@ int selftest(const char *dir)
 	test_ui(dir);
 	test_sysinfo(dir);
 	test_clock(dir);
+	test_pages();
 	log_msg("selftest: %s (%d failures)", failures ? "FAILED" : "passed",
 		failures);
 	return failures ? 1 : 0;
@@ -2655,19 +2810,19 @@ static void menu_restart_with(const char *rom)
 		CHECK(0, "restart with: %s", err);
 		return;
 	}
-	ingame_menu_enter("Game");
+	ig_open("Game");
 	for (int i = 0; i < 5; i++)
-		ingame_menu_update(JOY_BIT(DOWN));
-	ingame_menu_update(JOY_BIT(RIGHT));
+		ig_key(JOY_BIT(DOWN));
+	ig_key(JOY_BIT(RIGHT));
 	CHECK(rom_settings.core == CORE_MGBA, "restart with: core picked");
-	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_NONE,
+	CHECK(ig_key(JOY_BIT(A)) == UI_NONE,
 	      "restart with: first A arms");
-	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_RESTART,
+	CHECK(ig_key(JOY_BIT(A)) == UI_RESTART,
 	      "restart with: second A confirms");
-	ingame_menu_update(JOY_BIT(A));
-	ingame_menu_update(JOY_BIT(RIGHT));
-	ingame_menu_update(JOY_BIT(RIGHT));
-	act = ingame_menu_update(JOY_BIT(A));
+	ig_key(JOY_BIT(A));
+	ig_key(JOY_BIT(RIGHT));
+	ig_key(JOY_BIT(RIGHT));
+	act = ig_key(JOY_BIT(A));
 	CHECK(rom_settings.core == CORE_MGBA && act == UI_NONE,
 	      "restart with: changing the core cancels");
 	core_unload();

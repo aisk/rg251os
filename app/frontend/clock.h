@@ -7,6 +7,7 @@
 #include <time.h>
 
 #include "draw.h"
+#include "ui.h"
 
 /* Years the page offers; the RK817 keeps two BCD digits from 2000. */
 #define CLOCK_YEAR_MIN 2024
@@ -26,11 +27,9 @@ void clock_boot_log(void);
 int clock_set(const struct tm *tm, char *msg, size_t size);
 int clock_days_in_month(int year, int month);  /* month 1..12 */
 
-/* The Date & time page (from the ROM list's settings). */
-void datetime_enter(void);
-/* UI_BACK after a save that worked or on B; a failed save stays. */
-int datetime_update(uint32_t pressed);
-void datetime_draw(struct canvas *c);
+/* The Date & time page (from the ROM list's settings): back after a
+ * save that worked or on B, a failed save stays. */
+extern const struct page datetime_page;
 /* For tests: the time as edited, the selected field (0 year .. 4
  * minute) and the message ("" when none). */
 void datetime_value(struct tm *tm);

@@ -30,12 +30,9 @@ long sysinfo_meminfo_kb(const char *text, const char *key);
 
 /* Where /proc and /sys are, "" on the device; a fake tree for tests. */
 void sysinfo_set_root(const char *root);
-/* Opens the page: first sample (CPU usage since boot until the next one)
- * and the values logged, with the sensors found. from names the screen
- * it was opened from, for the log. */
-void sysinfo_enter(const char *from, int64_t now);
-/* Refreshes about once per second; returns UI_BACK on B. */
-int sysinfo_update(uint32_t pressed, int64_t now);
-void sysinfo_draw(struct canvas *c);
+/* The page: entering takes the first sample (CPU usage since boot until
+ * the next one) and logs the values with the sensors found and the page
+ * it was opened from; refreshed about once per second, B goes back. */
+extern const struct page sysinfo_page;
 
 #endif

@@ -298,7 +298,7 @@ static void log_values(const char *from)
 		si.data_free >> 20, si.data_size >> 20, si.kernel);
 }
 
-void sysinfo_enter(const char *from, int64_t now)
+static void sysinfo_enter(const char *from, int64_t now)
 {
 	struct utsname u;
 
@@ -311,15 +311,15 @@ void sysinfo_enter(const char *from, int64_t now)
 	si.next = now + REFRESH_NS;
 }
 
-int sysinfo_update(uint32_t pressed, int64_t now)
+static struct ui_result sysinfo_update(uint32_t pressed, int64_t now)
 {
 	if (pressed & JOY_BIT(B))
-		return UI_BACK;
+		return UI_ACT(UI_BACK);
 	if (now >= si.next) {
 		sample();
 		si.next = now + REFRESH_NS;
 	}
-	return UI_NONE;
+	return UI_STAY;
 }
 
 /* Label in the left column, value from VAL_X. */
@@ -362,7 +362,7 @@ static const char *const bat_status[] = {
 	"", "Discharging", "Charging", "Full", "Not charging",
 };
 
-void sysinfo_draw(struct canvas *c)
+static void sysinfo_draw(struct canvas *c, const struct game_view *g)
 {
 	char v[64], mode[16], items[MAX_TEMPS > SYSINFO_MAX_CPUS ?
 				    MAX_TEMPS : SYSINFO_MAX_CPUS][28];
@@ -370,6 +370,7 @@ void sysinfo_draw(struct canvas *c)
 	int64_t up = boot_ms() / 1000;
 	struct tm tm;
 
+	(void)g;
 	draw_fill(c, 0, 0, c->w, c->h, COL_BG);
 	draw_text(c, 8, HEAD_Y, COL_HI, "System info");
 	draw_fill(c, 0, HEAD_LINE_Y, c->w, 2, COL_SEL);
@@ -445,3 +446,7 @@ void sysinfo_draw(struct canvas *c)
 	draw_text(c, c->w - 8 - draw_text_width("B:back"), HEAD_Y, COL_DIM,
 		  "B:back");
 }
+
+const struct page sysinfo_page = {
+	"system info", sysinfo_enter, sysinfo_update, sysinfo_draw, 0,
+};

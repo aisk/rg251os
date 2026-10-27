@@ -1,10 +1,10 @@
 /*
  * frontend: the RG351P GBA frontend, running as PID 1 (/sbin/init). This
- * file has startup, the main loop and the screens' state machine; the
- * work is in the modules (sys.c mounts and system helpers, display.c KMS,
- * input.c evdev and the power key timing, audio.c ALSA, core.c the
- * libretro cores, menu.c the ROM list and menus, settings.c, sleep.c,
- * cpuctl.c, sdgrow.c, clock.c, sysinfo.c).
+ * file has startup, the main loop and the game's lifecycle; the work is
+ * in the modules (sys.c mounts and system helpers, display.c KMS, input.c
+ * evdev and the power key timing, audio.c ALSA, core.c the libretro
+ * cores, ui.c the page stack, menu.c the ROM list and menus, settings.c,
+ * sleep.c, cpuctl.c, sdgrow.c, clock.c, sysinfo.c).
  *
  * Startup: proc/sys/dev mounts, the first boot's partition grow
  * (sdgrow.c, with its messages on screen), the GBA partition mounted and
@@ -16,13 +16,16 @@
  * back buffer, so emulation runs at the panel's 60.02 Hz and audio is
  * resampled to match (audio.c).
  *
- * Screens: ROM list, game, in-game menu (SELECT+START, the RG351P has no
- * menu button), settings (SELECT in the ROM list, or from the in-game
- * menu), system info, date and time, the fatal error screen and the
- * power off message. A game ends by Quit to ROM list, Restart with
- * another core or power off: its save and resume state are written
- * (core_state_save) before the core is unloaded; Restart game resets the
- * core in the same session; a fatal error writes no state.
+ * Screens are pages on ui.c's stack, which frame() runs once per vblank:
+ * ROM list, game, in-game menu (SELECT+START, the RG351P has no menu
+ * button), settings (SELECT in the ROM list, or from the in-game menu),
+ * system info, date and time, the fatal error screen and the power off
+ * message. The game, error and power off pages are here, and on_ui does
+ * what the pages ask for: start a game, resume, quit, restart, power off.
+ * A game ends by Quit to ROM list, Restart with another core or power
+ * off: its save and resume state are written (core_state_save) before the
+ * core is unloaded; Restart game resets the core in the same session; a
+ * fatal error writes no state.
  *
  * Power key (timing in input.c): a short press sleeps (do_sleep: game
  * paused, save and state written, audio closed, backlight and panel off,
@@ -89,8 +92,8 @@
 #include "settings.h"
 #include "sleep.h"
 #include "sysinfo.h"
+#include "ui.h"
 
-#define HOTKEY (JOY_BIT(SELECT) | JOY_BIT(START))
 #define PERF_INTERVAL_NS (10 * 1000000000LL)
 #define MAX_POLL 24
 #define HEADLESS_HZ 60.0186
@@ -99,28 +102,20 @@
 int selftest(const char *dir);
 int selftest_core_switch(const char *data, long frames);
 
-enum state {
-	ST_ROMLIST, ST_GAME, ST_MENU, ST_SETTINGS, ST_FATAL, ST_POWEROFF,
-	ST_SYSINFO, ST_DATETIME
-};
+static const struct page game_page, fatal_page, poweroff_page;
 
 static struct {
-	enum state st;
 	uint16_t canvas_px[CANVAS_W * CANVAS_H];
 	struct canvas cv;
 	char rom_path[512];
 	char rom_name[128];
 	struct rom_id rom_id;  /* the game's name and database entry */
-	uint32_t suppress;     /* held buttons hidden until released */
-	uint32_t prev;
 	int led_green, led_red;
 	int dumped5, dumped20;
 	int64_t poweroff_at;
 	int64_t next_rescan, next_drm_try, next_blink, next_perf;
 	int blink;
 	char fatal_title[64], fatal_msg[256];
-	enum state settings_from;  /* ST_ROMLIST or ST_MENU */
-	enum state sysinfo_from;   /* ST_SETTINGS or ST_MENU */
 	/* As last loaded or saved, to save only what changed. */
 	struct settings saved;
 	struct rom_settings saved_rom;
@@ -152,7 +147,7 @@ static void request_poweroff(const char *why)
 	if (m.poweroff_at)
 		return;
 	log_msg("power off: %s", why);
-	m.st = ST_POWEROFF;
+	ui_reset(&poweroff_page, now_ns());
 	/* Leave time for one frame with the message. */
 	m.poweroff_at = now_ns() + 150000000LL;
 }
@@ -161,9 +156,9 @@ static void power_action(int act)
 {
 	switch (act) {
 	case PWR_SHORT:
-		if (m.st == ST_FATAL) {
+		if (ui_top() == &fatal_page) {
 			request_poweroff("power key on the error screen");
-		} else if (m.st != ST_POWEROFF && !m.sleep_req) {
+		} else if (ui_top() != &poweroff_page && !m.sleep_req) {
 			log_msg("power key: short press, going to sleep");
 			m.sleep_req = 1;
 		}
@@ -201,7 +196,7 @@ void on_jack(int inserted)
 	audio_jack(inserted);
 }
 
-/* -------------------------------------------------------------- states */
+/* --------------------------------------------------------- the game */
 
 static void save_settings(void)
 {
@@ -253,7 +248,7 @@ static void fatal(const char *title, const char *msg)
 	log_msg("FATAL: %s: %s", title, msg);
 	log_sync();
 	end_game("fatal");
-	m.st = ST_FATAL;
+	ui_reset(&fatal_page, now_ns());
 }
 
 static void do_poweroff(void)
@@ -298,6 +293,7 @@ static void start_game(const char *path)
 	rom_settings_load(m.rom_name);
 	m.saved_rom = rom_settings;
 	identify_game(path);
+	ingame_menu_set_name(m.rom_id.title);
 	log_msg("starting %s with %s", path, core_names[rom_settings.core]);
 	if (core_load(path, rom_settings.core, err, sizeof(err))) {
 		rom_settings_load(NULL);
@@ -312,8 +308,8 @@ static void start_game(const char *path)
 	m.game_frames = 0;
 	fx_update();
 	cpuctl_game_start(m.rom_name, hz, rom_settings.cpu_start, now_ns());
-	m.st = ST_GAME;
-	m.suppress = input_buttons();
+	ui_reset(&game_page, now_ns());
+	ui_suppress(input_buttons());
 	display_take_missed();
 	m.next_perf = now_ns() + PERF_INTERVAL_NS;
 	log_sync();
@@ -326,9 +322,8 @@ static void quit_game(void)
 	rom_settings_load(NULL);
 	m.saved_rom = rom_settings;
 	fx_update();
-	romlist_menu_enter();
-	m.st = ST_ROMLIST;
-	m.suppress = input_buttons();
+	ui_reset(&romlist_page, now_ns());
+	ui_suppress(input_buttons());
 	log_sync();
 }
 
@@ -343,30 +338,27 @@ static void restart_game(void)
 	end_game("restart");
 	save_settings();
 	start_game(path);
-	if (m.st != ST_GAME) {
-		romlist_menu_enter();
-		m.st = ST_ROMLIST;
-		m.suppress = input_buttons();
+	if (ui_top() != &game_page) {
+		ui_reset(&romlist_page, now_ns());
+		ui_suppress(input_buttons());
 	}
 }
 
-static void open_menu(uint32_t buttons)
+/* SELECT+START in game: paused under the in-game menu. */
+static struct ui_result open_menu(void)
 {
 	audio_pause();
 	cpuctl_game_pause();
 	core_save_sync();
-	ingame_menu_enter(m.rom_id.title);
-	m.suppress = buttons;
-	m.st = ST_MENU;
 	log_msg("in-game menu");
 	log_sync();
+	return UI_OPEN(&ingame_page);
 }
 
-static void resume_game(uint32_t buttons)
+/* Back into the game (the pages over it already closed). */
+static void resume_game(void)
 {
 	save_settings();
-	m.suppress = buttons;
-	m.st = ST_GAME;
 	display_take_missed();
 	cpuctl_game_resume();
 }
@@ -379,49 +371,19 @@ static void resume_game(uint32_t buttons)
  * so it is the same session: no new game number, its statistics and
  * perf.csv row run on until the game ends.
  */
-static void reset_game(uint32_t buttons)
+static void reset_game(void)
 {
 	log_msg("restart: %s from the beginning (%s), same session",
 		m.rom_name, core_labels[core_info()->core]);
 	core_reset();
-	resume_game(buttons);
+	ui_to_game();
+	resume_game();
 	log_sync();
-}
-
-static void open_settings(uint32_t buttons)
-{
-	m.settings_from = m.st;
-	settings_menu_enter(m.st == ST_MENU);
-	m.suppress = buttons;
-	m.st = ST_SETTINGS;
-}
-
-static void close_settings(uint32_t buttons)
-{
-	if (m.settings_from == ST_ROMLIST)
-		save_settings();
-	m.suppress = buttons;
-	m.st = m.settings_from;
 }
 
 /* -------------------------------------------------------------- sleep */
 
 static void perf_report(void);
-
-static const char *const state_names[] = {
-	"ROM list", "game", "in-game menu", "settings", "error screen",
-	"power off", "system info", "date & time",
-};
-
-/* From the ROM list's settings or the in-game menu (the game stays
- * paused); B goes back there. */
-static void open_sysinfo(uint32_t buttons, int64_t now)
-{
-	m.sysinfo_from = m.st;
-	sysinfo_enter(state_names[m.st], now);
-	m.suppress = buttons;
-	m.st = ST_SYSINFO;
-}
 
 /* Blocks until the power key goes down (or, in the headless test, after
  * a simulated press). */
@@ -470,13 +432,13 @@ static void do_sleep(void)
 	char bat[96], marker[48];
 	struct sleep_result r;
 	struct battery b;
-	int in_game = m.st == ST_GAME, light;
+	int in_game = ui_top() == &game_page, light;
 	int64_t t0 = boot_ms(), t1;
 
 	m.sleeps++;
 	snprintf(marker, sizeof(marker), "frontend: sleep #%u: entering", m.sleeps);
 	log_msg("sleep #%u: entering from %s at %lld ms", m.sleeps,
-		state_names[m.st], (long long)t0);
+		ui_top()->name, (long long)t0);
 	if (in_game) {
 		cpuctl_game_pause();
 		perf_report();
@@ -527,25 +489,17 @@ static void do_sleep(void)
 	}
 	display_resync();
 	display_take_missed();
-	m.suppress = input_buttons();
-	m.prev = m.suppress;
+	ui_suppress(input_buttons());
 	m.wake_frames = display_frames();
 	m.wake_pending = display_ready();
 	log_msg("sleep #%u: awake (%s), %lld ms since entering, restored in "
 		"%lld ms, back to %s", m.sleeps,
 		light ? "light sleep" : r.method, (long long)(boot_ms() - t0),
-		(long long)(boot_ms() - t1), state_names[m.st]);
+		(long long)(boot_ms() - t1), ui_top()->name);
 	log_sync();
 }
 
 /* ------------------------------------------------------------- frames */
-
-/* SELECT+START (one of them newly pressed), or Esc/F1 on a keyboard. */
-static int menu_hotkey(uint32_t buttons)
-{
-	return ((buttons & HOTKEY) == HOTKEY && (~m.prev & HOTKEY)) ||
-	       ((buttons & BTN_BIT_MENU) && !(m.prev & BTN_BIT_MENU));
-}
 
 /* Every PERF_INTERVAL_NS in game and before sleeping: the audio counters,
  * and with debug logging the perf line. */
@@ -616,7 +570,9 @@ static void blit_canvas(void)
 	display_present();
 }
 
-static void game_frame(uint32_t buttons, int64_t now)
+/* The game page: one frame emulated with the held buttons and shown,
+ * or the in-game menu opened. */
+static struct ui_result game_update(uint32_t held, int64_t now)
 {
 	const struct display_info *di = display_info();
 	const uint16_t *fr;
@@ -625,12 +581,10 @@ static void game_frame(uint32_t buttons, int64_t now)
 	unsigned missed;
 	uint16_t *dst;
 
-	if (menu_hotkey(buttons)) {
-		open_menu(buttons);
-		return;
-	}
+	if (ui_hotkey())
+		return open_menu();
 	t0 = now_ns();
-	emulate(buttons & ~m.suppress & 0xffff);
+	emulate(held & 0xffff);
 	t2 = now_ns();
 
 	fr = core_frame(&fw, &fh, &fp);
@@ -666,152 +620,64 @@ static void game_frame(uint32_t buttons, int64_t now)
 		snprintf(name, sizeof(name), "dmesg-game%u-30s.txt", m.games);
 		klog_dump_async(name);
 	}
+	return UI_STAY;
+}
+
+static void fatal_draw(struct canvas *c, const struct game_view *g)
+{
+	(void)g;
+	message_draw(c, m.fatal_title, m.fatal_msg, COL_ERR);
+}
+
+static void poweroff_draw(struct canvas *c, const struct game_view *g)
+{
+	(void)g;
+	message_draw(c, "Powering off", "Saving...", COL_HI);
+}
+
+static const struct page game_page = { "game", NULL, game_update, NULL, 1 };
+static const struct page fatal_page = {
+	"error screen", NULL, NULL, fatal_draw, 0,
+};
+static const struct page poweroff_page = {
+	"power off", NULL, NULL, poweroff_draw, 0,
+};
+
+/* What the pages ask main.c for; the stack is already changed. */
+static void on_ui(enum ui_action act, const struct page *from)
+{
+	switch (act) {
+	case UI_BACK:
+		if (from == &settings_page)
+			save_settings();
+		break;
+	case UI_START_ROM:
+		start_game(romlist_menu_rom());
+		break;
+	case UI_RESUME:
+		resume_game();
+		break;
+	case UI_QUIT:
+		quit_game();
+		break;
+	case UI_RESTART:
+		restart_game();
+		break;
+	case UI_RESET:
+		reset_game();
+		break;
+	case UI_POWEROFF:
+		request_poweroff(from->name);
+		break;
+	default:
+		break;
+	}
 }
 
 static void frame(int64_t now)
 {
-	uint32_t buttons = input_buttons(), pressed;
-	const uint16_t *fr;
-	int fw, fh, fp;
-	char path[512];
-
-	m.suppress &= buttons;
-	switch (m.st) {
-	case ST_GAME:
-		game_frame(buttons, now);
-		break;
-	case ST_ROMLIST:
-		pressed = ui_repeat(buttons & ~m.suppress, now);
-		switch (romlist_menu_update(pressed, path, sizeof(path))) {
-		case UI_START_ROM:
-			start_game(path);
-			break;
-		case UI_SETTINGS:
-			open_settings(buttons);
-			break;
-		}
-		if (m.st == ST_ROMLIST) {
-			romlist_menu_draw(&m.cv);
-			blit_canvas();
-		}
-		break;
-	case ST_MENU:
-		pressed = ui_repeat(buttons & ~m.suppress, now);
-		if (menu_hotkey(buttons)) {
-			resume_game(buttons);
-			break;
-		}
-		switch (ingame_menu_update(pressed)) {
-		case UI_RESUME:
-			resume_game(buttons);
-			break;
-		case UI_SETTINGS:
-			open_settings(buttons);
-			break;
-		case UI_SYSINFO:
-			open_sysinfo(buttons, now);
-			break;
-		case UI_QUIT:
-			quit_game();
-			break;
-		case UI_RESTART:
-			restart_game();
-			break;
-		case UI_RESET:
-			reset_game(buttons);
-			break;
-		case UI_POWEROFF:
-			request_poweroff("in-game menu");
-			break;
-		}
-		if (m.st != ST_MENU)
-			break;
-		fr = core_frame(&fw, &fh, &fp);
-		ingame_menu_draw(&m.cv, fr, fp, fw, fh);
+	if (ui_frame(&m.cv, input_buttons(), now))
 		blit_canvas();
-		break;
-	case ST_SETTINGS:
-		pressed = ui_repeat(buttons & ~m.suppress, now);
-		if (m.settings_from == ST_MENU && menu_hotkey(buttons)) {
-			resume_game(buttons);
-			break;
-		}
-		switch (settings_menu_update(pressed)) {
-		case UI_BACK:
-			close_settings(buttons);
-			break;
-		case UI_SYSINFO:
-			open_sysinfo(buttons, now);
-			break;
-		case UI_DATETIME:
-			/* Only in the ROM list's settings: no game behind. */
-			datetime_enter();
-			m.suppress = buttons;
-			m.st = ST_DATETIME;
-			break;
-		case UI_POWEROFF:
-			request_poweroff("settings");
-			break;
-		}
-		if (m.st == ST_POWEROFF)
-			break;
-		fr = NULL;
-		fw = fh = fp = 0;
-		if (m.settings_from == ST_MENU)
-			fr = core_frame(&fw, &fh, &fp);
-		if (m.st == ST_SYSINFO)
-			sysinfo_draw(&m.cv);
-		else if (m.st == ST_DATETIME)
-			datetime_draw(&m.cv);
-		else if (m.st == ST_SETTINGS)
-			settings_menu_draw(&m.cv, fr, fp, fw, fh);
-		else if (m.st == ST_MENU)
-			ingame_menu_draw(&m.cv, fr, fp, fw, fh);
-		else
-			romlist_menu_draw(&m.cv);
-		blit_canvas();
-		break;
-	case ST_SYSINFO:
-		pressed = ui_repeat(buttons & ~m.suppress, now);
-		if (m.sysinfo_from == ST_MENU && menu_hotkey(buttons)) {
-			resume_game(buttons);
-			break;
-		}
-		if (sysinfo_update(pressed, now) == UI_BACK) {
-			m.suppress = buttons;
-			m.st = m.sysinfo_from;
-		}
-		if (m.st == ST_SYSINFO) {
-			sysinfo_draw(&m.cv);
-		} else if (m.st == ST_MENU) {
-			fr = core_frame(&fw, &fh, &fp);
-			ingame_menu_draw(&m.cv, fr, fp, fw, fh);
-		} else {
-			settings_menu_draw(&m.cv, NULL, 0, 0, 0);
-		}
-		blit_canvas();
-		break;
-	case ST_DATETIME:
-		pressed = ui_repeat(buttons & ~m.suppress, now);
-		if (datetime_update(pressed) == UI_BACK) {
-			m.suppress = buttons;
-			m.st = ST_SETTINGS;
-			settings_menu_draw(&m.cv, NULL, 0, 0, 0);
-		} else {
-			datetime_draw(&m.cv);
-		}
-		blit_canvas();
-		break;
-	case ST_FATAL:
-		message_draw(&m.cv, m.fatal_title, m.fatal_msg, COL_ERR);
-		blit_canvas();
-		break;
-	case ST_POWEROFF:
-		message_draw(&m.cv, "Powering off", "Saving...", COL_HI);
-		blit_canvas();
-		break;
-	}
-	m.prev = buttons;
 }
 
 /* --------------------------------------------------------------- setup */
@@ -861,6 +727,7 @@ static void startup(void)
 	unsigned boot;
 
 	m.cv.px = m.canvas_px;
+	ui_set_handler(on_ui);
 	sys_early_init();
 	led_set_red(1);
 	uname(&u);
@@ -898,10 +765,8 @@ static void startup(void)
 		m.next_drm_try = now_ns() + 200000000LL;
 	input_init();
 	audio_init();
-	if (m.st != ST_FATAL) {
-		romlist_menu_enter();
-		m.st = ST_ROMLIST;
-	}
+	if (ui_top() != &fatal_page)
+		ui_reset(&romlist_page, now_ns());
 	log_msg("startup done at %lld ms", (long long)boot_ms());
 	log_sync();
 }
@@ -934,7 +799,7 @@ static void timers(int64_t now)
 	if (!display_ready() && now >= m.next_drm_try) {
 		if (display_init()) {
 			m.next_drm_try = now + 200000000LL;
-			if (up > 15000 && m.st != ST_FATAL)
+			if (up > 15000 && ui_top() != &fatal_page)
 				fatal("No display", "The DRM device did not come up.");
 		}
 	}
@@ -944,13 +809,14 @@ static void timers(int64_t now)
 		m.next_rescan = now + 2000000000LL;
 	}
 	battery_poll(now);
-	if (!m.led_green && m.st != ST_FATAL && display_frames() > 0) {
+	if (!m.led_green && ui_top() != &fatal_page && display_frames() > 0) {
 		log_msg("up: first frame shown at %lld ms", (long long)up);
 		log_sync();
 		led_set_red(0);
 		m.led_green = 1;
 	}
-	if (m.led_green && m.st != ST_FATAL && m.st != ST_POWEROFF) {
+	if (m.led_green && ui_top() != &fatal_page &&
+	    ui_top() != &poweroff_page) {
 		/* Low battery: a 250 ms red flash every 2 s. */
 		int red = battery_low() && now / 1000000 % 2000 < 250;
 
@@ -959,7 +825,7 @@ static void timers(int64_t now)
 			m.led_red = red;
 		}
 	}
-	if (m.st == ST_FATAL && now >= m.next_blink) {
+	if (ui_top() == &fatal_page && now >= m.next_blink) {
 		m.blink ^= 1;
 		led_set_red(m.blink);
 		m.next_blink = now + 500000000LL;
@@ -1014,7 +880,8 @@ static void run(void)
  * also sleeps after frame N, through a fake /sys/power that cannot
  * suspend, so the fallback light sleep and the wake path run (the light
  * sleep wakes itself with a simulated power key press). FE_RESET_AT=N
- * opens the in-game menu after frame N and confirms Restart game. The
+ * opens the in-game menu after frame N and confirms Restart game, with
+ * key presses through the page stack (ui_frame). The
  * resume state is loaded like on a start (core_load) and written at the
  * end like on a quit.
  */
@@ -1061,7 +928,9 @@ static int headless(const char *data, const char *rom, long frames)
 	cpuctl_game_start(base, HEADLESS_HZ, rom_settings.cpu_start, 0);
 	m.saved = settings;
 	m.saved_rom = rom_settings;
-	m.st = ST_GAME;
+	m.cv.px = m.canvas_px;
+	ui_set_handler(on_ui);
+	ui_reset(&game_page, 0);
 	if (sleep_at >= 0) {
 		snprintf(power, sizeof(power), "%s/fake-power", fe_data_dir);
 		sleep_fake_sysfs(power);
@@ -1098,18 +967,19 @@ static int headless(const char *data, const char *rom, long frames)
 				"FAILED: sleep requested again" : "no new sleep request");
 		}
 		if (i == reset_at) {
-			/* The menu, then Restart game: down, A, A. */
-			int act = UI_NONE;
+			/* Through the pages: SELECT+START, then Restart game
+			 * (down, A, A), each press released for a frame. */
+			static const uint32_t keys[] = {
+				JOY_BIT(SELECT) | JOY_BIT(START), JOY_BIT(DOWN),
+				JOY_BIT(A), JOY_BIT(A),
+			};
 
-			open_menu(0);
-			ingame_menu_update(JOY_BIT(DOWN));
-			ingame_menu_update(JOY_BIT(A));
-			for (int k = 0; k < 10 && act == UI_NONE; k++)
-				act = ingame_menu_update(k == 9 ? JOY_BIT(A) : 0);
-			if (act == UI_RESET)
-				reset_game(0);
+			for (size_t k = 0; k < 2 * ARRAY_SIZE(keys) &&
+			     (!k || ui_top() != &game_page); k++)
+				ui_frame(&m.cv, k % 2 ? 0 : keys[k / 2],
+					 now_ns());
 			log_msg("headless: restart at frame %ld %s", i,
-				m.st == ST_GAME ? "done" : "FAILED");
+				ui_top() == &game_page ? "done" : "FAILED");
 		}
 		if (i % 600 == 599) {
 			perf_report();

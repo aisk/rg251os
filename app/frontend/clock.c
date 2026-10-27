@@ -275,12 +275,14 @@ static void field_step(int f, int d)
 	day_clamp();
 }
 
-void datetime_enter(void)
+static void datetime_enter(const char *from, int64_t now)
 {
 	struct tm tm;
 	char buf[24];
 	int valid = realtime_utc(&tm);
 
+	(void)from;
+	(void)now;
 	if (!valid || tm.tm_year + 1900 > CLOCK_YEAR_MAX) {
 		memset(&tm, 0, sizeof(tm));
 		tm.tm_year = CLOCK_YEAR_MIN - 1900;
@@ -319,13 +321,14 @@ const char *datetime_message(void)
 	return dt.msg;
 }
 
-int datetime_update(uint32_t pressed)
+static struct ui_result datetime_update(uint32_t pressed, int64_t now)
 {
 	struct tm tm;
 
+	(void)now;
 	if (pressed & JOY_BIT(B)) {
 		log_msg("clock: date & time page closed without saving");
-		return UI_BACK;
+		return UI_ACT(UI_BACK);
 	}
 	if (pressed & (JOY_BIT(LEFT) | JOY_BIT(RIGHT) | JOY_BIT(UP) |
 		       JOY_BIT(DOWN)))
@@ -341,12 +344,12 @@ int datetime_update(uint32_t pressed)
 	if (pressed & (JOY_BIT(A) | JOY_BIT(START))) {
 		datetime_value(&tm);
 		if (!clock_set(&tm, dt.msg, sizeof(dt.msg)))
-			return UI_BACK;
+			return UI_ACT(UI_BACK);
 	}
-	return UI_NONE;
+	return UI_STAY;
 }
 
-void datetime_draw(struct canvas *c)
+static void datetime_draw(struct canvas *c, const struct game_view *g)
 {
 	/* Column and width of each field in "YYYY-MM-DD HH:MM", drawn
 	 * DT_SCALE times as large, cw px a column. */
@@ -360,6 +363,7 @@ void datetime_draw(struct canvas *c)
 	const char *p;
 	int ly = DT_MSG_Y;
 
+	(void)g;
 	draw_fill(c, 0, 0, c->w, c->h, COL_BG);
 	draw_text(c, 8, HEAD_Y, COL_HI, "Date & time");
 	draw_fill(c, 0, HEAD_LINE_Y, c->w, 2, COL_SEL);
@@ -391,3 +395,7 @@ void datetime_draw(struct canvas *c)
 	}
 	draw_text(c, 8, FOOT_Y, COL_DIM, "A:save B:cancel <>:field");
 }
+
+const struct page datetime_page = {
+	"date & time", datetime_enter, datetime_update, datetime_draw, 0,
+};

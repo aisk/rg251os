@@ -50,6 +50,7 @@
 
 #include "audio.h"
 #include "battery.h"
+#include "clock.h"
 #include "core.h"
 #include "cpuctl.h"
 #include "fe.h"
@@ -58,6 +59,7 @@
 #include "menu.h"
 #include "romlist.h"
 #include "settings.h"
+#include "sysinfo.h"
 
 #define COL_OFF RGB(0x50, 0x58, 0x68)
 /* An empty ROM list: the first line at EMPTY_Y, a blank line, then the
@@ -88,6 +90,7 @@ static int sel, top;
 /* The folder shown, relative to roms/: "" at the top, "a/b" inside. */
 static char cur_dir[ROMLIST_PATH];
 static char message[96];
+static char start_path[ROMLIST_PATH + 256];  /* UI_START_ROM */
 static struct marquee list_mq = { .sel = -1 };
 
 /*
@@ -111,24 +114,6 @@ static struct {
 	char name[ROMDB_NAME_MAX + 2];
 	struct marquee mq;
 } ig;
-
-uint32_t ui_repeat(uint32_t held, int64_t now)
-{
-	static uint32_t prev;
-	static int64_t next;
-	const uint32_t dirs = JOY_BIT(UP) | JOY_BIT(DOWN) | JOY_BIT(LEFT) |
-			      JOY_BIT(RIGHT);
-	uint32_t pressed = held & ~prev;
-
-	if (pressed & dirs)
-		next = now + 350000000LL;
-	else if ((held & dirs) && (held & dirs) == (prev & dirs) && now >= next) {
-		pressed |= held & dirs;
-		next = now + 70000000LL;
-	}
-	prev = held;
-	return pressed;
-}
 
 /* ------------------------------------------------------------- helpers */
 
@@ -254,11 +239,18 @@ static void list_open(const char *select, int dir, int fallback)
 			roms.count ? roms.roms[sel].file : "nothing");
 }
 
-void romlist_menu_enter(void)
+const char *romlist_menu_rom(void)
+{
+	return start_path;
+}
+
+static void romlist_menu_enter(const char *from, int64_t now)
 {
 	char name[256] = "";
 	int dir = 0;
 
+	(void)from;
+	(void)now;
 	/* The same folder and entry as before (a game started from it). */
 	if (roms.count) {
 		snprintf(name, sizeof(name), "%s", roms.roms[sel].file);
@@ -309,8 +301,9 @@ static void romlist_work(void)
 	list_scroll();
 }
 
-int romlist_menu_update(uint32_t pressed, char *path, size_t size)
+static struct ui_result romlist_menu_update(uint32_t pressed, int64_t now)
 {
+	(void)now;
 	romlist_work();
 	if (!roms.count)
 		pressed &= JOY_BIT(SELECT) | JOY_BIT(B);
@@ -326,28 +319,28 @@ int romlist_menu_update(uint32_t pressed, char *path, size_t size)
 	if (pressed & JOY_BIT(SELECT)) {
 		message[0] = 0;
 		list_mq.sel = -1;  /* not drawn meanwhile */
-		return UI_SETTINGS;
+		return UI_OPEN(&settings_page);
 	}
 	if ((pressed & JOY_BIT(B)) && cur_dir[0]) {
 		message[0] = 0;
 		folder_up();
-		return UI_NONE;
+		return UI_STAY;
 	}
 	if ((pressed & (JOY_BIT(A) | JOY_BIT(START))) && roms.roms[sel].dir) {
 		message[0] = 0;
 		folder_enter(roms.roms[sel].file);
-		return UI_NONE;
+		return UI_STAY;
 	}
 	if (pressed & (JOY_BIT(A) | JOY_BIT(START))) {
-		if (snprintf(path, size, "%s/%s", roms.dir, roms.roms[sel].file) >=
-		    (int)size) {
+		if (snprintf(start_path, sizeof(start_path), "%s/%s", roms.dir,
+			     roms.roms[sel].file) >= (int)sizeof(start_path)) {
 			romlist_menu_message("ROM path too long");
-			return UI_NONE;
+			return UI_STAY;
 		}
 		message[0] = 0;
-		return UI_START_ROM;
+		return UI_ACT(UI_START_ROM);
 	}
-	return UI_NONE;
+	return UI_STAY;
 }
 
 /* A name's length as shown, without a file name's ".gba". */
@@ -459,10 +452,11 @@ static void list_header(struct canvas *c)
 		draw_text(c, right + FONT_W, HEAD_Y, COL_DIM, pos);
 }
 
-void romlist_menu_draw(struct canvas *c)
+static void romlist_menu_draw(struct canvas *c, const struct game_view *g)
 {
 	const char *keys;
 
+	(void)g;
 	draw_fill(c, 0, 0, c->w, c->h, COL_BG);
 	list_header(c);
 	draw_fill(c, 0, HEAD_LINE_Y, c->w, 2, COL_SEL);
@@ -508,6 +502,11 @@ void romlist_menu_draw(struct canvas *c)
 	else
 		draw_text(c, 8, FOOT_Y, COL_DIM, keys);
 }
+
+const struct page romlist_page = {
+	"ROM list", romlist_menu_enter, romlist_menu_update, romlist_menu_draw,
+	0,
+};
 
 /* -------------------------------------------------------- confirmation */
 
@@ -579,18 +578,25 @@ static void blend_toggle(void)
 	core_options_changed();
 }
 
-void ingame_menu_enter(const char *rom_name)
+void ingame_menu_set_name(const char *rom_name)
 {
+	snprintf(ig.name, sizeof(ig.name), "%s", rom_name);
+}
+
+static void ingame_menu_enter(const char *from, int64_t now)
+{
+	(void)from;
+	(void)now;
 	ig.sel = 0;
 	ig.confirm.frames = 0;
-	snprintf(ig.name, sizeof(ig.name), "%s", rom_name);
 	ig.mq.sel = -1;
 }
 
-int ingame_menu_update(uint32_t pressed)
+static struct ui_result ingame_menu_update(uint32_t pressed, int64_t now)
 {
 	int d = 0;
 
+	(void)now;
 	if (pressed & JOY_BIT(UP))
 		ig.sel = (ig.sel + IG_COUNT - 1) % IG_COUNT;
 	if (pressed & JOY_BIT(DOWN))
@@ -601,7 +607,7 @@ int ingame_menu_update(uint32_t pressed)
 	if (pressed & JOY_BIT(RIGHT))
 		d = 1;
 	if (pressed & JOY_BIT(B))
-		return UI_RESUME;
+		return UI_ACT(UI_RESUME);
 
 	if (d && ig.sel == IG_VOLUME)
 		audio_volume_step(d);
@@ -619,37 +625,36 @@ int ingame_menu_update(uint32_t pressed)
 	if (pressed & (JOY_BIT(A) | JOY_BIT(START))) {
 		switch (ig.sel) {
 		case IG_RESUME:
-			return UI_RESUME;
+			return UI_ACT(UI_RESUME);
 		case IG_RESET:
 			if (confirm_press(&ig.confirm, IG_RESET))
-				return UI_RESET;
+				return UI_ACT(UI_RESET);
 			break;
 		case IG_CORE:
 			if (!core_pending())
 				core_step(1);
 			else if (confirm_press(&ig.confirm, IG_CORE))
-				return UI_RESTART;
+				return UI_ACT(UI_RESTART);
 			break;
 		case IG_BLEND:
 			blend_toggle();
 			break;
 		case IG_SETTINGS:
-			return UI_SETTINGS;
+			return UI_OPEN(&game_settings_page);
 		case IG_SYSINFO:
-			return UI_SYSINFO;
+			return UI_OPEN(&sysinfo_page);
 		case IG_QUIT:
-			return UI_QUIT;
+			return UI_ACT(UI_QUIT);
 		case IG_POWEROFF:
 			if (confirm_press(&ig.confirm, IG_POWEROFF))
-				return UI_POWEROFF;
+				return UI_ACT(UI_POWEROFF);
 			break;
 		}
 	}
-	return UI_NONE;
+	return UI_STAY;
 }
 
-void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
-		      int w, int h)
+static void ingame_menu_draw(struct canvas *c, const struct game_view *g)
 {
 	static const char *const items[IG_COUNT] = {
 		"Resume", "Restart game", "Volume", "Brightness", "CPU", "Core",
@@ -662,7 +667,7 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 	const int ny = by + (IG_HEAD_H - FONT_H) / 2;
 	int cols;
 
-	draw_image_dim(c, frame, pitch, w, h);
+	draw_image_dim(c, g->px, g->pitch, g->w, g->h);
 	draw_fill(c, bx, by, bw, IG_BOX_H, COL_BOX);
 	draw_frame(c, bx, by, bw, IG_BOX_H, COL_SEL);
 	/* The name in the columns left of the battery. */
@@ -709,6 +714,11 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 	}
 }
 
+const struct page ingame_page = {
+	"in-game menu", ingame_menu_enter, ingame_menu_update, ingame_menu_draw,
+	0,
+};
+
 /* ------------------------------------------------------------ settings */
 
 enum {
@@ -737,7 +747,7 @@ static struct {
 	struct confirm confirm;  /* row: the item */
 } st;
 
-void settings_menu_enter(int ingame)
+static void settings_menu_enter(int ingame)
 {
 	st.ingame = ingame;
 	st.items = ingame ? si_ingame : si_romlist;
@@ -787,35 +797,50 @@ static void settings_change(int item, int d)
 	fx_update();
 }
 
-int settings_menu_update(uint32_t pressed)
+static void settings_global_enter(const char *from, int64_t now)
+{
+	(void)from;
+	(void)now;
+	settings_menu_enter(0);
+}
+
+static void settings_game_enter(const char *from, int64_t now)
+{
+	(void)from;
+	(void)now;
+	settings_menu_enter(1);
+}
+
+static struct ui_result settings_menu_update(uint32_t pressed, int64_t now)
 {
 	int item = st.items[st.sel];
 
+	(void)now;
 	if (pressed & JOY_BIT(UP))
 		st.sel = (st.sel + st.count - 1) % st.count;
 	if (pressed & JOY_BIT(DOWN))
 		st.sel = (st.sel + 1) % st.count;
 	confirm_tick(&st.confirm, st.items[st.sel]);
 	if (pressed & JOY_BIT(B))
-		return UI_BACK;
+		return UI_ACT(UI_BACK);
 	if (pressed & JOY_BIT(LEFT))
 		settings_change(item, -1);
 	if (pressed & JOY_BIT(RIGHT))
 		settings_change(item, 1);
 	if (pressed & (JOY_BIT(A) | JOY_BIT(START))) {
 		if (item == SI_BACK)
-			return UI_BACK;
+			return UI_ACT(UI_BACK);
 		if (item == SI_SYSINFO)
-			return UI_SYSINFO;
+			return UI_OPEN(&sysinfo_page);
 		if (item == SI_DATETIME)
-			return UI_DATETIME;
+			return UI_OPEN(&datetime_page);
 		if (item == SI_POWEROFF && confirm_press(&st.confirm, item))
-			return UI_POWEROFF;
+			return UI_ACT(UI_POWEROFF);
 		if (item == SI_GRID || item == SI_COLOR || item == SI_AUDIO ||
 		    item == SI_DEBUG)
 			settings_change(item, 1);
 	}
-	return UI_NONE;
+	return UI_STAY;
 }
 
 static void settings_value(int item, char *buf, size_t size)
@@ -893,8 +918,7 @@ static void settings_rows(struct canvas *c, int x, int y, int w, int row_h)
 	}
 }
 
-void settings_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
-			int w, int h)
+static void settings_menu_draw(struct canvas *c, const struct game_view *g)
 {
 	const struct blit_fx *fx = fx_current();
 
@@ -902,9 +926,10 @@ void settings_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 		int ph = 2 * IG_PANEL_PAD + st.count * IG_ROW_H, py = c->h - ph;
 
 		draw_fill(c, 0, 0, c->w, c->h, 0);
-		if (frame)
-			draw_image_fx(c, (c->w - 2 * w) / 2, (c->h - 2 * h) / 2,
-				      frame, pitch, w, h, fx);
+		if (g->px)
+			draw_image_fx(c, (c->w - 2 * g->w) / 2,
+				      (c->h - 2 * g->h) / 2, g->px, g->pitch,
+				      g->w, g->h, fx);
 		draw_fill(c, 0, py, c->w, ph, COL_BOX);
 		draw_fill(c, 0, py, c->w, 2, COL_SEL);
 		settings_rows(c, 0, py + IG_PANEL_PAD + (IG_ROW_H - FONT_H) / 2,
@@ -918,6 +943,17 @@ void settings_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 	settings_rows(c, 0, LIST_Y, c->w, ROW_H);
 	draw_text(c, 8, FOOT_Y, COL_DIM, "B:back");
 }
+
+/* The ROM list's (global) settings and the in-game ones (over the game,
+ * with the effects applied as a live preview). */
+const struct page settings_page = {
+	"settings", settings_global_enter, settings_menu_update,
+	settings_menu_draw, 0,
+};
+const struct page game_settings_page = {
+	"in-game settings", settings_game_enter, settings_menu_update,
+	settings_menu_draw, 0,
+};
 
 void message_draw(struct canvas *c, const char *title, const char *body,
 		  uint16_t col)

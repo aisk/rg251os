@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "draw.h"
+#include "ui.h"
 
 /*
  * Layout of the menu screens (menu.c, sysinfo.c, clock.c), from the font
@@ -35,39 +36,21 @@
 #define IG_BOX_Y    ((CANVAS_H - IG_BOX_H) / 2)
 #define IG_BOX_H    (IG_HEAD_H + IG_ROWS * IG_ROW_H + IG_TAIL)
 
-enum ui_action {
-	UI_NONE,
-	UI_START_ROM,
-	UI_RESUME,
-	UI_QUIT,
-	UI_POWEROFF,  /* confirmed */
-	UI_SETTINGS,  /* open the settings screen */
-	UI_BACK,      /* leave the settings screen */
-	UI_RESTART,   /* restart the game with rom_settings.core (confirmed) */
-	UI_RESET,     /* start the game over (confirmed) */
-	UI_SYSINFO,   /* open the system info page (sysinfo.c) */
-	UI_DATETIME,  /* open the Date & time page (clock.c) */
-};
-
-/* Button edges with key repeat for the d-pad. */
-uint32_t ui_repeat(uint32_t held, int64_t now);
-
-void romlist_menu_enter(void);
-int romlist_menu_update(uint32_t pressed, char *path, size_t size);
-void romlist_menu_draw(struct canvas *c);
-void romlist_menu_message(const char *msg);
-
-void ingame_menu_enter(const char *rom_name);
-int ingame_menu_update(uint32_t pressed);
-void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
-		      int w, int h);
-
-/* Settings: global ones from the ROM list, grid and the game's color
+/* The menu pages (menu.c): the ROM list, the in-game menu, and the
+ * settings, global ones from the ROM list, grid and the game's color
  * correction in game (drawn over the game picture as a live preview). */
-void settings_menu_enter(int ingame);
-int settings_menu_update(uint32_t pressed);
-void settings_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
-			int w, int h);
+extern const struct page romlist_page;
+extern const struct page ingame_page;
+extern const struct page settings_page;
+extern const struct page game_settings_page;
+
+/* The ROM path after UI_START_ROM from the ROM list. */
+const char *romlist_menu_rom(void);
+/* A message (an error) in the ROM list's footer instead of the key
+ * hints until a key acts there, "" or NULL for none. */
+void romlist_menu_message(const char *msg);
+/* The game's name shown in the in-game menu. */
+void ingame_menu_set_name(const char *rom_name);
 
 /* A ROM name in cols columns: cut with "~" (" *" kept as "~*"),
  * or scrolled offset pixels to the left and clipped to the columns. */
