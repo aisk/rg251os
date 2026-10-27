@@ -7,6 +7,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -478,13 +479,17 @@ int write_attr(const char *dir, const char *name, const char *val)
  */
 int write_file_atomic(const char *path, const void *data, size_t len)
 {
-	char tmp[320], dir[320];
+	char tmp[PATH_MAX], dir[PATH_MAX];
 	const char *p = data;
 	size_t done = 0;
 	char *slash;
 	int fd, dfd;
 
-	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	/* A cut temp name would be renamed over the wrong file, or fail. */
+	if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp)) {
+		errno = ENAMETOOLONG;
+		goto fail;
+	}
 	fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
 	if (fd < 0)
 		goto fail;
@@ -530,7 +535,12 @@ fail_unlink:
 		errno = e;
 	}
 fail:
-	log_msg("write %s: %s", path, strerror(errno));
+	{
+		int e = errno;
+
+		log_msg("write %s: %s", path, strerror(e));
+		errno = e;
+	}
 	return -1;
 }
 

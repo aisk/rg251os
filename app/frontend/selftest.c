@@ -1200,6 +1200,15 @@ static void test_files(const char *base)
 	CHECK(read_file(path, back, sizeof(back)) == 512, "shrunk");
 	snprintf(path, sizeof(path), "%s/nodir/x.sav", base);
 	CHECK(write_file_atomic(path, data, 16) != 0, "write into missing dir");
+	{
+		/* No room for ".tmp": refused, not written to a cut name. */
+		static char lng[PATH_MAX];
+
+		memset(lng, 'a', sizeof(lng) - 3);
+		lng[0] = '/';
+		CHECK(write_file_atomic(lng, data, 16) != 0 &&
+		      errno == ENAMETOOLONG, "temp name too long");
+	}
 }
 
 /* ---------------------------------------------------------- cpufreq */
