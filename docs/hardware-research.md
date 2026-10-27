@@ -240,11 +240,11 @@ GBA 分区（下面写作 `<data>`）里的文件
 | `saves/<rom>.<core>.state` | 即时存档，退出游戏时自动写，下次启动同一个 ROM 用同一个核心时恢复（见下面的默认行为）。和 `.sav` 一样只按文件名，按核心分开（`gpsp`、`mgba`），因为两个核心的格式不通用。mGBA 约 420 到 520KiB（随存档类型变），gpSP 固定约 416KiB |
 | `bios/gba_bios.bin` | 可选的 GBA BIOS。没有的话 gpSP 用内置 BIOS，mGBA 用 HLE |
 | `config/settings.txt` | 全局设置：音量、亮度、LCD 网格、CPU 模式、音频模式、调试日志 |
-| `config/roms/<rom>.txt` | 单个游戏的设置：`color`（auto、off、gba、gba-light、sp101）、`core`、`blend`（gpSP 的帧混合）、学到的起始频率 `cpu_start`。只写和默认值不同的项。和存档一样只按文件名，不同文件夹里的同名 ROM 共用 |
+| `config/roms/<rom>.txt` | 单个游戏的设置：`color`（auto、off、gba、gba-light、sp101）、`core`、`blend`（gpSP 的帧混合）、`frameskip`（off、auto、1、2、3）、学到的起始频率 `cpu_start`。只写和默认值不同的项。和存档一样只按文件名，不同文件夹里的同名 ROM 共用 |
 | `config/romdb-cache.txt` | ROM 识别时算过的 CRC32 缓存，按相对 `roms/` 的路径（顶层的 ROM 就是文件名）、大小和 mtime |
 | `mixer.txt` | 可选，开机时应用的 ALSA mixer 设置，行前可加 `speaker:` 或 `headphones:` |
 | `log/boot-NNNN/` | 每次开机一个目录，保留最近 20 个，有 `frontend.txt` 和各个时间点的 dmesg；`log/LATEST.txt` 指向最新的一个 |
-| `log/perf.csv` | 每局游戏的性能、功耗和音频统计，跨开机追加 |
+| `log/perf.csv` | 每局游戏的性能、功耗和音频统计，跨开机追加。`skipped` 一列是跳过的帧数，帧耗时只统计画出来的帧 |
 
 `roms/` 和 `saves/` 在镜像里就有，其余目录前端第一次启动时创建。
 
@@ -258,7 +258,8 @@ GBA 分区（下面写作 `<data>`）里的文件
 - 调试日志默认关闭。打开后（设置里的 debug，或 `debug=on`）会多记周期性的 perf 行、mixer、`/proc/asound`、ALSA xrun 报告、内核日志和休眠调试信息。这些依赖内核的 `debug.config`。
 - ROM 列表显示 No-Intro 标准名称（`romdb.c`，数据由 `make romdb` 从 libretro-database 的固定 commit 生成到 `romdb_data.c`）。先按 ROM 头的游戏代码查，同一代码有多条时用 CRC32 区分，代码对上但 CRC 对不上的名字后面加 `*`，查不到显示文件名。
 - 色彩校正默认 `auto`，按首次发行年份选：2004 年及以前 `gba`，2005 年以后 `sp101`，年份未知 `off`。
-- Frame blend（gpSP 的 50:50 帧混合）默认关，按游戏在菜单里开，切换立即生效。mGBA 的 libretro 接口没有这个功能。
+- Frame blend（gpSP 的 50:50 帧混合）默认关，按游戏在游戏菜单的 Settings 里开（和 Color 一样标着 (game)），切换立即生效。mGBA 的 libretro 接口没有这个功能。
+- Frameskip（跳帧）按游戏设置，默认 Off，在游戏菜单里改，切换下一帧生效，两个核心都不用重启。1、2、3 是每画一帧跳过几帧（30、20、15fps），gpSP 是 `gpsp_frameskip=fixed_interval` 加 `gpsp_frameskip_interval`，mGBA 是 `mgba_frameskip`。Auto 只有 gpSP 有（`auto_threshold`，阈值用 gpSP 默认的 33%）：前端每帧 retro_run 之前通过 libretro 的 audio buffer status callback 告诉核心音频缓冲的占用，低于阈值就跳。占用是 retro_run 之前设备里排队的帧数，按目标填充量的两倍算百分比，所以平时在 50% 左右（和 RetroArch 的速率控制一样），33% 大约是还剩 23ms 的声音。mGBA 下菜单跳过 Auto，以前在 gpSP 下设成 Auto 的游戏显示 "Auto: gpSP only"，按不跳帧跑。gpSP 开跳帧时会要求至少 128ms 的音频延迟，前端只记日志，缓冲保持 85ms。跳过的帧不参与 CPU 调频的判断（gpSP 给 NULL 帧，mGBA 的跳帧计数在前端照着它的规则算，selftest 用一个每帧换背景色的 ROM 逐帧核对过）。
 - LCD 网格效果每次开机随机选 2x2 里的一个像素当亮点。
 - 音量键和菜单里的音量一样每次 3dB，低于 -60dB 就静音。亮度最低 25%，再低屏幕就看不见了。
 - ROM 列表支持子文件夹：文件夹排在 ROM 前面，名字后面带 `/`，黄色显示。A 进入，B 回上一层并选中刚才的文件夹，顶层按 B 没有反应。标题栏在文件夹里显示相对 `roms/` 的路径，太长时从左边截掉。每次进入文件夹只扫描这一层。退出游戏回到原来的文件夹和 ROM，但当前文件夹和选中项不跨开机保存。
