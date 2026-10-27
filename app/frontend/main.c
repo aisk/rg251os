@@ -212,11 +212,8 @@ void on_power_key(int down)
 
 void on_volume_key(int dir)
 {
-	int v = settings.volume + dir * 8;
-
 	log_verbose("volume key %+d", dir);
-	settings.volume = v < 0 ? 0 : v > 255 ? 255 : v;
-	audio_set_volume(settings.volume);
+	audio_volume_step(dir);
 }
 
 void on_jack(int inserted)

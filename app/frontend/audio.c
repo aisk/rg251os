@@ -19,7 +19,9 @@
  * (HP/SPK), a virtual enum without a register. With the mux at HP both
  * the headphones and the speaker play (as on ROCKNIX), and simple-card's
  * jack detection only gates the "Headphones" pin, so HP is set for both
- * jack states. The mux is reapplied on every jack event, and
+ * jack states. The volume keys and the menus step settings.volume by
+ * 3 dB down to -60 dB, below which it mutes (audio_volume_step). The mux
+ * is reapplied on every jack event, and
  * <data>/mixer.txt can set any control for both states ("Name=value") or
  * for one ("speaker: Name=value", "headphones: Name=value").
  *
@@ -375,6 +377,21 @@ void audio_set_volume(int raw)
 
 	snprintf(buf, sizeof(buf), "%d", raw);
 	mixer_set("Master Playback Volume", buf);
+}
+
+void audio_volume_step(int d)
+{
+	/* 8 steps of 0.375 dB = 3 dB. */
+	const int floor = 255 - 8 * 20;  /* -60 dB, below is mute */
+	int v = settings.volume;
+
+	if (d > 0)
+		v = v < floor ? floor : v + 8 > 255 ? 255 : v + 8;
+	else
+		v = v - 8 < floor ? 0 : v - 8;
+	settings.volume = v;
+	audio_set_volume(v);
+	log_verbose("volume %d (%+d)", v, d);
 }
 
 /* The board DTS sets the detect polarity (GPIO2_PC6, low when a plug is

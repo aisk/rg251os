@@ -37,6 +37,9 @@ void audio_suspend(void);
 void audio_resume(void);
 void audio_jack(int inserted);
 void audio_set_volume(int raw);
+/* settings.volume one 3 dB step up or down (d), muted below -60 dB, and
+ * applied: for the volume keys and the menus. */
+void audio_volume_step(int d);
 void audio_take_stats(struct audio_stats *st);
 /* Time spent resampling and writing since the last call. */
 int64_t audio_take_time_ns(void);

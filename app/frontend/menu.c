@@ -119,20 +119,6 @@ uint32_t ui_repeat(uint32_t held, int64_t now)
 
 /* ------------------------------------------------------------- helpers */
 
-static void volume_step(int d)
-{
-	/* 8 steps of 0.375 dB = 3 dB. */
-	const int floor = 255 - 8 * 20;  /* -60 dB, below is mute */
-	int v = settings.volume;
-
-	if (d > 0)
-		v = v < floor ? floor : v + 8 > 255 ? 255 : v + 8;
-	else
-		v = v - 8 < floor ? 0 : v - 8;
-	settings.volume = v;
-	audio_set_volume(v);
-}
-
 static void volume_label(char *buf, size_t size)
 {
 	if (settings.volume == 0)
@@ -603,7 +589,7 @@ int ingame_menu_update(uint32_t pressed)
 		return UI_RESUME;
 
 	if (d && ig.sel == IG_VOLUME)
-		volume_step(d);
+		audio_volume_step(d);
 	if (d && ig.sel == IG_BRIGHTNESS)
 		brightness_step(d);
 	if (d && ig.sel == IG_CPU)
@@ -751,7 +737,7 @@ static void settings_change(int item, int d)
 {
 	switch (item) {
 	case SI_VOLUME:
-		volume_step(d);
+		audio_volume_step(d);
 		break;
 	case SI_BRIGHTNESS:
 		brightness_step(d);
