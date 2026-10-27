@@ -41,7 +41,16 @@
  * Sleep (main.c): audio_suspend() drops the stream and closes the PCM,
  * so nothing runs when the kernel suspends the sound card and the
  * hw_params are applied again on wake. audio_resume() reopens it and
- * restarts the rate control, so the gap is not mistaken for drift.
+ * restarts the rate control, so the gap is not mistaken for drift, and
+ * holds the stream: the first frame after a wake takes hundreds of ms to
+ * reach the screen (the panel coming back), and a stream started by
+ * that frame's audio ran dry before the next one (an underrun right
+ * after the wake). While held, audio_flush drops the game's audio and
+ * leaves the PCM prepared but not started; once main.c sees the first
+ * frame on screen, audio_wake_shown() lets the next flush start the
+ * stream the way a game's first frame does (prime, or simple mode's
+ * start threshold). A hold that lasts HOLD_MAX_FLUSHES frames is let go
+ * by itself.
  *
  * Statistics: at game end audio_summary() logs the mode, the rate the
  * device was measured to play at between writes, underruns and the fill
@@ -64,7 +73,9 @@
  * dry before the next write: underrun likely.
  *
  * A simulated device (audio_init_null) consumes a configurable rate per
- * video frame, for the selftest and headless runs.
+ * video frame, for the selftest and headless runs; audio_null_idle plays
+ * it for frames without a write, like the wait for the first flip after
+ * a wake.
  */
 #include <errno.h>
 #include <stdio.h>
@@ -93,6 +104,7 @@ int pcm_avail_update(struct pcm *pcm);
 #define SILENCE_CHUNK 512
 #define NULL_FRAME_NS 16661000LL  /* simulated vblank, for the rate */
 #define KERNEL_DUMP_FLUSHES 180   /* 3 s into a game */
+#define HOLD_MAX_FLUSHES 60       /* 1 s of frames without the wake shown */
 
 static struct {
 	struct pcm *pcm;
@@ -101,6 +113,9 @@ static struct {
 	unsigned rate, buffer, period, target;
 	int started;        /* primed (adaptive) or prepared (simple) */
 	int suspended;      /* audio_suspend() closed the PCM */
+	int held;           /* resumed, waiting for the first frame shown */
+	unsigned held_flushes;
+	int64_t held_ns;    /* when the hold started */
 	int64_t next_init_ns;
 
 	/* Simulated device: plays null_consume frames per flush. */
@@ -108,6 +123,7 @@ static struct {
 	double null_ratio;  /* simulated speed / nominal */
 	double null_fill, null_consume;
 	int null_running;   /* start threshold reached */
+	int null_drained;   /* ran dry in audio_null_idle */
 
 	int jack;           /* headphones: 1 in, 0 out, -1 not reported yet */
 	char mixer_text[2048];  /* <data>/mixer.txt, read once */
@@ -600,6 +616,13 @@ void audio_init_null(double drift)
 	dev_open(settings.audio);
 }
 
+void audio_null_idle(unsigned frames)
+{
+	while (a.null_dev && frames--)
+		if (null_tick() && a.started)
+			a.null_drained = 1;
+}
+
 unsigned audio_rate(void)
 {
 	return a.rate;
@@ -780,8 +803,18 @@ void audio_flush(void)
 		a.out_n = 0;
 		return;
 	}
-	if (null_tick() && a.started)
+	if (a.held) {
+		a.out_n = 0;
+		if (++a.held_flushes < HOLD_MAX_FLUSHES)
+			return;
+		log_msg("audio: no frame on screen after %u frames since the "
+			"resume, starting the stream anyway", a.held_flushes);
+		a.held = 0;
+		return;
+	}
+	if ((null_tick() | a.null_drained) && a.started)
 		on_xrun("simulated");
+	a.null_drained = 0;
 	if (!a.started) {
 		/* Simple mode starts on its own at half a buffer of game audio
 		 * (pid351: priming on open was its boot pop). After a pause
@@ -885,8 +918,24 @@ void audio_resume(void)
 	a.out_n = 0;
 	a.started = 0;
 	a.prev_ok = 0;
+	a.held = 1;
+	a.held_flushes = 0;
+	a.held_ns = now_ns();
 	log_msg("audio: resumed, %s %s mode reopened in %.1f ms, rate control "
-		"reset", config_name(), mode_name(a.mode), (now_ns() - t0) / 1e6);
+		"reset, stream held until a frame is on screen",
+		config_name(), mode_name(a.mode), (now_ns() - t0) / 1e6);
+}
+
+void audio_wake_shown(void)
+{
+	if (!a.held)
+		return;
+	a.held = 0;
+	log_msg("audio: frame on screen %.0f ms after the resume, stream starts "
+		"with the next frame (%s); %u frame%s of game audio dropped "
+		"meanwhile", (now_ns() - a.held_ns) / 1e6,
+		a.mode == AUDIO_SIMPLE ? "at half a buffer" : "primed with silence",
+		a.held_flushes, a.held_flushes == 1 ? "" : "s");
 }
 
 void audio_take_stats(struct audio_stats *st)

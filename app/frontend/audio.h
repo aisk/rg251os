@@ -39,9 +39,15 @@ int audio_buffer_status(unsigned *occupancy, int *underrun_likely);
 /* Stop output (menus); the next flush restarts it. */
 void audio_pause(void);
 /* Sleep: stop and close the PCM; reopen it and restart the rate control
- * (the gap must not look like drift). The next flush starts the stream. */
+ * (the gap must not look like drift). The stream is held (game audio
+ * dropped) until audio_wake_shown, then the next flush starts it. */
 void audio_suspend(void);
 void audio_resume(void);
+/* The first frame after audio_resume is on screen: the held stream may
+ * start with the next frame's audio. */
+void audio_wake_shown(void);
+/* The simulated device plays frames video frames without a write. */
+void audio_null_idle(unsigned frames);
 void audio_jack(int inserted);
 void audio_set_volume(int raw);
 /* settings.volume one 3 dB step up or down (d), muted below -60 dB, and

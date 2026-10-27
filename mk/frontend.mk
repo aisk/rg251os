@@ -151,7 +151,8 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 		$(FRONTEND_TEST_DIR)/stub/log/perf.csv
 	# Sleep through a /sys/power that cannot suspend: the light sleep
 	# fallback, audio and cpufreq restored, the waking press ignored,
-	# no underrun after the wake.
+	# the stream held through the slow first flip after the wake, no
+	# underrun after it.
 	mkdir -p $(FRONTEND_TEST_DIR)/sleep
 	FE_SLEEP_AT=1500 $(QEMU_AARCH64) $(FRONTEND_STUB_ELF) --headless \
 		$(FRONTEND_TEST_DIR)/sleep $(FRONTEND_TEST_ROM) 3000
@@ -164,10 +165,21 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	grep -q 'sleep #1: light sleep woken by the power key' $$f; \
 	grep -q 'cpufreq: light sleep, scaling_max_freq 600000 kHz' $$f; \
 	grep -q 'cpufreq: awake, scaling_max_freq 1296000 kHz' $$f; \
-	grep -q 'audio: resumed, .* rate control reset' $$f; \
+	grep -q 'audio: resumed, .* rate control reset, stream held until a frame is on screen' $$f; \
 	grep -q 'sleep #1: awake (light sleep)' $$f; \
 	grep -q 'headless: after sleep, no new sleep request' $$f; \
+	grep -q 'audio: frame on screen [0-9]* ms after the resume, stream starts with the next frame (primed with silence); 1 frame of' $$f; \
 	! grep -q 'sleep #2' $$f; \
+	! grep -q 'audio: underrun' $$f; \
+	grep -q 'underruns after warmup 0' $$f
+	# The same on the simple audio path.
+	mkdir -p $(FRONTEND_TEST_DIR)/sleep-simple
+	FE_AUDIO=simple FE_SLEEP_AT=1500 $(QEMU_AARCH64) $(FRONTEND_STUB_ELF) \
+		--headless $(FRONTEND_TEST_DIR)/sleep-simple $(FRONTEND_TEST_ROM) 2400
+	set -e; f=$(FRONTEND_TEST_DIR)/sleep-simple/log/frontend.txt; \
+	grep -q 'sleep #1: awake (light sleep)' $$f; \
+	grep -q 'audio: frame on screen [0-9]* ms after the resume, stream starts with the next frame (at half a buffer)' $$f; \
+	! grep -q 'audio: underrun' $$f; \
 	grep -q 'underruns after warmup 0' $$f
 	# Restart game from the in-game menu (gpSP, the default) after a
 	# start that resumed the previous run's state: the save written, the

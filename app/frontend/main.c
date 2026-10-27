@@ -30,7 +30,8 @@
  * resets the core in the same session; a fatal error writes no state.
  *
  * Power key (timing in input.c): a short press sleeps (do_sleep: game
- * paused, save and state written, audio closed, backlight and panel off,
+ * paused, save and state written, audio closed (reopened on wake but
+ * held until the first frame is back on screen), backlight and panel off,
  * suspend to RAM via sleep.c, or a light sleep blocked in poll() on the
  * input devices with the CPU at its lowest OPP if the kernel does not
  * suspend; every step logged as "sleep #N: ...", the charger's state as
@@ -106,6 +107,9 @@
 #define MAX_POLL 24
 #define HEADLESS_HZ 60.0186
 #define HEADLESS_FRAME_NS 16661000LL
+/* Frames the panel takes to show the first frame after a wake (boot-0015:
+ * 340 ms), for the headless sleep test. */
+#define HEADLESS_WAKE_FLIP_FRAMES 20
 
 int selftest(const char *dir);
 int selftest_core_switch(const char *data, long frames);
@@ -414,6 +418,7 @@ static void reset_game(void)
 /* -------------------------------------------------------------- sleep */
 
 static void perf_report(void);
+static void wake_shown(int64_t up);
 
 /* Blocks until the power key goes down (or, in the headless test, after
  * a simulated press). */
@@ -527,7 +532,10 @@ static void do_sleep(void)
 	ui_suppress(input_buttons());
 	ui_redraw();
 	m.wake_frames = display_frames();
-	m.wake_pending = display_ready();
+	/* The headless sleep test plays the device's wait for the flip. */
+	m.wake_pending = display_ready() || m.sleep_test;
+	if (!m.wake_pending)
+		audio_wake_shown();
 	log_msg("sleep #%u: awake (%s), %lld ms since entering, restored in "
 		"%lld ms, back to %s", m.sleeps,
 		light ? "light sleep" : r.method, (long long)(boot_ms() - t0),
@@ -859,6 +867,15 @@ static void startup(void)
 	log_sync();
 }
 
+/* The first frame after a wake is on screen: audio may start again. */
+static void wake_shown(int64_t up)
+{
+	m.wake_pending = 0;
+	log_msg("sleep #%u: first frame on screen %lld ms after resume",
+		m.sleeps, (long long)(up - m.wake_ms));
+	audio_wake_shown();
+}
+
 /* The earliest time timers() has something to do, for idle_timeout. */
 static void timer_at(int64_t t)
 {
@@ -880,11 +897,8 @@ static void timers(int64_t now)
 	power_action(pwrkey_poll(&m.pk, now));
 	if (m.pk.down && !m.pk.fired)
 		timer_at(m.pk.down_ns + PWRKEY_LONG_NS);
-	if (m.wake_pending && display_frames() > m.wake_frames) {
-		m.wake_pending = 0;
-		log_msg("sleep #%u: first frame on screen %lld ms after resume",
-			m.sleeps, (long long)(up - m.wake_ms));
-	}
+	if (m.wake_pending && display_frames() > m.wake_frames)
+		wake_shown(up);
 
 	if (!m.dumped5 && up >= 5000 && log_debug()) {
 		m.dumped5 = 1;
@@ -1022,7 +1036,9 @@ static void run(void)
  * simulated codec running 0.1% fast, and the save path. FE_SLEEP_AT=N
  * also sleeps after frame N, through a fake /sys/power that cannot
  * suspend, so the fallback light sleep and the wake path run (the light
- * sleep wakes itself with a simulated power key press). FE_RESET_AT=N
+ * sleep wakes itself with a simulated power key press; then the first
+ * frame's flip takes HEADLESS_WAKE_FLIP_FRAMES while the simulated
+ * codec plays on, as the panel does on the device). FE_RESET_AT=N
  * opens the in-game menu after frame N and confirms Restart game, with
  * key presses through the page stack (ui_frame). The game starts and
  * ends like on the device (start_game, end_game and the settings saved),
@@ -1106,6 +1122,11 @@ static int headless(const char *data, const char *rom, long frames)
 			on_power_key(0);
 			log_msg("headless: after sleep, %s", m.sleep_req ?
 				"FAILED: sleep requested again" : "no new sleep request");
+			/* As on the device: the first frame after the wake,
+			 * then about 340 ms until its flip completes. */
+			emulate(0);
+			audio_null_idle(HEADLESS_WAKE_FLIP_FRAMES);
+			wake_shown(boot_ms());
 		}
 		if (i == reset_at) {
 			/* Through the pages: SELECT+START, then Restart game
