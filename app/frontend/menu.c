@@ -1,6 +1,9 @@
 /*
  * Menus on the 480x320 logical canvas in the 12x24 font of font.h (40
- * columns), laid out from its size (menu.h).
+ * columns), laid out from its size (menu.h), as the pages of ui.c. The
+ * in-game menu and both settings pages are lists of rows (struct row: a
+ * label, how its value steps and reads, what A does), run and drawn by
+ * the same code; a row shared by several menus is defined once.
  *
  * ROM list: one folder of roms/ at a time, its subfolders first (as
  * "name/", in yellow), then the ROMs by their No-Intro names (romdb.c;
@@ -107,13 +110,6 @@ struct confirm {
 /* Restart and power off armed: frames (the menus are updated on every
  * vblank) left for the confirming A. */
 #define CONFIRM_FRAMES (3 * 60)
-
-static struct {
-	int sel;
-	struct confirm confirm;
-	char name[ROMDB_NAME_MAX + 2];
-	struct marquee mq;
-} ig;
 
 /* ------------------------------------------------------------- helpers */
 
@@ -536,13 +532,187 @@ static int confirm_press(struct confirm *cf, int row)
 	return 0;
 }
 
-/* -------------------------------------------------------- in-game menu */
+/* ----------------------------------------------------------- menu rows */
 
-enum {
-	IG_RESUME, IG_RESET, IG_VOLUME, IG_BRIGHTNESS, IG_CPU, IG_CORE,
-	IG_BLEND, IG_SETTINGS, IG_SYSINFO, IG_QUIT, IG_POWEROFF, IG_COUNT
+/*
+ * A row of the in-game menu or the settings. Its value is an int (field)
+ * that left/right step through min..max, wrapping, shown as names[v -
+ * min] or as a number; or step() changes it, and value() formats it. A
+ * core option of the game (option, a key of core.c's rom_options) can
+ * only be changed with a core that has it, otherwise the row is dimmed
+ * and reads "<core> only"; a change goes to core_options_changed(). A or
+ * START steps a ROW_TOGGLE row forward and returns press, after a second
+ * A when ROW_CONFIRM (struct confirm, the label reads armed meanwhile). A
+ * row with pending() (the core) takes effect only through press: while
+ * pending its label is pending_label, its value highlighted and A asks
+ * to confirm press, otherwise A steps.
+ */
+struct row {
+	const char *label;
+	int *field;
+	int min, max;
+	const char *const *names;
+	void (*step)(int d);
+	void (*value)(char *buf, size_t size);
+	const char *option;
+	int (*active)(void);  /* NULL: always; dimmed (still changes) when 0 */
+	const char *note;     /* after the label, when there is room */
+	unsigned flags;
+	struct ui_result press;
+	const char *armed;
+	int (*pending)(void);
+	const char *pending_label;
 };
-_Static_assert(IG_COUNT == IG_ROWS, "IG_ROWS in menu.h");
+
+#define ROW_TOGGLE  1u
+#define ROW_CONFIRM 2u
+
+/* A menu of rows and its selection; B returns back. */
+struct menu {
+	const struct row *const *rows;
+	int count, sel;
+	struct confirm confirm;  /* row: the index */
+	struct ui_result back;
+};
+
+static void menu_open(struct menu *mn, const struct row *const *rows,
+		      int count, struct ui_result back)
+{
+	mn->rows = rows;
+	mn->count = count;
+	mn->sel = 0;
+	mn->confirm.frames = 0;
+	mn->back = back;
+}
+
+static int row_usable(const struct row *r)
+{
+	int core = r->option ? core_option_core(r->option) : -1;
+
+	return !r->option || rom_settings.core == core ||
+	       (core_loaded() && core_info()->core == core);
+}
+
+static void row_step(struct menu *mn, const struct row *r, int d)
+{
+	if (!row_usable(r))
+		return;
+	if (r->step) {
+		r->step(d);
+	} else if (r->field) {
+		int v = *r->field + d;
+
+		*r->field = v > r->max ? r->min : v < r->min ? r->max : v;
+	} else {
+		return;
+	}
+	/* A pending choice changed again: confirm it again. */
+	mn->confirm.frames = 0;
+	if (r->option)
+		core_options_changed();
+	fx_update();
+}
+
+static void row_value(const struct row *r, char *buf, size_t size)
+{
+	buf[0] = 0;
+	if (!row_usable(r))
+		snprintf(buf, size, "%s only",
+			 core_labels[core_option_core(r->option)]);
+	else if (r->value)
+		r->value(buf, size);
+	else if (r->field && r->names)
+		snprintf(buf, size, "%s", r->names[*r->field - r->min]);
+	else if (r->field)
+		snprintf(buf, size, "%d", *r->field);
+}
+
+static struct ui_result menu_update(struct menu *mn, uint32_t pressed)
+{
+	const struct row *r;
+
+	if (pressed & JOY_BIT(UP))
+		mn->sel = (mn->sel + mn->count - 1) % mn->count;
+	if (pressed & JOY_BIT(DOWN))
+		mn->sel = (mn->sel + 1) % mn->count;
+	r = mn->rows[mn->sel];
+	confirm_tick(&mn->confirm, mn->sel);
+	if (pressed & JOY_BIT(B))
+		return mn->back;
+	if (pressed & JOY_BIT(LEFT))
+		row_step(mn, r, -1);
+	if (pressed & JOY_BIT(RIGHT))
+		row_step(mn, r, 1);
+	if (!(pressed & (JOY_BIT(A) | JOY_BIT(START))))
+		return UI_STAY;
+	if (r->pending && !r->pending()) {
+		row_step(mn, r, 1);
+		return UI_STAY;
+	}
+	if (r->flags & ROW_TOGGLE)
+		row_step(mn, r, 1);
+	if ((r->flags & ROW_CONFIRM) && !confirm_press(&mn->confirm, mn->sel))
+		return UI_STAY;
+	return r->press;
+}
+
+/*
+ * The rows from y, row_h apart, across x .. x + w: the selection bar, the
+ * label FONT_W in, the value right aligned FONT_W from the right edge;
+ * with arrows (the settings) the selected value in "<>" and the others
+ * one column further left.
+ */
+static void menu_draw_rows(struct canvas *c, const struct menu *mn, int x,
+			   int y, int w, int row_h, int arrows)
+{
+	const int right = x + w - FONT_W;
+
+	for (int i = 0; i < mn->count; i++, y += row_h) {
+		const struct row *r = mn->rows[i];
+		int on = i == mn->sel, pending = r->pending && r->pending();
+		int vx, nx = x + FONT_W * (2 + (int)strlen(r->label));
+		const char *label = pending ? r->pending_label : r->label;
+		uint16_t col = on ? COL_FG : COL_DIM;
+		char v[24];
+
+		if (!row_usable(r) || (r->active && !r->active()))
+			col = on ? COL_DIM : COL_OFF;
+		if (confirm_armed(&mn->confirm, i)) {
+			label = r->armed;
+			col = COL_HI;
+		}
+		if (on)
+			draw_fill(c, x + 4, y - (row_h - FONT_H) / 2, w - 8, row_h,
+				  COL_SEL);
+		draw_text(c, x + FONT_W, y, col, label);
+		row_value(r, v, sizeof(v));
+		vx = right - FONT_W * ((int)strlen(v) +
+				       (arrows ? on ? 2 : 1 : 0));
+		/* The note unless a long value needs the room. */
+		if (r->note && nx + draw_text_width(r->note) <= vx)
+			draw_text(c, nx, y, on ? COL_DIM : COL_OFF, r->note);
+		if (pending)
+			col = COL_HI;
+		if (v[0] && arrows && on)
+			draw_textf(c, vx, y, col, "<%s>", v);
+		else if (v[0])
+			draw_text(c, vx, y, col, v);
+	}
+}
+
+/* Rows of both menus. */
+static const char *const off_on[] = { "Off", "On" };
+static const char *const audio_labels[] = { "Simple", "Adaptive" };
+
+static void brightness_value(char *buf, size_t size)
+{
+	snprintf(buf, size, "%d%%", settings.brightness);
+}
+
+static void cpu_value(char *buf, size_t size)
+{
+	cpuctl_mode_label(settings.cpu, buf, size);
+}
 
 /* The game's core setting, to the next core that is built in. */
 static void core_step(int d)
@@ -557,26 +727,126 @@ static void core_step(int d)
 	rom_settings.core = id;
 }
 
+static void core_value(char *buf, size_t size)
+{
+	snprintf(buf, size, "%s", core_labels[rom_settings.core]);
+}
+
+/* Another core than the running one: the game restarts with it. */
 static int core_pending(void)
 {
 	return core_loaded() && rom_settings.core != core_info()->core;
 }
 
-/* Frame blending exists in gpSP only: the running core or the one the
- * game restarts with. */
-static int blend_available(void)
+static int grid_on(void)
 {
-	return rom_settings.core == CORE_GPSP ||
-	       (core_loaded() && core_info()->core == CORE_GPSP);
+	return settings.grid;
 }
 
-static void blend_toggle(void)
+static void grid_dim_step(int d)
 {
-	if (!blend_available())
-		return;
-	rom_settings.blend = !rom_settings.blend;
-	core_options_changed();
+	settings.grid_dim = level_step(grid_dim_levels, grid_dim_count,
+				       settings.grid_dim, d);
 }
+
+static void grid_dim_value(char *buf, size_t size)
+{
+	snprintf(buf, size, "%d%%", settings.grid_dim);
+}
+
+static void grid_boost_step(int d)
+{
+	settings.grid_boost = level_step(grid_boost_levels, grid_boost_count,
+					 settings.grid_boost, d);
+}
+
+static void grid_boost_value(char *buf, size_t size)
+{
+	if (settings.grid_boost)
+		snprintf(buf, size, "+%d%%", settings.grid_boost);
+	else
+		snprintf(buf, size, "Off");
+}
+
+static void debug_step(int d)
+{
+	(void)d;
+	settings.debug = !settings.debug;
+	log_set_debug(settings.debug);
+}
+
+static const struct row
+	row_resume = { "Resume", .press = { UI_RESUME, 0 } },
+	row_reset = {
+		"Restart game", .flags = ROW_CONFIRM, .press = { UI_RESET, 0 },
+		.armed = "Press A to restart",
+	},
+	row_volume = {
+		"Volume", .step = audio_volume_step, .value = volume_label,
+	},
+	row_brightness = {
+		"Brightness", .step = brightness_step, .value = brightness_value,
+	},
+	row_cpu = { "CPU", .step = cpu_step, .value = cpu_value },
+	row_core = {
+		"Core", .step = core_step, .value = core_value,
+		.flags = ROW_CONFIRM, .press = { UI_RESTART, 0 },
+		.armed = "Press A to restart", .pending = core_pending,
+		.pending_label = "Restart with",
+	},
+	row_blend = {
+		"Frame blend", &rom_settings.blend, 0, 1, off_on,
+		.option = "gpsp_frame_mixing", .flags = ROW_TOGGLE,
+	},
+	row_game_settings = {
+		"Settings", .press = { UI_PUSH, &game_settings_page },
+	},
+	row_sysinfo = { "System info", .press = { UI_PUSH, &sysinfo_page } },
+	row_quit = { "Quit to ROM list", .press = { UI_QUIT, 0 } },
+	row_poweroff = {
+		"Power off", .flags = ROW_CONFIRM, .press = { UI_POWEROFF, 0 },
+		.armed = "Press A to power off",
+	},
+	row_color = {
+		"Color", &rom_settings.color, 0, COLOR_COUNT - 1,
+		.value = rom_color_label, .note = "(game)", .flags = ROW_TOGGLE,
+	},
+	row_grid = {
+		"LCD grid", &settings.grid, 0, 1, off_on, .flags = ROW_TOGGLE,
+	},
+	row_grid_dim = {
+		"Grid darkness", .step = grid_dim_step, .value = grid_dim_value,
+		.active = grid_on,
+	},
+	row_grid_boost = {
+		"Dot boost", .step = grid_boost_step, .value = grid_boost_value,
+		.active = grid_on,
+	},
+	row_audio = {
+		"Audio", &settings.audio, AUDIO_SIMPLE, AUDIO_ADAPTIVE,
+		audio_labels, .flags = ROW_TOGGLE,  /* from the next game */
+	},
+	row_debug = {
+		"Debug log", &settings.debug, 0, 1, off_on, .step = debug_step,
+		.flags = ROW_TOGGLE,
+	},
+	row_datetime = { "Date & time", .press = { UI_PUSH, &datetime_page } },
+	row_back = { "Back", .press = { UI_BACK, 0 } };
+
+/* -------------------------------------------------------- in-game menu */
+
+static const struct row *const ig_rows[] = {
+	&row_resume, &row_reset, &row_volume, &row_brightness, &row_cpu,
+	&row_core, &row_blend, &row_game_settings, &row_sysinfo, &row_quit,
+	&row_poweroff,
+};
+_Static_assert(ARRAY_SIZE(ig_rows) == IG_ROWS, "IG_ROWS in menu.h");
+
+static struct {
+	struct menu menu;
+	char name[ROMDB_NAME_MAX + 2];
+	struct marquee mq;
+} ig;
 
 void ingame_menu_set_name(const char *rom_name)
 {
@@ -587,131 +857,32 @@ static void ingame_menu_enter(const char *from, int64_t now)
 {
 	(void)from;
 	(void)now;
-	ig.sel = 0;
-	ig.confirm.frames = 0;
+	menu_open(&ig.menu, ig_rows, ARRAY_SIZE(ig_rows), UI_ACT(UI_RESUME));
 	ig.mq.sel = -1;
 }
 
 static struct ui_result ingame_menu_update(uint32_t pressed, int64_t now)
 {
-	int d = 0;
-
 	(void)now;
-	if (pressed & JOY_BIT(UP))
-		ig.sel = (ig.sel + IG_COUNT - 1) % IG_COUNT;
-	if (pressed & JOY_BIT(DOWN))
-		ig.sel = (ig.sel + 1) % IG_COUNT;
-	confirm_tick(&ig.confirm, ig.sel);
-	if (pressed & JOY_BIT(LEFT))
-		d = -1;
-	if (pressed & JOY_BIT(RIGHT))
-		d = 1;
-	if (pressed & JOY_BIT(B))
-		return UI_ACT(UI_RESUME);
-
-	if (d && ig.sel == IG_VOLUME)
-		audio_volume_step(d);
-	if (d && ig.sel == IG_BRIGHTNESS)
-		brightness_step(d);
-	if (d && ig.sel == IG_CPU)
-		cpu_step(d);
-	if (d && ig.sel == IG_CORE) {
-		/* Another core: "Restart with" asks again. */
-		core_step(d);
-		ig.confirm.frames = 0;
-	}
-	if (d && ig.sel == IG_BLEND)
-		blend_toggle();
-	if (pressed & (JOY_BIT(A) | JOY_BIT(START))) {
-		switch (ig.sel) {
-		case IG_RESUME:
-			return UI_ACT(UI_RESUME);
-		case IG_RESET:
-			if (confirm_press(&ig.confirm, IG_RESET))
-				return UI_ACT(UI_RESET);
-			break;
-		case IG_CORE:
-			if (!core_pending())
-				core_step(1);
-			else if (confirm_press(&ig.confirm, IG_CORE))
-				return UI_ACT(UI_RESTART);
-			break;
-		case IG_BLEND:
-			blend_toggle();
-			break;
-		case IG_SETTINGS:
-			return UI_OPEN(&game_settings_page);
-		case IG_SYSINFO:
-			return UI_OPEN(&sysinfo_page);
-		case IG_QUIT:
-			return UI_ACT(UI_QUIT);
-		case IG_POWEROFF:
-			if (confirm_press(&ig.confirm, IG_POWEROFF))
-				return UI_ACT(UI_POWEROFF);
-			break;
-		}
-	}
-	return UI_STAY;
+	return menu_update(&ig.menu, pressed);
 }
 
 static void ingame_menu_draw(struct canvas *c, const struct game_view *g)
 {
-	static const char *const items[IG_COUNT] = {
-		"Resume", "Restart game", "Volume", "Brightness", "CPU", "Core",
-		"Frame blend", "Settings", "System info", "Quit to ROM list",
-		"Power off",
-	};
 	const int bx = IG_BOX_X, by = IG_BOX_Y, bw = IG_BOX_W;
-	/* Values right aligned, FONT_W from the box's right edge. */
-	const int vr = bx + bw - FONT_W;
 	const int ny = by + (IG_HEAD_H - FONT_H) / 2;
 	int cols;
 
 	draw_image_dim(c, g->px, g->pitch, g->w, g->h);
 	draw_fill(c, bx, by, bw, IG_BOX_H, COL_BOX);
 	draw_frame(c, bx, by, bw, IG_BOX_H, COL_SEL);
-	/* The name in the columns left of the battery. */
-	cols = (draw_battery(c, vr, ny) - FONT_W - (bx + 12)) / FONT_W;
+	/* The name in the columns left of the battery, which is right
+	 * aligned like the values. */
+	cols = (draw_battery(c, bx + bw - FONT_W, ny) - FONT_W - (bx + 12)) /
+	       FONT_W;
 	draw_rom_name(c, bx + 12, ny, COL_HI, ig.name, cols,
 		      marquee_step(&ig.mq, 0, ig.name, cols));
-	for (int i = 0; i < IG_COUNT; i++) {
-		int y = by + IG_HEAD_H + i * IG_ROW_H;
-		uint16_t col = i == ig.sel ? COL_FG : COL_DIM;
-		const char *label = items[i];
-		char v[16] = "";
-
-		if (i == IG_BLEND && !blend_available())
-			col = i == ig.sel ? COL_DIM : COL_OFF;
-		if (i == IG_CORE && core_pending())
-			label = "Restart with";
-		if (confirm_armed(&ig.confirm, i)) {
-			label = i == IG_POWEROFF ? "Press A to power off" :
-						   "Press A to restart";
-			col = COL_HI;
-		}
-		if (i == ig.sel)
-			draw_fill(c, bx + 4, y - (IG_ROW_H - FONT_H) / 2, bw - 8,
-				  IG_ROW_H, COL_SEL);
-		draw_text(c, bx + FONT_W, y, col, label);
-		if (i == IG_VOLUME) {
-			char vol[16];
-
-			volume_label(vol, sizeof(vol));
-			snprintf(v, sizeof(v), "%6s", vol);
-		} else if (i == IG_BRIGHTNESS) {
-			snprintf(v, sizeof(v), "%5d%%", settings.brightness);
-		} else if (i == IG_CPU) {
-			cpuctl_mode_label(settings.cpu, v, sizeof(v));
-		} else if (i == IG_CORE) {
-			snprintf(v, sizeof(v), "%s", core_labels[rom_settings.core]);
-			if (core_pending())
-				col = COL_HI;
-		} else if (i == IG_BLEND) {
-			snprintf(v, sizeof(v), "%s", !blend_available() ?
-				 "gpSP only" : rom_settings.blend ? "On" : "Off");
-		}
-		draw_text(c, vr - draw_text_width(v), y, col, v);
-	}
+	menu_draw_rows(c, &ig.menu, bx, by + IG_HEAD_H, bw, IG_ROW_H, 0);
 }
 
 const struct page ingame_page = {
@@ -721,208 +892,48 @@ const struct page ingame_page = {
 
 /* ------------------------------------------------------------ settings */
 
-enum {
-	SI_VOLUME, SI_BRIGHTNESS, SI_CPU, SI_COLOR, SI_GRID, SI_GRID_DIM,
-	SI_GRID_BOOST, SI_AUDIO, SI_DEBUG, SI_DATETIME, SI_SYSINFO, SI_POWEROFF,
-	SI_BACK,
+static const struct row *const settings_rows[] = {
+	&row_volume, &row_brightness, &row_cpu, &row_audio, &row_debug,
+	&row_datetime, &row_sysinfo, &row_poweroff, &row_back,
+};
+static const struct row *const game_settings_rows[] = {
+	&row_color, &row_grid, &row_grid_dim, &row_grid_boost, &row_debug,
+	&row_back,
 };
 
-static const char *const si_names[] = {
-	"Volume", "Brightness", "CPU", "Color", "LCD grid", "Grid darkness",
-	"Dot boost", "Audio", "Debug log", "Date & time", "System info",
-	"Power off", "Back",
-};
-
-static const uint8_t si_romlist[] = {
-	SI_VOLUME, SI_BRIGHTNESS, SI_CPU, SI_AUDIO, SI_DEBUG, SI_DATETIME,
-	SI_SYSINFO, SI_POWEROFF, SI_BACK,
-};
-static const uint8_t si_ingame[] = {
-	SI_COLOR, SI_GRID, SI_GRID_DIM, SI_GRID_BOOST, SI_DEBUG, SI_BACK,
-};
-
-static struct {
-	const uint8_t *items;
-	int count, sel, ingame;
-	struct confirm confirm;  /* row: the item */
-} st;
-
-static void settings_menu_enter(int ingame)
-{
-	st.ingame = ingame;
-	st.items = ingame ? si_ingame : si_romlist;
-	st.count = ingame ? (int)sizeof(si_ingame) : (int)sizeof(si_romlist);
-	st.sel = 0;
-	st.confirm.frames = 0;
-}
-
-static void settings_change(int item, int d)
-{
-	switch (item) {
-	case SI_VOLUME:
-		audio_volume_step(d);
-		break;
-	case SI_BRIGHTNESS:
-		brightness_step(d);
-		break;
-	case SI_CPU:
-		cpu_step(d);
-		break;
-	case SI_COLOR:
-		rom_settings.color = (rom_settings.color + COLOR_COUNT + d) %
-				     COLOR_COUNT;
-		break;
-	case SI_GRID:
-		settings.grid = !settings.grid;
-		break;
-	case SI_GRID_DIM:
-		settings.grid_dim = level_step(grid_dim_levels, grid_dim_count,
-					       settings.grid_dim, d);
-		break;
-	case SI_GRID_BOOST:
-		settings.grid_boost = level_step(grid_boost_levels,
-						 grid_boost_count,
-						 settings.grid_boost, d);
-		break;
-	case SI_AUDIO:
-		/* Applied when the next game starts. */
-		settings.audio = settings.audio == AUDIO_SIMPLE ? AUDIO_ADAPTIVE :
-				 AUDIO_SIMPLE;
-		break;
-	case SI_DEBUG:
-		settings.debug = !settings.debug;
-		log_set_debug(settings.debug);
-		break;
-	}
-	fx_update();
-}
+/* Both pages share the menu; only one is open at a time. */
+static struct menu st;
+static int st_ingame;
 
 static void settings_global_enter(const char *from, int64_t now)
 {
 	(void)from;
 	(void)now;
-	settings_menu_enter(0);
+	st_ingame = 0;
+	menu_open(&st, settings_rows, ARRAY_SIZE(settings_rows),
+		  UI_ACT(UI_BACK));
 }
 
 static void settings_game_enter(const char *from, int64_t now)
 {
 	(void)from;
 	(void)now;
-	settings_menu_enter(1);
+	st_ingame = 1;
+	menu_open(&st, game_settings_rows, ARRAY_SIZE(game_settings_rows),
+		  UI_ACT(UI_BACK));
 }
 
 static struct ui_result settings_menu_update(uint32_t pressed, int64_t now)
 {
-	int item = st.items[st.sel];
-
 	(void)now;
-	if (pressed & JOY_BIT(UP))
-		st.sel = (st.sel + st.count - 1) % st.count;
-	if (pressed & JOY_BIT(DOWN))
-		st.sel = (st.sel + 1) % st.count;
-	confirm_tick(&st.confirm, st.items[st.sel]);
-	if (pressed & JOY_BIT(B))
-		return UI_ACT(UI_BACK);
-	if (pressed & JOY_BIT(LEFT))
-		settings_change(item, -1);
-	if (pressed & JOY_BIT(RIGHT))
-		settings_change(item, 1);
-	if (pressed & (JOY_BIT(A) | JOY_BIT(START))) {
-		if (item == SI_BACK)
-			return UI_ACT(UI_BACK);
-		if (item == SI_SYSINFO)
-			return UI_OPEN(&sysinfo_page);
-		if (item == SI_DATETIME)
-			return UI_OPEN(&datetime_page);
-		if (item == SI_POWEROFF && confirm_press(&st.confirm, item))
-			return UI_ACT(UI_POWEROFF);
-		if (item == SI_GRID || item == SI_COLOR || item == SI_AUDIO ||
-		    item == SI_DEBUG)
-			settings_change(item, 1);
-	}
-	return UI_STAY;
-}
-
-static void settings_value(int item, char *buf, size_t size)
-{
-	switch (item) {
-	case SI_VOLUME:
-		volume_label(buf, size);
-		break;
-	case SI_BRIGHTNESS:
-		snprintf(buf, size, "%d%%", settings.brightness);
-		break;
-	case SI_CPU:
-		cpuctl_mode_label(settings.cpu, buf, size);
-		break;
-	case SI_COLOR:
-		rom_color_label(buf, size);
-		break;
-	case SI_GRID:
-		snprintf(buf, size, "%s", settings.grid ? "On" : "Off");
-		break;
-	case SI_GRID_DIM:
-		snprintf(buf, size, "%d%%", settings.grid_dim);
-		break;
-	case SI_GRID_BOOST:
-		if (settings.grid_boost)
-			snprintf(buf, size, "+%d%%", settings.grid_boost);
-		else
-			snprintf(buf, size, "Off");
-		break;
-	case SI_AUDIO:
-		snprintf(buf, size, "%s",
-			 settings.audio == AUDIO_SIMPLE ? "Simple" : "Adaptive");
-		break;
-	case SI_DEBUG:
-		snprintf(buf, size, "%s", settings.debug ? "On" : "Off");
-		break;
-	default:
-		buf[0] = 0;
-	}
-}
-
-static void settings_rows(struct canvas *c, int x, int y, int w, int row_h)
-{
-	for (int i = 0; i < st.count; i++, y += row_h) {
-		int item = st.items[i];
-		uint16_t col = i == st.sel ? COL_FG : COL_DIM;
-		const char *label = si_names[item];
-		char v[24];
-
-		if (!settings.grid && (item == SI_GRID_DIM || item == SI_GRID_BOOST))
-			col = i == st.sel ? COL_DIM : COL_OFF;
-		if (i == st.sel)
-			draw_fill(c, x + 4, y - (row_h - FONT_H) / 2, w - 8, row_h,
-				  COL_SEL);
-		if (confirm_armed(&st.confirm, item)) {
-			label = "Press A to power off";
-			col = COL_HI;
-		}
-		draw_text(c, x + 12, y, col, label);
-		settings_value(item, v, sizeof(v));
-		/* "(game)" unless a long value like "Auto (GBA light)" needs
-		 * the room. */
-		if (item == SI_COLOR && 12 + FONT_W * 12 <=
-		    w - 12 - FONT_W * ((int)strlen(v) + (i == st.sel ? 2 : 1)))
-			draw_text(c, x + 12 + FONT_W * 6, y,
-				  i == st.sel ? COL_DIM : COL_OFF, "(game)");
-		if (v[0]) {
-			if (i == st.sel)
-				draw_textf(c, x + w - 12 - FONT_W * ((int)strlen(v) + 2),
-					   y, col, "<%s>", v);
-			else
-				draw_text(c, x + w - 12 - FONT_W * ((int)strlen(v) + 1),
-					  y, col, v);
-		}
-	}
+	return menu_update(&st, pressed);
 }
 
 static void settings_menu_draw(struct canvas *c, const struct game_view *g)
 {
 	const struct blit_fx *fx = fx_current();
 
-	if (st.ingame) {
+	if (st_ingame) {
 		int ph = 2 * IG_PANEL_PAD + st.count * IG_ROW_H, py = c->h - ph;
 
 		draw_fill(c, 0, 0, c->w, c->h, 0);
@@ -932,15 +943,16 @@ static void settings_menu_draw(struct canvas *c, const struct game_view *g)
 				      g->w, g->h, fx);
 		draw_fill(c, 0, py, c->w, ph, COL_BOX);
 		draw_fill(c, 0, py, c->w, 2, COL_SEL);
-		settings_rows(c, 0, py + IG_PANEL_PAD + (IG_ROW_H - FONT_H) / 2,
-			      c->w, IG_ROW_H);
+		menu_draw_rows(c, &st, 0,
+			       py + IG_PANEL_PAD + (IG_ROW_H - FONT_H) / 2, c->w,
+			       IG_ROW_H, 1);
 		return;
 	}
 	draw_fill(c, 0, 0, c->w, c->h, COL_BG);
 	draw_text(c, 8, HEAD_Y, COL_HI, "Settings");
 	draw_battery(c, c->w - 8, HEAD_Y);
 	draw_fill(c, 0, HEAD_LINE_Y, c->w, 2, COL_SEL);
-	settings_rows(c, 0, LIST_Y, c->w, ROW_H);
+	menu_draw_rows(c, &st, 0, LIST_Y, c->w, ROW_H, 1);
 	draw_text(c, 8, FOOT_Y, COL_DIM, "B:back");
 }
 
