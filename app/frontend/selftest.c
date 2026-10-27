@@ -474,7 +474,9 @@ static void test_settings(const char *base)
 		       "grid_dim=50x\n#grid_boost=30\nnoequals\n=5\n"
 		       "  grid = ON \r\ngrid_boost=\n");
 	CHECK(t.volume == 200 && t.brightness == 70 && t.grid == 1 &&
-	      t.grid_dim == 50 && t.grid_boost == 0, "settings range check");
+	      t.grid_dim == settings_defaults.grid_dim &&
+	      t.grid_boost == settings_defaults.grid_boost,
+	      "settings range check");
 	t = settings_defaults;
 	CHECK(settings_parse(&t, "\x01\xff\n\n===\nvolume") == 0 &&
 	      !memcmp(&t, &settings_defaults, sizeof(t)), "garbage");
