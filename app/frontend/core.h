@@ -17,6 +17,8 @@ int core_load(const char *rom_path, int core, char *err, size_t errlen);
 /* Save if needed, then unload the game and deinit the core. */
 void core_unload(void);
 int core_loaded(void);
+/* Whether a core (enum core_id) is built in. */
+int core_available(int core);
 const struct core_info *core_info(void);
 /* Write changed save data and wait for it, remove this core's state
  * file, then retro_reset: the game starts over like after the console's

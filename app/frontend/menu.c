@@ -49,7 +49,6 @@
 #include "audio.h"
 #include "battery.h"
 #include "core.h"
-#include "core_api.h"
 #include "cpuctl.h"
 #include "fe.h"
 #include "fx.h"
@@ -537,7 +536,7 @@ static void core_step(int d)
 
 	for (int i = 0; i < CORE_COUNT; i++) {
 		id = (id + CORE_COUNT + d) % CORE_COUNT;
-		if (core_api_get(id))
+		if (core_available(id))
 			break;
 	}
 	rom_settings.core = id;

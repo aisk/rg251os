@@ -681,7 +681,7 @@ int core_load(const char *rom_path, int core, char *err, size_t errlen)
 
 	if (c.api)
 		core_unload();
-	if (core < 0 || core >= CORE_COUNT || !core_api_get(core)) {
+	if (!core_available(core)) {
 		log_msg("core: %s not built in, using %s",
 			core >= 0 && core < CORE_COUNT ? core_names[core] : "?",
 			core_names[CORE_MGBA]);
@@ -802,6 +802,11 @@ void core_unload(void)
 int core_loaded(void)
 {
 	return c.loaded;
+}
+
+int core_available(int core)
+{
+	return core >= 0 && core < CORE_COUNT && core_api_get(core) != NULL;
 }
 
 const struct core_info *core_info(void)
