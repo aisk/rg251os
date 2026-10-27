@@ -1,74 +1,53 @@
 /*
- * frontend: the RG351P GBA frontend, running as PID 1 (/sbin/init).
+ * frontend: the RG351P GBA frontend, running as PID 1 (/sbin/init). This
+ * file has startup, the main loop and the screens' state machine; the
+ * work is in the modules (sys.c mounts and system helpers, display.c KMS,
+ * input.c evdev and the power key timing, audio.c ALSA, core.c the
+ * libretro cores, menu.c the ROM list and menus, settings.c, sleep.c,
+ * cpuctl.c, sdgrow.c, clock.c, sysinfo.c).
  *
- * One static program: mounts, logging, KMS output, evdev input, ALSA
- * audio and the statically linked libretro cores (mGBA and gpSP, picked
- * per game, see core.c). The main loop is driven by page flip events:
- * whenever the previous frame is on screen, one retro_run is done, the
- * frame is scaled 2x and rotated straight into the back buffer and
- * flipped, so emulation runs at the panel's 60.02 Hz and audio is
- * resampled to match (see audio.c).
+ * Startup: proc/sys/dev mounts, the first boot's partition grow
+ * (sdgrow.c, with its messages on screen), the GBA partition mounted and
+ * a new log/boot-NNNN/ opened, settings loaded, then backlight, CPU
+ * control, battery, display, input and audio; the ROM list once that is
+ * done. The main loop is driven by page flip events: whenever the
+ * previous frame is on screen, the current screen is drawn; in game that
+ * is one retro_run with the frame scaled 2x and rotated straight into the
+ * back buffer, so emulation runs at the panel's 60.02 Hz and audio is
+ * resampled to match (audio.c).
  *
- * Status LED (one GPIO, red or green):
- *   red steady      starting up (set as soon as PID 1 runs)
- *   green steady    up: first frame on screen and the startup log written
- *                   to <data>/log/frontend.txt
- *   green, short red flash every 2 s
- *                   battery low (below 10% and not charging)
- *   red/green blink fatal error, shown on screen if possible and logged;
- *                   waiting for the power key
- *   red steady      powering off (saving)
- *   green steady    asleep (light sleep; in suspend to RAM whatever the
- *                   hardware does with the LED pin unpowered)
- * Before PID 1 starts the kernel shows its heartbeat trigger (see dts).
+ * Screens: ROM list, game, in-game menu (SELECT+START, the RG351P has no
+ * menu button), settings (SELECT in the ROM list, or from the in-game
+ * menu), system info, date and time, the fatal error screen and the
+ * power off message. A game ends by Quit to ROM list, Restart with
+ * another core or power off: its save and resume state are written
+ * (core_state_save) before the core is unloaded; Restart game resets the
+ * core in the same session; a fatal error writes no state.
  *
- * Logs on the GBA partition: log/boot-NNNN/ per boot (the last 20 are
- * kept, log/LATEST.txt names the newest, see sys_log_init) with
- * frontend.txt (this program) and dmesg-poweroff.txt, plus with debug
- * logging dmesg-5s.txt, dmesg-20s.txt, dmesg-game<N>-30s.txt,
- * dmesg-game<N>-end.txt (also after a fatal error) and
- * dmesg-sleep<N>.txt; and log/perf.csv across boots (per game and CPU
- * frequency timing, power and audio statistics, appended at the end of
- * every game, see cpuctl.c).
+ * Power key (timing in input.c): a short press sleeps (do_sleep: game
+ * paused, save and state written, audio closed, backlight and panel off,
+ * suspend to RAM via sleep.c, or a light sleep blocked in poll() on the
+ * input devices with the CPU at its lowest OPP if the kernel does not
+ * suspend; every step logged as "sleep #N: ..."); holding it 2 s, Power
+ * off in the menus or the power key on the error screen power off
+ * (do_poweroff: game ended, settings saved, children waited for,
+ * dmesg-poweroff.txt written, then sys_poweroff closes the log, unmounts
+ * the GBA partition and powers off).
  *
- * CPU frequency: schedutil throughout; in game cpuctl.c sets a floor from
- * the frame times (CPU mode setting: adaptive, max or a fixed OPP).
+ * Settings are saved, when they differ from what was last loaded or
+ * saved, on leaving the ROM list's settings, resuming a game from the
+ * in-game menu, quitting, restarting with another core, sleeping and
+ * powering off.
  *
- * Clock (clock.c): the kernel sets the system clock from the RK817 RTC at
- * boot, startup logs both ("clock: ..."); Date & time in the ROM list's
- * settings sets the two. No time zones: what the user enters is UTC.
+ * Status LED (one GPIO, red or green): red while starting, green once the
+ * first frame is on screen, a short red flash every 2 s on low battery,
+ * red/green blinking on a fatal error, red while powering off. Before
+ * PID 1 runs the kernel shows its heartbeat trigger (see dts).
  *
- * Keys: SELECT+START in game opens the in-game menu (the RG351P has no
- * menu/function button; SELECT is also the hotkey enabler in AmberELEC
- * and ROCKNIX). SELECT in the ROM list opens the settings. See menu.c for
- * the menus.
- *
- * Power key (input.c has the timing): a short press sleeps, in the ROM
- * list, the menus or in game; the next press wakes. Holding it 2 s saves
- * and powers off. Sleep: the game is paused and its save and resume state
- * written, the PCM closed, backlight and panel (DPMS) off, then suspend
- * to RAM (sleep.c). If the kernel does not suspend, a light sleep
- * instead: the same, plus the CPU capped at its lowest OPP, blocked in
- * poll() on the input devices until the power key goes down. On wake
- * everything is restored, the audio rate control and frame pacing start
- * over and the waking press is not taken as a new one. Every step is
- * logged ("sleep #N: ...").
-
- *
- * Resume states (core.c): a game that ends by Quit to ROM list, Power off
- * (in-game menu, settings or the power key held 2 s, all through
- * do_poweroff) or Restart with another core writes its save and then a
- * state, <data>/saves/<rom>.<core>.state, before the core is unloaded;
- * so does sleep. The next start of that ROM with that core resumes from
- * it. Restart game removes it; a fatal error writes none.
- *
- * First boot: before the GBA partition is mounted, it is grown to fill
- * the SD card (sdgrow.c), with a message on screen; later boots only
- * check that there is nothing to do.
- *
- * Settings (settings.c) are saved when leaving the settings screen in the
- * ROM list, on resume, quit and power off, whenever they differ from what
- * was last loaded or saved.
+ * Logs from here into log/boot-NNNN/: the 10 s perf line in game
+ * (perf_report) and, with debug logging, dmesg-5s.txt, dmesg-20s.txt,
+ * dmesg-game<N>-30s.txt, dmesg-game<N>-end.txt (also after a fatal
+ * error) and dmesg-sleep<N>.txt; dmesg-poweroff.txt always.
  *
  * Not PID 1 (testing on a PC or under qemu-user):
  *   frontend --selftest DIR            unit tests, using DIR as scratch
