@@ -1,6 +1,6 @@
 /*
- * Menu drawing on a logical RGB565 canvas, with the 8x8 ASCII font in
- * font8x8.h drawn at 2x (FONT_W x FONT_H in draw.h).
+ * Menu drawing on a logical RGB565 canvas; text in the ASCII bitmap font
+ * of font.h at its own size, or scaled up for the clock page.
  */
 #include <stdarg.h>
 #include <stdio.h>
@@ -8,7 +8,6 @@
 
 #include "blit.h"
 #include "draw.h"
-#include "font8x8.h"
 
 void draw_fill(struct canvas *c, int x, int y, int w, int h, uint16_t col)
 {
@@ -38,49 +37,55 @@ void draw_frame(struct canvas *c, int x, int y, int w, int h, uint16_t col)
 	draw_fill(c, x + w - 2, y, 2, h, col);
 }
 
-/* One glyph, only its columns in [x0, x1). */
+/* One glyph, only its columns in [x0, x1) (and on the canvas). */
 static void draw_char(struct canvas *c, int x, int y, int scale, uint16_t col,
 		      unsigned char ch, int x0, int x1)
 {
-	const uint8_t *g;
+	const uint16_t *g;
 
 	if (ch < FONT_FIRST || ch > FONT_LAST)
 		ch = '?';
-	g = font8x8[ch - FONT_FIRST];
-	for (int r = 0; r < 8; r++)
-		for (int b = 0; b < 8; b++) {
-			int l = x + b * scale, rt = l + scale;
+	g = font_glyphs[ch - FONT_FIRST];
+	if (x0 < 0)
+		x0 = 0;
+	if (x1 > c->w)
+		x1 = c->w;
+	for (int r = 0; r < FONT_H * scale; r++) {
+		unsigned bits = g[r / scale];
+		int py = y + r;
+		uint16_t *p;
 
-			if (!(g[r] & (1u << b)))
-				continue;
-			if (l < x0)
-				l = x0;
-			if (rt > x1)
-				rt = x1;
-			if (rt > l)
-				draw_fill(c, l, y + r * scale, rt - l, scale, col);
+		if (!bits || py < 0 || py >= c->h)
+			continue;
+		p = c->px + (long)py * c->w;
+		for (int i = 0; i < FONT_W * scale; i++) {
+			int px = x + i;
+
+			if (px >= x0 && px < x1 && (bits & (0x8000u >> (i / scale))))
+				p[px] = col;
 		}
+	}
 }
 
-/* font8x8's pixels at scale, only the columns in [x0, x1). */
+/* The font at scale, only the columns in [x0, x1). */
 static int text_at(struct canvas *c, int x, int y, int scale, uint16_t col,
 		   const char *s, int x0, int x1)
 {
-	for (; *s; s++, x += 8 * scale)
-		if (x + 8 * scale > x0 && x < x1)
+	for (; *s; s++, x += FONT_W * scale)
+		if (x + FONT_W * scale > x0 && x < x1)
 			draw_char(c, x, y, scale, col, (unsigned char)*s, x0, x1);
 	return x;
 }
 
 int draw_text(struct canvas *c, int x, int y, uint16_t col, const char *s)
 {
-	return text_at(c, x, y, FONT_W / 8, col, s, 0, c->w);
+	return text_at(c, x, y, 1, col, s, 0, c->w);
 }
 
 int draw_text_clip(struct canvas *c, int x, int y, uint16_t col,
 		   const char *s, int x0, int x1)
 {
-	return text_at(c, x, y, FONT_W / 8, col, s, x0, x1);
+	return text_at(c, x, y, 1, col, s, x0, x1);
 }
 
 int draw_textf(struct canvas *c, int x, int y, uint16_t col,

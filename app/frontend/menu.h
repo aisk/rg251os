@@ -12,26 +12,27 @@
  * hints at FOOT_Y, lists from LIST_Y with ROW_H px rows (the selection
  * bar ROW_PAD above the text), LIST_ROWS of them on a page.
  */
-#define HEAD_Y      8
-#define HEAD_LINE_Y 30
+#define HEAD_Y      3
+#define HEAD_LINE_Y (HEAD_Y + FONT_H + 3)
 #define FOOT_Y      (CANVAS_H - FONT_H - 2)
-#define LIST_Y      40
-#define ROW_H       18
+#define LIST_Y      (HEAD_LINE_Y + 8)
+#define ROW_H       (FONT_H + 4)
 #define ROW_PAD     ((ROW_H - FONT_H) / 2)
 #define LIST_ROWS   ((FOOT_Y - 2 - (LIST_Y - ROW_PAD)) / ROW_H)
 /* Left margin and the columns of a ROM name in the list. */
 #define LIST_X      8
 #define LIST_COLS   ((CANVAS_W - 2 * LIST_X) / FONT_W)
 
-/* The in-game menu: a box with the game's name in its IG_HEAD_H px top,
- * then IG_ROWS rows IG_ROW_H px apart and IG_TAIL px under them. */
+/* The in-game menu: a box with the game's name and the battery in its
+ * IG_HEAD_H px top, then IG_ROWS rows IG_ROW_H px apart and IG_TAIL px
+ * under them, centered on the screen. */
 #define IG_ROWS     11
-#define IG_BOX_X    56
-#define IG_BOX_Y    34
+#define IG_BOX_X    40
 #define IG_BOX_W    (CANVAS_W - 2 * IG_BOX_X)
-#define IG_HEAD_H   36
-#define IG_ROW_H    22
-#define IG_TAIL     0
+#define IG_HEAD_H   (FONT_H + 8)
+#define IG_ROW_H    (FONT_H + 1)
+#define IG_TAIL     5
+#define IG_BOX_Y    ((CANVAS_H - IG_BOX_H) / 2)
 #define IG_BOX_H    (IG_HEAD_H + IG_ROWS * IG_ROW_H + IG_TAIL)
 
 enum ui_action {
@@ -68,7 +69,7 @@ int settings_menu_update(uint32_t pressed);
 void settings_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 			int w, int h);
 
-/* A ROM name in cols columns at 2x: cut with "~" (" *" kept as "~*"),
+/* A ROM name in cols columns: cut with "~" (" *" kept as "~*"),
  * or scrolled offset pixels to the left and clipped to the columns. */
 void draw_rom_name(struct canvas *c, int x, int y, uint16_t col,
 		   const char *name, int cols, int offset);

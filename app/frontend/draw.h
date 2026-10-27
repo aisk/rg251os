@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include "font.h"
+
 #define RGB(r, g, b) ((uint16_t)((((r) & 0xf8) << 8) | (((g) & 0xfc) << 3) | ((b) >> 3)))
 
 #define COL_BG     RGB(0x10, 0x18, 0x28)
@@ -13,10 +15,6 @@
 #define COL_ERR    RGB(0xff, 0x50, 0x50)
 #define COL_BOX    RGB(0x18, 0x20, 0x38)
 #define COL_OK     RGB(0x60, 0xe0, 0x60)
-
-/* The text cell of draw_text: font8x8.h at 2x. */
-#define FONT_W 16
-#define FONT_H 16
 
 /* The menu canvas, the logical (landscape) screen. */
 #define CANVAS_W 480
@@ -38,7 +36,7 @@ int draw_text_clip(struct canvas *c, int x, int y, uint16_t col,
 		   const char *s, int x0, int x1);
 int draw_textf(struct canvas *c, int x, int y, uint16_t col,
 	       const char *fmt, ...) __attribute__((format(printf, 5, 6)));
-/* The font's pixels scaled by `scale` (font8x8: 8 x scale px a cell). */
+/* The same, scale times as large: FONT_W * scale px a character. */
 int draw_text_scaled(struct canvas *c, int x, int y, int scale, uint16_t col,
 		     const char *s);
 /* The width of s drawn with draw_text. */

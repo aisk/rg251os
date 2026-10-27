@@ -40,19 +40,19 @@
 #include "input.h"
 #include "menu.h"
 
-/* The page: the date and time from DT_Y, the font8x8 at DT_SCALE (a cell
+/* The page: the date and time from DT_Y, the font at DT_SCALE (a cell
  * DT_CELL_W x DT_CELL_H), the selected field on a bar DT_PAD px larger,
  * "+" and "-" DT_SIGN px above and below the bar, the time now at
- * DT_NOW_Y, the message from DT_MSG_Y in DT_MSG_LINE px lines. */
-#define DT_SCALE 3
-#define DT_CELL_W (8 * DT_SCALE)
-#define DT_CELL_H (8 * DT_SCALE)
-#define DT_Y 110
-#define DT_PAD 6
-#define DT_SIGN 24
-#define DT_NOW_Y 190
-#define DT_MSG_Y (CANVAS_H - 76)
-#define DT_MSG_LINE 20
+ * DT_NOW_Y, two message lines DT_MSG_LINE px apart above the key hint. */
+#define DT_SCALE 2
+#define DT_CELL_W (FONT_W * DT_SCALE)
+#define DT_CELL_H (FONT_H * DT_SCALE)
+#define DT_Y 90
+#define DT_PAD 2
+#define DT_SIGN (FONT_H + 2)
+#define DT_NOW_Y (DT_Y + DT_CELL_H + DT_PAD + DT_SIGN + 12)
+#define DT_MSG_LINE (FONT_H + 2)
+#define DT_MSG_Y (FOOT_Y - 4 - 2 * DT_MSG_LINE)
 
 enum { F_YEAR, F_MONTH, F_DAY, F_HOUR, F_MIN, F_COUNT };
 
@@ -380,7 +380,7 @@ void datetime_draw(struct canvas *c)
 	}
 
 	/* The message, one line per '\n'. */
-	for (p = dt.msg; *p && ly < c->h - 30; ly += DT_MSG_LINE) {
+	for (p = dt.msg; *p && ly + FONT_H <= FOOT_Y - 2; ly += DT_MSG_LINE) {
 		size_t n = strcspn(p, "\n");
 
 		draw_textf(c, 8, ly, COL_ERR, "%.*s", n > (size_t)cols ? cols :

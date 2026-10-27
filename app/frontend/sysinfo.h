@@ -3,17 +3,17 @@
 
 #include <stdint.h>
 
-#include "draw.h"
+#include "menu.h"
 
 #define SYSINFO_MAX_CPUS 8
 
 /* The page: labels at x 8, values from SYSINFO_VAL_X, rows from
- * SYSINFO_ROW_Y, SYSINFO_ROW_H px apart, none starting below
- * SYSINFO_ROW_MAX. */
+ * SYSINFO_ROW_Y, SYSINFO_ROW_H px apart, down to the bottom (the key hint
+ * is in the title bar), none starting below SYSINFO_ROW_MAX. */
 #define SYSINFO_VAL_X   (8 + FONT_W * 8)
-#define SYSINFO_ROW_Y   40
-#define SYSINFO_ROW_H   20
-#define SYSINFO_ROW_MAX (CANVAS_H - 40)
+#define SYSINFO_ROW_Y   (HEAD_LINE_Y + 6)
+#define SYSINFO_ROW_H   FONT_H
+#define SYSINFO_ROW_MAX (CANVAS_H - 2 - FONT_H)
 
 /* Jiffies from one /proc/stat line. */
 struct cpu_times {

@@ -26,4 +26,4 @@ Or take an image from the releases. Write it to an SD card, boot once, then copy
 
 ## License
 
-GPLv3, see [LICENSE](LICENSE). Submodules under `external/` keep their own licenses. The ROM name table in `app/frontend/romdb_data.c` is generated from No-Intro data via libretro-database and is CC BY-SA 4.0.
+GPLv3, see [LICENSE](LICENSE). Submodules under `external/` keep their own licenses. The ROM name table in `app/frontend/romdb_data.c` is generated from No-Intro data via libretro-database and is CC BY-SA 4.0. The UI font in `app/frontend/font.c` is generated from Spleen 12x24 by Frederic Cambus and is BSD 2-Clause (license text in the file).

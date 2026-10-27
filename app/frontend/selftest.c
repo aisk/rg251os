@@ -1410,14 +1410,19 @@ static void test_cpuctl(const char *base)
 	CHECK(csv_field(csv, ",fixed,816000,", 5) >= 1200, "fixed mode row");
 }
 
-/* Long ROM names: the marquee timing and a scrolled, clipped row. */
+/* Long ROM names: the marquee timing and a scrolled, clipped row, in
+ * the ROM list's columns. */
 static void test_marquee(void)
 {
-	static uint16_t px[480 * 24], ref[480 * 24];
-	struct canvas cv = { px, 480, 24 }, rc = { ref, 480, 24 };
-	const char *name = "ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghij *";
-	int n = strlen(name), excess = 16 * (n - 29), prev = 0, bad = 0;
+	enum { H = FONT_H + 8 };
+	static uint16_t px[480 * H], ref[480 * H];
+	struct canvas cv = { px, 480, H }, rc = { ref, 480, H };
+	const char *name = "ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz *";
+	const int cols = LIST_COLS, right = 8 + FONT_W * cols;
+	int n = strlen(name), excess = FONT_W * (n - cols), prev = 0, bad = 0;
+	char cut[96];
 
+	CHECK(excess > 0, "marquee: test name fits in %d columns", cols);
 	for (unsigned f = 0; f < 1000; f++) {
 		int o = marquee_offset(excess, f);
 
@@ -1441,38 +1446,39 @@ static void test_marquee(void)
 	      "marquee: back to the start, paused again");
 
 	/* Not scrolled: cut with "~*"; a name that fits ignores the offset. */
-	draw_fill(&cv, 0, 0, 480, 24, 0);
-	draw_rom_name(&cv, 8, 4, COL_FG, name, 29, 0);
-	draw_fill(&rc, 0, 0, 480, 24, 0);
-	draw_text(&rc, 8, 4, COL_FG, "ABCDEFGHIJKLMNOPQRSTUVWXYZ ~*");
+	draw_fill(&cv, 0, 0, 480, H, 0);
+	draw_rom_name(&cv, 8, 4, COL_FG, name, cols, 0);
+	draw_fill(&rc, 0, 0, 480, H, 0);
+	snprintf(cut, sizeof(cut), "%.*s~*", cols - 2, name);
+	draw_text(&rc, 8, 4, COL_FG, cut);
 	CHECK(!memcmp(px, ref, sizeof(px)), "marquee: cut row");
-	draw_fill(&cv, 0, 0, 480, 24, 0);
-	draw_rom_name(&cv, 8, 4, COL_FG, "Short (USA) *", 29, 40);
-	draw_fill(&rc, 0, 0, 480, 24, 0);
+	draw_fill(&cv, 0, 0, 480, H, 0);
+	draw_rom_name(&cv, 8, 4, COL_FG, "Short (USA) *", cols, 40);
+	draw_fill(&rc, 0, 0, 480, H, 0);
 	draw_text(&rc, 8, 4, COL_FG, "Short (USA) *");
 	CHECK(!memcmp(px, ref, sizeof(px)), "marquee: a short name moved");
 
 	/* Scrolled by 37 and to the end: all of the name, " *" included,
-	 * shifted and clipped to the 29 columns. */
+	 * shifted and clipped to the columns. */
 	for (int k = 0; k < 2; k++) {
 		int off = k ? excess : 37;
 
-		draw_fill(&cv, 0, 0, 480, 24, 0);
-		draw_rom_name(&cv, 8, 4, COL_FG, name, 29, off);
-		draw_fill(&rc, 0, 0, 480, 24, 0);
+		draw_fill(&cv, 0, 0, 480, H, 0);
+		draw_rom_name(&cv, 8, 4, COL_FG, name, cols, off);
+		draw_fill(&rc, 0, 0, 480, H, 0);
 		draw_text(&rc, 8 - off, 4, COL_FG, name);
-		draw_fill(&rc, 0, 0, 8, 24, 0);
-		draw_fill(&rc, 8 + 16 * 29, 0, 480, 24, 0);
+		draw_fill(&rc, 0, 0, 8, H, 0);
+		draw_fill(&rc, right, 0, 480, H, 0);
 		CHECK(!memcmp(px, ref, sizeof(px)), "marquee: row scrolled by %d",
 		      off);
 	}
 	/* At the end the last column holds the "*". */
-	draw_fill(&rc, 0, 0, 480, 24, 0);
-	draw_text(&rc, 8 + 16 * 28, 4, COL_FG, "*");
+	draw_fill(&rc, 0, 0, 480, H, 0);
+	draw_text(&rc, right - FONT_W, 4, COL_FG, "*");
 	bad = 0;
-	for (int y = 0; y < 24; y++)
-		bad += !!memcmp(px + y * 480 + 8 + 16 * 28,
-				ref + y * 480 + 8 + 16 * 28, 16 * 2);
+	for (int y = 0; y < H; y++)
+		bad += !!memcmp(px + y * 480 + right - FONT_W,
+				ref + y * 480 + right - FONT_W, FONT_W * 2);
 	CHECK(!bad, "marquee: no \"*\" at the end (%d rows differ)", bad);
 }
 
@@ -1499,15 +1505,22 @@ static void test_ingame_restart(const char *dir)
 	struct canvas cv = { px, 480, 320 };
 	char path[300];
 	int act, armed, plain;
+	/* The selection bars of the in-game menu's rows 1 and 10, its end;
+	 * the global settings' row 7 (Power off) and the end of the 9. */
+	const int row1 = IG_BOX_Y + IG_HEAD_H + IG_ROW_H -
+			 (IG_ROW_H - FONT_H) / 2;
+	const int last = row1 + 9 * IG_ROW_H, end = IG_BOX_Y + IG_BOX_H;
+	const int srow7 = LIST_Y - ROW_PAD + 7 * ROW_H;
+	const int send = LIST_Y - ROW_PAD + 9 * ROW_H;
 
 	ingame_menu_enter("Game");
 	ingame_menu_update(JOY_BIT(DOWN));
 	ingame_menu_draw(&cv, NULL, 0, 0, 0);
-	/* Row 1 at y 92 (box at 34, 36 px name, 22 px rows). */
-	plain = count_color(px, 92, 116, COL_HI);
+	/* Row 1, its selection bar. */
+	plain = count_color(px, row1, row1 + IG_ROW_H, COL_HI);
 	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_NONE, "restart: first A arms");
 	ingame_menu_draw(&cv, NULL, 0, 0, 0);
-	armed = count_color(px, 92, 116, COL_HI);
+	armed = count_color(px, row1, row1 + IG_ROW_H, COL_HI);
 	CHECK(plain == 0 && armed > 0, "restart: armed row %d/%d highlighted",
 	      plain, armed);
 	snprintf(path, sizeof(path), "%s/ui-ingame-restart.raw", dir);
@@ -1545,30 +1558,33 @@ static void test_ingame_restart(const char *dir)
 	for (int i = 0; i < 180; i++)
 		ingame_menu_update(0);
 	ingame_menu_draw(&cv, NULL, 0, 0, 0);
-	CHECK(count_color(px, 92, 116, COL_HI) == 0,
+	CHECK(count_color(px, row1, row1 + IG_ROW_H, COL_HI) == 0,
 	      "restart: label back after 3 s");
 	/* B resumes; the menu opens again disarmed. */
 	CHECK(ingame_menu_update(JOY_BIT(B)) == UI_RESUME, "restart: B resumes");
 	ingame_menu_enter("Game");
 	ingame_menu_update(JOY_BIT(DOWN));
 	ingame_menu_draw(&cv, NULL, 0, 0, 0);
-	CHECK(count_color(px, 92, 116, COL_HI) == 0,
+	CHECK(count_color(px, row1, row1 + IG_ROW_H, COL_HI) == 0,
 	      "restart: disarmed on entering");
 
 	/* Up from Resume wraps to Power off, the last row: its highlight
-	 * and the box frame end at y 312, the rest is the dimmed game. */
+	 * ends IG_TAIL above the box, whose frame ends on screen, the rest
+	 * is the dimmed game. */
 	ingame_menu_enter("Game");
 	act = ingame_menu_update(JOY_BIT(UP));
 	ingame_menu_draw(&cv, NULL, 0, 0, 0);
-	CHECK(act == UI_NONE && px[300 * 480 + 240] == COL_SEL &&
-	      px[309 * 480 + 240] == COL_BOX && px[311 * 480 + 240] == COL_SEL &&
-	      count_color(px, 312, 320, COL_SEL) == 0 &&
-	      count_color(px, 312, 320, COL_BOX) == 0,
+	CHECK(IG_BOX_Y > 0 && end <= 320 && act == UI_NONE &&
+	      px[(last + IG_ROW_H - 1) * 480 + 240] == COL_SEL &&
+	      px[(end - 3) * 480 + 240] == COL_BOX &&
+	      px[(end - 1) * 480 + 240] == COL_SEL &&
+	      count_color(px, end, 320, COL_SEL) == 0 &&
+	      count_color(px, end, 320, COL_BOX) == 0,
 	      "restart: menu box fits on screen");
 	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_NONE,
 	      "power off: first A arms");
 	ingame_menu_draw(&cv, NULL, 0, 0, 0);
-	CHECK(count_color(px, 290, 312, COL_HI) > 0,
+	CHECK(count_color(px, last, last + IG_ROW_H, COL_HI) > 0,
 	      "power off: armed row highlighted");
 	snprintf(path, sizeof(path), "%s/ui-ingame-poweroff.raw", dir);
 	write_file_atomic(path, px, sizeof(px));
@@ -1592,17 +1608,17 @@ static void test_ingame_restart(const char *dir)
 	for (int i = 0; i < 7; i++)
 		settings_menu_update(JOY_BIT(DOWN));
 	settings_menu_draw(&cv, NULL, 0, 0, 0);
-	/* Row 7 at y 46 + 7 * 26 = 228. */
-	plain = count_color(px, 223, 249, COL_HI);
+	plain = count_color(px, srow7, srow7 + ROW_H, COL_HI);
 	CHECK(settings_menu_update(JOY_BIT(A)) == UI_NONE,
 	      "settings power off: first A arms");
 	settings_menu_draw(&cv, NULL, 0, 0, 0);
-	armed = count_color(px, 223, 249, COL_HI);
+	armed = count_color(px, srow7, srow7 + ROW_H, COL_HI);
 	CHECK(plain == 0 && armed > 0,
 	      "settings power off: armed row %d/%d highlighted", plain, armed);
-	CHECK(count_color(px, 280, 300, COL_SEL) == 0 &&
-	      count_color(px, 280, 300, COL_FG) == 0 &&
-	      count_color(px, 280, 300, COL_DIM) == 0,
+	CHECK(send <= FOOT_Y &&
+	      count_color(px, send, FOOT_Y, COL_SEL) == 0 &&
+	      count_color(px, send, FOOT_Y, COL_FG) == 0 &&
+	      count_color(px, send, FOOT_Y, COL_DIM) == 0,
 	      "settings: rows end above B:back");
 	snprintf(path, sizeof(path), "%s/ui-settings-poweroff.raw", dir);
 	write_file_atomic(path, px, sizeof(px));
@@ -1637,16 +1653,16 @@ static void put_path(const char *base, const char *rel, const char *val)
 	write_text(path, val);
 }
 
-/* Rows [y, y + 16) from x match text drawn there on the background. */
+/* Rows [y, y + FONT_H) from x match text drawn there on the background. */
 static int row_shows(const uint16_t *px, int x, int y, const char *text)
 {
 	static uint16_t ref[480 * 320];
 	struct canvas rc = { ref, 480, 320 };
-	int w = 16 * (int)strlen(text);
+	int w = draw_text_width(text);
 
 	draw_fill(&rc, 0, 0, 480, 320, COL_BG);
 	draw_text(&rc, x, y, COL_FG, text);
-	for (int r = y; r < y + 16; r++)
+	for (int r = y; r < y + FONT_H; r++)
 		if (memcmp(px + r * 480 + x, ref + r * 480 + x, w * 2))
 			return 0;
 	return 1;
@@ -1658,6 +1674,10 @@ static int row_shows(const uint16_t *px, int x, int y, const char *text)
  * sensor, one cpufreq policy): CPU usage since boot, then from the
  * deltas after a second, the temperatures, and B goes back.
  */
+/* Row k of the system info page shows text as its value. */
+#define SI_SHOWS(k, text) \
+	row_shows(px, SYSINFO_VAL_X, SYSINFO_ROW_Y + (k) * SYSINFO_ROW_H, text)
+
 static void test_sysinfo(const char *dir)
 {
 	static const char stat0[] =
@@ -1715,23 +1735,23 @@ static void test_sysinfo(const char *dir)
 	sysinfo_set_root(root);
 	sysinfo_enter("selftest", 0);
 	sysinfo_draw(&cv);
-	/* CPU, Cores, Freq, Memory, Temp rows from y 40, 20 px apart. */
-	CHECK(row_shows(px, 136, 40, " 20%  Adaptive"), "sysinfo: CPU since boot");
-	CHECK(row_shows(px, 136, 60, " 20%   20%"), "sysinfo: cores since boot");
-	CHECK(row_shows(px, 136, 80, "1296 MHz"), "sysinfo: frequency");
-	CHECK(row_shows(px, 136, 100, "200 / 980 MB"), "sysinfo: memory");
-	CHECK(row_shows(px, 136, 120, "soc 45.2C  gpu 44.8C"),
+	/* CPU, Cores, Freq, Memory, Temp rows (the temperatures wrap). */
+	CHECK(SI_SHOWS(0, " 20%  Adaptive"), "sysinfo: CPU since boot");
+	CHECK(SI_SHOWS(1, " 20%   20%"), "sysinfo: cores since boot");
+	CHECK(SI_SHOWS(2, "1296 MHz"), "sysinfo: frequency");
+	CHECK(SI_SHOWS(3, "200 / 980 MB"), "sysinfo: memory");
+	CHECK(SI_SHOWS(4, "soc 45.2C  gpu 44.8C"),
 	      "sysinfo: thermal zones");
-	CHECK(row_shows(px, 136, 140, "batt 30.0C"), "sysinfo: hwmon wraps");
+	CHECK(SI_SHOWS(5, "batt 30.0C"), "sysinfo: hwmon wraps");
 	put_path(root, "proc/stat", stat1);
 	CHECK(sysinfo_update(0, 500000000LL) == UI_NONE, "sysinfo: stays open");
 	sysinfo_draw(&cv);
-	CHECK(row_shows(px, 136, 40, " 20%  Adaptive"),
+	CHECK(SI_SHOWS(0, " 20%  Adaptive"),
 	      "sysinfo: not refreshed before 1 s");
 	sysinfo_update(0, 1000000000LL);
 	sysinfo_draw(&cv);
-	CHECK(row_shows(px, 136, 40, " 50%  Adaptive") &&
-	      row_shows(px, 136, 60, "  0%  100%"), "sysinfo: usage from deltas");
+	CHECK(SI_SHOWS(0, " 50%  Adaptive") &&
+	      SI_SHOWS(1, "  0%  100%"), "sysinfo: usage from deltas");
 	snprintf(path, sizeof(path), "%s/ui-sysinfo.raw", dir);
 	write_file_atomic(path, px, sizeof(px));
 	CHECK(sysinfo_update(JOY_BIT(B), 1100000000LL) == UI_BACK,

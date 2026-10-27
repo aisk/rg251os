@@ -878,6 +878,9 @@ static void startup(void)
 		snprintf(path, sizeof(path), "%s/frontend.txt", fe_log_dir);
 		log_open_file(path);
 		log_msg("log: boot %u, logging to %s", boot, fe_log_dir);
+		log_msg("ui: font %dx%d, canvas %dx%d, ROM list %d rows of %d px, "
+			"%d columns, in-game menu rows %d px", FONT_W, FONT_H,
+			CANVAS_W, CANVAS_H, LIST_ROWS, ROW_H, LIST_COLS, IG_ROW_H);
 		fx_init_grid_phase(boot);
 	}
 	settings_load();

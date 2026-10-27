@@ -1,5 +1,6 @@
 /*
- * Menus on the 480x320 logical canvas, 8x8 font at 2x (30 columns).
+ * Menus on the 480x320 logical canvas in the 12x24 font of font.h (40
+ * columns), laid out from its size (menu.h).
  *
  * ROM list: one folder of roms/ at a time, its subfolders first (as
  * "name/", in yellow), then the ROMs by their No-Intro names (romdb.c;
@@ -40,8 +41,9 @@
  * (GBA)", Off, GBA, GBA light or SP101), LCD grid, Grid darkness, Dot
  * boost and Debug log. In menus, up/down select, left/right change a
  * value, A activates, B goes back. The battery level is shown in the ROM
- * list header and above the in-game menus; the ROM list header also has
- * the time (HH:MM, UTC as entered, see clock.c) once the clock is set.
+ * list and settings headers and right of the game's name in the in-game
+ * menu; the ROM list header also has the time (HH:MM, UTC as entered,
+ * see clock.c) once the clock is set.
  */
 #include <stdio.h>
 #include <string.h>
@@ -60,21 +62,19 @@
 #define COL_OFF RGB(0x50, 0x58, 0x68)
 /* An empty ROM list: the first line at EMPTY_Y, a blank line, then the
  * help EMPTY_LINE px apart. */
-#define EMPTY_LINE (FONT_H + 8)
+#define EMPTY_LINE (FONT_H + 4)
 #define EMPTY_GAP (EMPTY_LINE + FONT_H)
 #define EMPTY_Y (LIST_Y + EMPTY_GAP)
-/* The global settings: rows from SET_Y, SET_ROW_H px apart; in game, a
- * panel at the bottom with IG_ROW_H px rows and IG_PANEL_PAD px above and
- * below them. */
-#define SET_Y 46
-#define SET_ROW_H 26
+/* The global settings are a list (LIST_Y, ROW_H); in game, a panel at
+ * the bottom with IG_ROW_H px rows and IG_PANEL_PAD px above and below
+ * them. */
 #define IG_PANEL_PAD 6
 /* Messages (message_draw): the title, the body from MSG_BODY_Y with
  * MSG_LINE px lines, the POWER hint MSG_FOOT px above the bottom. */
-#define MSG_TITLE_Y 24
-#define MSG_BODY_Y 60
-#define MSG_LINE 22
-#define MSG_FOOT 28
+#define MSG_TITLE_Y 20
+#define MSG_BODY_Y (MSG_TITLE_Y + FONT_H + 16)
+#define MSG_LINE (FONT_H + 2)
+#define MSG_FOOT (FONT_H + 4)
 
 /* A scrolling name: frames drawn since it was selected. */
 struct marquee {
@@ -659,13 +659,15 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 	const int bx = IG_BOX_X, by = IG_BOX_Y, bw = IG_BOX_W;
 	/* Values right aligned, FONT_W from the box's right edge. */
 	const int vr = bx + bw - FONT_W;
-	int cols = (bw - 24) / FONT_W;
+	const int ny = by + (IG_HEAD_H - FONT_H) / 2;
+	int cols;
 
 	draw_image_dim(c, frame, pitch, w, h);
-	draw_battery(c, c->w - 8, 16);
 	draw_fill(c, bx, by, bw, IG_BOX_H, COL_BOX);
 	draw_frame(c, bx, by, bw, IG_BOX_H, COL_SEL);
-	draw_rom_name(c, bx + 12, by + 12, COL_HI, ig.name, cols,
+	/* The name in the columns left of the battery. */
+	cols = (draw_battery(c, vr, ny) - FONT_W - (bx + 12)) / FONT_W;
+	draw_rom_name(c, bx + 12, ny, COL_HI, ig.name, cols,
 		      marquee_step(&ig.mq, 0, ig.name, cols));
 	for (int i = 0; i < IG_COUNT; i++) {
 		int y = by + IG_HEAD_H + i * IG_ROW_H;
@@ -913,7 +915,7 @@ void settings_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 	draw_text(c, 8, HEAD_Y, COL_HI, "Settings");
 	draw_battery(c, c->w - 8, HEAD_Y);
 	draw_fill(c, 0, HEAD_LINE_Y, c->w, 2, COL_SEL);
-	settings_rows(c, 0, SET_Y, c->w, SET_ROW_H);
+	settings_rows(c, 0, LIST_Y, c->w, ROW_H);
 	draw_text(c, 8, FOOT_Y, COL_DIM, "B:back");
 }
 
@@ -927,7 +929,7 @@ void message_draw(struct canvas *c, const char *title, const char *body,
 
 	draw_fill(c, 0, 0, c->w, c->h, COL_BG);
 	draw_text(c, 16, MSG_TITLE_Y, col, title);
-	while (body && *body && y < foot - 12) {
+	while (body && *body && y + FONT_H <= foot - 4) {
 		char line[CANVAS_W / FONT_W + 1];
 		int n = 0, brk = -1;
 

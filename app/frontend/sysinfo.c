@@ -9,7 +9,9 @@
  * soc-thermal and gpu-thermal) and hwmon temperature, the battery
  * (battery.c), the date and time (the system clock as UTC, "Not set"
  * before 2024, see clock.c), uptime (CLOCK_BOOTTIME), free of total space
- * on the GBA partition and the kernel release.
+ * on the GBA partition and the kernel release. Rows are one font height
+ * apart with the B:back hint in the title bar, which leaves room for 11
+ * (what the device shows); rows past the bottom are left out.
  *
  * Log: when the page opens, "sysinfo: ..." lines with all the values and
  * which sensors were found, so one run on the device shows them.
@@ -439,5 +441,7 @@ void sysinfo_draw(struct canvas *c)
 		snprintf(v, sizeof(v), "-");
 	row(c, &y, "Free", v);
 	row(c, &y, "Kernel", si.kernel);
-	draw_text(c, 8, FOOT_Y, COL_DIM, "B:back");
+	/* Every row is needed (11 on the device), so the hint goes up. */
+	draw_text(c, c->w - 8 - draw_text_width("B:back"), HEAD_Y, COL_DIM,
+		  "B:back");
 }
