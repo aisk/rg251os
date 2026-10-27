@@ -204,6 +204,21 @@ static int format_fields(const void *obj, const struct field *fields,
 	return n < size ? (int)n : -1;
 }
 
+/* All the fields on one line for the log: "key=value key=value". */
+static void fields_line(const void *obj, const struct field *fields,
+			size_t nf, char *buf, size_t size)
+{
+	size_t n;
+
+	format_fields(obj, fields, nf, ~0u, buf, size);
+	for (char *p = buf; *p; p++)
+		if (*p == '\n')
+			*p = ' ';
+	n = strlen(buf);
+	if (n && buf[n - 1] == ' ')
+		buf[n - 1] = 0;
+}
+
 static int load_file(const char *path, void *obj, const struct field *fields,
 		     size_t nf, unsigned *mask)
 {
@@ -232,7 +247,7 @@ int settings_format(const struct settings *s, char *buf, size_t size)
 
 void settings_load(void)
 {
-	char path[300], cpu[16];
+	char path[300], line[256];
 	int n;
 
 	settings = settings_defaults;
@@ -244,17 +259,11 @@ void settings_load(void)
 			settings.brightness, BRIGHTNESS_MIN);
 		settings.brightness = BRIGHTNESS_MIN;
 	}
-	if (settings.cpu >= (int)ARRAY_SIZE(cpu_modes))
-		snprintf(cpu, sizeof(cpu), "%d MHz", settings.cpu);
-	else
-		snprintf(cpu, sizeof(cpu), "%s", cpu_modes[settings.cpu]);
-	log_msg("settings: %s, %d values: volume %d, brightness %d%%, grid %s "
-		"dim %d%% boost %d%%, cpu %s, audio %s, debug %s",
+	fields_line(&settings, global_fields, ARRAY_SIZE(global_fields), line,
+		    sizeof(line));
+	log_msg("settings: %s, %d values: %s",
 		n < 0 ? "defaults (no file)" : "config/settings.txt",
-		n < 0 ? 0 : n, settings.volume, settings.brightness,
-		settings.grid ? "on" : "off", settings.grid_dim,
-		settings.grid_boost, cpu, audio_modes[settings.audio],
-		on_off[settings.debug]);
+		n < 0 ? 0 : n, line);
 	log_set_debug(settings.debug);
 }
 
@@ -270,15 +279,17 @@ void settings_save(void)
 
 /* --------------------------------------------------------------- per ROM */
 
+/* The same for every game today, 0 unless listed. gpSP is the default
+ * core: mGBA barely keeps up with demanding games on the RK3326. */
+static const struct rom_settings rom_defaults = {
+	.color = COLOR_AUTO,
+	.core = CORE_GPSP,
+};
+
 void rom_settings_defaults(const char *rom_name, struct rom_settings *r)
 {
-	/* The same for every game today. gpSP is the default core: mGBA
-	 * barely keeps up with demanding games on the RK3326. */
 	(void)rom_name;
-	r->color = COLOR_AUTO;
-	r->cpu_start = 0;
-	r->core = CORE_GPSP;
-	r->blend = 0;
+	*r = rom_defaults;
 }
 
 int rom_settings_parse(struct rom_settings *r, const char *text)
@@ -293,7 +304,7 @@ static void rom_path(char *buf, size_t size)
 
 void rom_settings_load(const char *rom_name)
 {
-	char path[400];
+	char path[400], line[256];
 	int n;
 
 	rom_base[0] = 0;
@@ -307,10 +318,10 @@ void rom_settings_load(const char *rom_name)
 	rom_path(path, sizeof(path));
 	n = load_file(path, &rom_settings, rom_fields, ARRAY_SIZE(rom_fields),
 		      &rom_in_file);
-	log_msg("settings: %s: %s, color %s, cpu_start %d MHz, core %s, "
-		"blend %s", rom_base, n < 0 ? "defaults (no file)" : "loaded",
-		color_mode_names[rom_settings.color], rom_settings.cpu_start,
-		core_names[rom_settings.core], on_off[rom_settings.blend]);
+	fields_line(&rom_settings, rom_fields, ARRAY_SIZE(rom_fields), line,
+		    sizeof(line));
+	log_msg("settings: %s: %s, %s", rom_base,
+		n < 0 ? "defaults (no file)" : "loaded", line);
 }
 
 void rom_settings_set_auto(int color, const char *why)

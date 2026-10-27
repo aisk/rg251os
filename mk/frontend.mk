@@ -108,7 +108,7 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	grep -q 'core: unloaded ([1-9][0-9]* save writes)' \
 		$(FRONTEND_TEST_DIR)/stub/log/frontend.txt
 	# Defaults: gpSP for a ROM without a choice.
-	grep -q 'settings: test: defaults (no file), .*core gpsp' \
+	grep -q 'settings: test: defaults (no file), .*core=gpsp' \
 		$(FRONTEND_TEST_DIR)/stub/log/frontend.txt
 	# An unknown ROM keeps its file name; auto color falls back to off.
 	grep -q 'romdb: test.gba is "test" (unknown' \
@@ -227,7 +227,7 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	$(QEMU_AARCH64) $(FRONTEND_ELF) --headless $(FRONTEND_TEST_DIR)/blend \
 		$(FRONTEND_TEST_ROM) 1200
 	set -e; f=$(FRONTEND_TEST_DIR)/blend/log/frontend.txt; \
-	grep -q 'settings: test: loaded, .*core gpsp, blend on' $$f; \
+	grep -q 'settings: test: loaded, .*core=gpsp blend=on' $$f; \
 	grep -q 'core: options .*gpsp_frame_mixing=enabled' $$f; \
 	grep -q 'headless: 1200 frames, frame 240x160' $$f
 	# mGBA -> gpSP -> mGBA in one process on one save, a .srm, a reset
