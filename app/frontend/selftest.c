@@ -1444,12 +1444,12 @@ static void test_marquee(void)
 	draw_fill(&cv, 0, 0, 480, 24, 0);
 	draw_rom_name(&cv, 8, 4, COL_FG, name, 29, 0);
 	draw_fill(&rc, 0, 0, 480, 24, 0);
-	draw_text(&rc, 8, 4, 2, COL_FG, "ABCDEFGHIJKLMNOPQRSTUVWXYZ ~*");
+	draw_text(&rc, 8, 4, COL_FG, "ABCDEFGHIJKLMNOPQRSTUVWXYZ ~*");
 	CHECK(!memcmp(px, ref, sizeof(px)), "marquee: cut row");
 	draw_fill(&cv, 0, 0, 480, 24, 0);
 	draw_rom_name(&cv, 8, 4, COL_FG, "Short (USA) *", 29, 40);
 	draw_fill(&rc, 0, 0, 480, 24, 0);
-	draw_text(&rc, 8, 4, 2, COL_FG, "Short (USA) *");
+	draw_text(&rc, 8, 4, COL_FG, "Short (USA) *");
 	CHECK(!memcmp(px, ref, sizeof(px)), "marquee: a short name moved");
 
 	/* Scrolled by 37 and to the end: all of the name, " *" included,
@@ -1460,7 +1460,7 @@ static void test_marquee(void)
 		draw_fill(&cv, 0, 0, 480, 24, 0);
 		draw_rom_name(&cv, 8, 4, COL_FG, name, 29, off);
 		draw_fill(&rc, 0, 0, 480, 24, 0);
-		draw_text(&rc, 8 - off, 4, 2, COL_FG, name);
+		draw_text(&rc, 8 - off, 4, COL_FG, name);
 		draw_fill(&rc, 0, 0, 8, 24, 0);
 		draw_fill(&rc, 8 + 16 * 29, 0, 480, 24, 0);
 		CHECK(!memcmp(px, ref, sizeof(px)), "marquee: row scrolled by %d",
@@ -1468,7 +1468,7 @@ static void test_marquee(void)
 	}
 	/* At the end the last column holds the "*". */
 	draw_fill(&rc, 0, 0, 480, 24, 0);
-	draw_text(&rc, 8 + 16 * 28, 4, 2, COL_FG, "*");
+	draw_text(&rc, 8 + 16 * 28, 4, COL_FG, "*");
 	bad = 0;
 	for (int y = 0; y < 24; y++)
 		bad += !!memcmp(px + y * 480 + 8 + 16 * 28,
@@ -1645,7 +1645,7 @@ static int row_shows(const uint16_t *px, int x, int y, const char *text)
 	int w = 16 * (int)strlen(text);
 
 	draw_fill(&rc, 0, 0, 480, 320, COL_BG);
-	draw_text(&rc, x, y, 2, COL_FG, text);
+	draw_text(&rc, x, y, COL_FG, text);
 	for (int r = y; r < y + 16; r++)
 		if (memcmp(px + r * 480 + x, ref + r * 480 + x, w * 2))
 			return 0;

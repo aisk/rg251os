@@ -7,6 +7,14 @@
 
 #define SYSINFO_MAX_CPUS 8
 
+/* The page: labels at x 8, values from SYSINFO_VAL_X, rows from
+ * SYSINFO_ROW_Y, SYSINFO_ROW_H px apart, none starting below
+ * SYSINFO_ROW_MAX. */
+#define SYSINFO_VAL_X   (8 + FONT_W * 8)
+#define SYSINFO_ROW_Y   40
+#define SYSINFO_ROW_H   20
+#define SYSINFO_ROW_MAX (CANVAS_H - 40)
+
 /* Jiffies from one /proc/stat line. */
 struct cpu_times {
 	unsigned long long busy, total;

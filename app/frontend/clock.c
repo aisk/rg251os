@@ -40,6 +40,20 @@
 #include "input.h"
 #include "menu.h"
 
+/* The page: the date and time from DT_Y, the font8x8 at DT_SCALE (a cell
+ * DT_CELL_W x DT_CELL_H), the selected field on a bar DT_PAD px larger,
+ * "+" and "-" DT_SIGN px above and below the bar, the time now at
+ * DT_NOW_Y, the message from DT_MSG_Y in DT_MSG_LINE px lines. */
+#define DT_SCALE 3
+#define DT_CELL_W (8 * DT_SCALE)
+#define DT_CELL_H (8 * DT_SCALE)
+#define DT_Y 110
+#define DT_PAD 6
+#define DT_SIGN 24
+#define DT_NOW_Y 190
+#define DT_MSG_Y (CANVAS_H - 76)
+#define DT_MSG_LINE 20
+
 enum { F_YEAR, F_MONTH, F_DAY, F_HOUR, F_MIN, F_COUNT };
 
 static struct {
@@ -334,44 +348,46 @@ int datetime_update(uint32_t pressed)
 
 void datetime_draw(struct canvas *c)
 {
-	/* Column and width of each field in "YYYY-MM-DD HH:MM" at 3x. */
+	/* Column and width of each field in "YYYY-MM-DD HH:MM", drawn
+	 * DT_SCALE times as large, cw px a column. */
 	static const int col[F_COUNT] = { 0, 5, 8, 11, 14 };
 	static const int len[F_COUNT] = { 4, 2, 2, 2, 2 };
-	const int cw = 24, x0 = (c->w - 16 * cw) / 2, y = 110;
+	const int cw = DT_CELL_W, x0 = (c->w - 16 * cw) / 2, y = DT_Y;
+	const int fx = x0 + col[dt.field] * cw, fw = len[dt.field] * cw;
+	const int cols = (c->w - 16) / FONT_W;
 	struct tm now;
 	char buf[24];
 	const char *p;
-	int ly = c->h - 76;
+	int ly = DT_MSG_Y;
 
 	draw_fill(c, 0, 0, c->w, c->h, COL_BG);
-	draw_text(c, 8, 8, 2, COL_HI, "Date & time");
-	draw_fill(c, 0, 30, c->w, 2, COL_SEL);
+	draw_text(c, 8, HEAD_Y, COL_HI, "Date & time");
+	draw_fill(c, 0, HEAD_LINE_Y, c->w, 2, COL_SEL);
 
-	draw_fill(c, x0 + col[dt.field] * cw - 4, y - 6, len[dt.field] * cw + 8,
-		  8 * 3 + 12, COL_SEL);
+	draw_fill(c, fx - 4, y - DT_PAD, fw + 8, DT_CELL_H + 2 * DT_PAD, COL_SEL);
 	snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d", dt.v[F_YEAR],
 		 dt.v[F_MONTH], dt.v[F_DAY], dt.v[F_HOUR], dt.v[F_MIN]);
-	draw_text(c, x0, y, 3, COL_FG, buf);
-	draw_text(c, x0 + col[dt.field] * cw + (len[dt.field] * cw - 16) / 2,
-		  y - 30, 2, COL_DIM, "+");
-	draw_text(c, x0 + col[dt.field] * cw + (len[dt.field] * cw - 16) / 2,
-		  y + 38, 2, COL_DIM, "-");
+	draw_text_scaled(c, x0, y, DT_SCALE, COL_FG, buf);
+	draw_text(c, fx + (fw - FONT_W) / 2, y - DT_PAD - DT_SIGN, COL_DIM, "+");
+	draw_text(c, fx + (fw - FONT_W) / 2,
+		  y + DT_CELL_H + DT_PAD + DT_SIGN - FONT_H, COL_DIM, "-");
 
 	if (realtime_utc(&now)) {
 		fmt_tm(buf, sizeof(buf), &now);
-		draw_textf(c, 8, 190, 2, COL_DIM, "Now %s", buf);
+		draw_textf(c, 8, DT_NOW_Y, COL_DIM, "Now %s", buf);
 	} else {
-		draw_text(c, 8, 190, 2, COL_DIM, "Now: not set");
+		draw_text(c, 8, DT_NOW_Y, COL_DIM, "Now: not set");
 	}
 
 	/* The message, one line per '\n'. */
-	for (p = dt.msg; *p && ly < c->h - 30; ly += 20) {
+	for (p = dt.msg; *p && ly < c->h - 30; ly += DT_MSG_LINE) {
 		size_t n = strcspn(p, "\n");
 
-		draw_textf(c, 8, ly, 2, COL_ERR, "%.*s", n > 29 ? 29 : (int)n, p);
+		draw_textf(c, 8, ly, COL_ERR, "%.*s", n > (size_t)cols ? cols :
+			   (int)n, p);
 		p += n;
 		if (*p)
 			p++;
 	}
-	draw_text(c, 8, c->h - 18, 2, COL_DIM, "A:save B:cancel <>:field");
+	draw_text(c, 8, FOOT_Y, COL_DIM, "A:save B:cancel <>:field");
 }

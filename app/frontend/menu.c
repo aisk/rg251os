@@ -57,11 +57,24 @@
 #include "romlist.h"
 #include "settings.h"
 
-#define ROW_H 18
-#define LIST_Y 40
-#define LIST_ROWS 14
-#define COLS 29
 #define COL_OFF RGB(0x50, 0x58, 0x68)
+/* An empty ROM list: the first line at EMPTY_Y, a blank line, then the
+ * help EMPTY_LINE px apart. */
+#define EMPTY_LINE (FONT_H + 8)
+#define EMPTY_GAP (EMPTY_LINE + FONT_H)
+#define EMPTY_Y (LIST_Y + EMPTY_GAP)
+/* The global settings: rows from SET_Y, SET_ROW_H px apart; in game, a
+ * panel at the bottom with IG_ROW_H px rows and IG_PANEL_PAD px above and
+ * below them. */
+#define SET_Y 46
+#define SET_ROW_H 26
+#define IG_PANEL_PAD 6
+/* Messages (message_draw): the title, the body from MSG_BODY_Y with
+ * MSG_LINE px lines, the POWER hint MSG_FOOT px above the bottom. */
+#define MSG_TITLE_Y 24
+#define MSG_BODY_Y 60
+#define MSG_LINE 22
+#define MSG_FOOT 28
 
 /* A scrolling name: frames drawn since it was selected. */
 struct marquee {
@@ -165,7 +178,7 @@ static int draw_battery(struct canvas *c, int x_right, int y)
 	const struct battery *b = battery_get();
 	char label[16];
 	uint16_t col = COL_DIM;
-	int iw = 26, ih = 14, x, fill;
+	int iw = 26, ih = 14, x, fill, iy = y + (FONT_H - ih) / 2;
 
 	battery_label(b, label, sizeof(label));
 	if (!label[0])
@@ -175,12 +188,12 @@ static int draw_battery(struct canvas *c, int x_right, int y)
 	else if (b->status == BAT_CHARGING || b->status == BAT_FULL)
 		col = COL_OK;
 	x = x_right - iw - 3;
-	draw_frame(c, x, y + 1, iw, ih, col);
-	draw_fill(c, x + iw, y + 5, 3, 6, col);
+	draw_frame(c, x, iy, iw, ih, col);
+	draw_fill(c, x + iw, iy + 4, 3, 6, col);
 	fill = (iw - 6) * (b->capacity < 0 ? 0 : b->capacity) / 100;
-	draw_fill(c, x + 3, y + 4, fill < 1 ? 1 : fill, ih - 6, col);
-	x -= 6 + 16 * (int)strlen(label);
-	draw_text(c, x, y, 2, col, label);
+	draw_fill(c, x + 3, iy + 3, fill < 1 ? 1 : fill, ih - 6, col);
+	x -= 6 + draw_text_width(label);
+	draw_text(c, x, y, col, label);
 	return x;
 }
 
@@ -383,7 +396,7 @@ static unsigned marquee_tick(struct marquee *mq, int idx, const char *name)
 static int marquee_step(struct marquee *mq, int idx, const char *name,
 			int cols)
 {
-	return marquee_offset(16 * (name_len(name) - cols),
+	return marquee_offset(FONT_W * (name_len(name) - cols),
 			      marquee_tick(mq, idx, name));
 }
 
@@ -398,7 +411,7 @@ void draw_rom_name(struct canvas *c, int x, int y, uint16_t col,
 
 	if (offset > 0 && n > cols) {
 		snprintf(buf, sizeof(buf), "%.*s", n, name);
-		draw_text_clip(c, x - offset, y, 2, col, buf, x, x + 16 * cols);
+		draw_text_clip(c, x - offset, y, col, buf, x, x + FONT_W * cols);
 		return;
 	}
 	if (cols > (int)sizeof(buf) - 1)
@@ -410,7 +423,7 @@ void draw_rom_name(struct canvas *c, int x, int y, uint16_t col,
 	} else {
 		snprintf(buf, sizeof(buf), "%.*s", n, name);
 	}
-	draw_text(c, x, y, 2, col, buf);
+	draw_text(c, x, y, col, buf);
 }
 
 /* "GBA" at the top, else the folder's path, its start cut with "~" to
@@ -419,20 +432,20 @@ void draw_rom_name(struct canvas *c, int x, int y, uint16_t col,
 static void list_header(struct canvas *c)
 {
 	const char *head = cur_dir[0] ? cur_dir : "GBA";
-	char pos[24] = "", buf[32];
-	int right = draw_battery(c, c->w - 8, 8);
+	char pos[24] = "", buf[64];
+	int right = draw_battery(c, c->w - 8, HEAD_Y);
 	int cols, n = strlen(head);
 	struct tm tm;
 
 	if (realtime_utc(&tm)) {
-		right -= 16 * 6;
-		draw_textf(c, right, 8, 2, COL_DIM, "%02d:%02d", tm.tm_hour,
+		right -= FONT_W * 6;
+		draw_textf(c, right, HEAD_Y, COL_DIM, "%02d:%02d", tm.tm_hour,
 			   tm.tm_min);
 	}
 
 	if (roms.count)
 		snprintf(pos, sizeof(pos), "%d/%d", sel + 1, roms.count);
-	cols = (right - 16 - 8 - 16 * ((int)strlen(pos) + 1)) / 16;
+	cols = (right - FONT_W - 8 - FONT_W * ((int)strlen(pos) + 1)) / FONT_W;
 	if (cols > (int)sizeof(buf) - 1)
 		cols = sizeof(buf) - 1;
 	if (cols < 2)
@@ -441,9 +454,9 @@ static void list_header(struct canvas *c)
 		snprintf(buf, sizeof(buf), "~%s", head + n - (cols - 1));
 	else
 		snprintf(buf, sizeof(buf), "%s", head);
-	draw_text(c, 8, 8, 2, COL_HI, buf);
+	right = draw_text(c, 8, HEAD_Y, COL_HI, buf);
 	if (pos[0])
-		draw_text(c, 8 + 16 * ((int)strlen(buf) + 1), 8, 2, COL_DIM, pos);
+		draw_text(c, right + FONT_W, HEAD_Y, COL_DIM, pos);
 }
 
 void romlist_menu_draw(struct canvas *c)
@@ -452,15 +465,20 @@ void romlist_menu_draw(struct canvas *c)
 
 	draw_fill(c, 0, 0, c->w, c->h, COL_BG);
 	list_header(c);
-	draw_fill(c, 0, 30, c->w, 2, COL_SEL);
+	draw_fill(c, 0, HEAD_LINE_Y, c->w, 2, COL_SEL);
 
 	if (!roms.count && cur_dir[0]) {
-		draw_text(c, 16, 80, 2, COL_FG, "Empty folder.");
+		draw_text(c, 16, EMPTY_Y, COL_FG, "Empty folder.");
 	} else if (!roms.count) {
-		draw_text(c, 16, 80, 2, COL_FG, "No ROMs found.");
-		draw_text(c, 16, 120, 2, COL_DIM, "Copy .gba files to the");
-		draw_text(c, 16, 144, 2, COL_DIM, "roms folder on the GBA");
-		draw_text(c, 16, 168, 2, COL_DIM, "partition of the card.");
+		static const char *const help[] = {
+			"Copy .gba files to the", "roms folder on the GBA",
+			"partition of the card.",
+		};
+
+		draw_text(c, 16, EMPTY_Y, COL_FG, "No ROMs found.");
+		for (int i = 0; i < 3; i++)
+			draw_text(c, 16, EMPTY_Y + EMPTY_GAP + i * EMPTY_LINE,
+				  COL_DIM, help[i]);
 	}
 	for (int i = 0; i < LIST_ROWS && top + i < roms.count; i++) {
 		const char *name = roms.roms[top + i].id.title;
@@ -468,14 +486,14 @@ void romlist_menu_draw(struct canvas *c)
 		uint16_t col = top + i == sel ? COL_FG : COL_DIM;
 
 		if (top + i == sel) {
-			draw_fill(c, 0, y - 1, c->w, ROW_H, COL_SEL);
+			draw_fill(c, 0, y - ROW_PAD, c->w, ROW_H, COL_SEL);
 			/* A new selection, or the selected ROM getting
 			 * its final name, starts over. */
-			offset = marquee_step(&list_mq, sel, name, COLS);
+			offset = marquee_step(&list_mq, sel, name, LIST_COLS);
 		}
 		if (roms.roms[top + i].dir)
 			col = COL_HI;
-		draw_rom_name(c, 8, y, col, name, COLS, offset);
+		draw_rom_name(c, LIST_X, y, col, name, LIST_COLS, offset);
 	}
 	if (cur_dir[0])
 		keys = !roms.count ? "B:up  SELECT:settings" :
@@ -486,9 +504,9 @@ void romlist_menu_draw(struct canvas *c)
 		       roms.roms[sel].dir ? "A:open  SELECT:settings" :
 		       "A:start  SELECT:settings";
 	if (message[0])
-		draw_text(c, 8, c->h - 18, 2, COL_ERR, message);
+		draw_text(c, 8, FOOT_Y, COL_ERR, message);
 	else
-		draw_text(c, 8, c->h - 18, 2, COL_DIM, keys);
+		draw_text(c, 8, FOOT_Y, COL_DIM, keys);
 }
 
 /* -------------------------------------------------------- confirmation */
@@ -525,10 +543,7 @@ enum {
 	IG_RESUME, IG_RESET, IG_VOLUME, IG_BRIGHTNESS, IG_CPU, IG_CORE,
 	IG_BLEND, IG_SETTINGS, IG_SYSINFO, IG_QUIT, IG_POWEROFF, IG_COUNT
 };
-/* Name and rows in a 36 + 11 * 22 px box from y 34 to 312, below the
- * battery. */
-#define IG_HEAD_H 36
-#define IG_ROW_H 22
+_Static_assert(IG_COUNT == IG_ROWS, "IG_ROWS in menu.h");
 
 /* The game's core setting, to the next core that is built in. */
 static void core_step(int d)
@@ -641,20 +656,22 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 		"Frame blend", "Settings", "System info", "Quit to ROM list",
 		"Power off",
 	};
-	int bx = 56, by = 34, bw = c->w - 112;
-	int bh = IG_HEAD_H + IG_COUNT * IG_ROW_H;
-	int cols = (bw - 24) / 16;
+	const int bx = IG_BOX_X, by = IG_BOX_Y, bw = IG_BOX_W;
+	/* Values right aligned, FONT_W from the box's right edge. */
+	const int vr = bx + bw - FONT_W;
+	int cols = (bw - 24) / FONT_W;
 
 	draw_image_dim(c, frame, pitch, w, h);
 	draw_battery(c, c->w - 8, 16);
-	draw_fill(c, bx, by, bw, bh, COL_BOX);
-	draw_frame(c, bx, by, bw, bh, COL_SEL);
+	draw_fill(c, bx, by, bw, IG_BOX_H, COL_BOX);
+	draw_frame(c, bx, by, bw, IG_BOX_H, COL_SEL);
 	draw_rom_name(c, bx + 12, by + 12, COL_HI, ig.name, cols,
 		      marquee_step(&ig.mq, 0, ig.name, cols));
 	for (int i = 0; i < IG_COUNT; i++) {
 		int y = by + IG_HEAD_H + i * IG_ROW_H;
 		uint16_t col = i == ig.sel ? COL_FG : COL_DIM;
 		const char *label = items[i];
+		char v[16] = "";
 
 		if (i == IG_BLEND && !blend_available())
 			col = i == ig.sel ? COL_DIM : COL_OFF;
@@ -666,33 +683,27 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 			col = COL_HI;
 		}
 		if (i == ig.sel)
-			draw_fill(c, bx + 4, y - (IG_ROW_H - 16) / 2, bw - 8,
+			draw_fill(c, bx + 4, y - (IG_ROW_H - FONT_H) / 2, bw - 8,
 				  IG_ROW_H, COL_SEL);
-		draw_text(c, bx + 16, y, 2, col, label);
+		draw_text(c, bx + FONT_W, y, col, label);
 		if (i == IG_VOLUME) {
-			char v[16];
+			char vol[16];
 
-			volume_label(v, sizeof(v));
-			draw_textf(c, bx + bw - 16 - 16 * 6, y, 2, col, "%6s", v);
+			volume_label(vol, sizeof(vol));
+			snprintf(v, sizeof(v), "%6s", vol);
 		} else if (i == IG_BRIGHTNESS) {
-			draw_textf(c, bx + bw - 16 - 16 * 6, y, 2, col, "%5d%%",
-				   settings.brightness);
+			snprintf(v, sizeof(v), "%5d%%", settings.brightness);
 		} else if (i == IG_CPU) {
-			char v[16];
-
 			cpuctl_mode_label(settings.cpu, v, sizeof(v));
-			draw_text(c, bx + bw - 16 - 16 * (int)strlen(v), y, 2, col, v);
 		} else if (i == IG_CORE) {
-			const char *v = core_labels[rom_settings.core];
-
-			draw_text(c, bx + bw - 16 - 16 * (int)strlen(v), y, 2,
-				  core_pending() ? COL_HI : col, v);
+			snprintf(v, sizeof(v), "%s", core_labels[rom_settings.core]);
+			if (core_pending())
+				col = COL_HI;
 		} else if (i == IG_BLEND) {
-			const char *v = !blend_available() ? "gpSP only" :
-					rom_settings.blend ? "On" : "Off";
-
-			draw_text(c, bx + bw - 16 - 16 * (int)strlen(v), y, 2, col, v);
+			snprintf(v, sizeof(v), "%s", !blend_available() ?
+				 "gpSP only" : rom_settings.blend ? "On" : "Off");
 		}
+		draw_text(c, vr - draw_text_width(v), y, col, v);
 	}
 }
 
@@ -855,27 +866,27 @@ static void settings_rows(struct canvas *c, int x, int y, int w, int row_h)
 		if (!settings.grid && (item == SI_GRID_DIM || item == SI_GRID_BOOST))
 			col = i == st.sel ? COL_DIM : COL_OFF;
 		if (i == st.sel)
-			draw_fill(c, x + 4, y - (row_h - 16) / 2, w - 8, row_h,
+			draw_fill(c, x + 4, y - (row_h - FONT_H) / 2, w - 8, row_h,
 				  COL_SEL);
 		if (confirm_armed(&st.confirm, item)) {
 			label = "Press A to power off";
 			col = COL_HI;
 		}
-		draw_text(c, x + 12, y, 2, col, label);
+		draw_text(c, x + 12, y, col, label);
 		settings_value(item, v, sizeof(v));
 		/* "(game)" unless a long value like "Auto (GBA light)" needs
 		 * the room. */
-		if (item == SI_COLOR && 12 + 16 * 12 <=
-		    w - 12 - 16 * ((int)strlen(v) + (i == st.sel ? 2 : 1)))
-			draw_text(c, x + 12 + 16 * 6, y, 2,
+		if (item == SI_COLOR && 12 + FONT_W * 12 <=
+		    w - 12 - FONT_W * ((int)strlen(v) + (i == st.sel ? 2 : 1)))
+			draw_text(c, x + 12 + FONT_W * 6, y,
 				  i == st.sel ? COL_DIM : COL_OFF, "(game)");
 		if (v[0]) {
 			if (i == st.sel)
-				draw_textf(c, x + w - 12 - 16 * ((int)strlen(v) + 2),
-					   y, 2, col, "<%s>", v);
+				draw_textf(c, x + w - 12 - FONT_W * ((int)strlen(v) + 2),
+					   y, col, "<%s>", v);
 			else
-				draw_text(c, x + w - 12 - 16 * ((int)strlen(v) + 1),
-					  y, 2, col, v);
+				draw_text(c, x + w - 12 - FONT_W * ((int)strlen(v) + 1),
+					  y, col, v);
 		}
 	}
 }
@@ -886,7 +897,7 @@ void settings_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 	const struct blit_fx *fx = fx_current();
 
 	if (st.ingame) {
-		int ph = 12 + st.count * 22, py = c->h - ph;
+		int ph = 2 * IG_PANEL_PAD + st.count * IG_ROW_H, py = c->h - ph;
 
 		draw_fill(c, 0, 0, c->w, c->h, 0);
 		if (frame)
@@ -894,30 +905,34 @@ void settings_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 				      frame, pitch, w, h, fx);
 		draw_fill(c, 0, py, c->w, ph, COL_BOX);
 		draw_fill(c, 0, py, c->w, 2, COL_SEL);
-		settings_rows(c, 0, py + 9, c->w, 22);
+		settings_rows(c, 0, py + IG_PANEL_PAD + (IG_ROW_H - FONT_H) / 2,
+			      c->w, IG_ROW_H);
 		return;
 	}
 	draw_fill(c, 0, 0, c->w, c->h, COL_BG);
-	draw_text(c, 8, 8, 2, COL_HI, "Settings");
-	draw_battery(c, c->w - 8, 8);
-	draw_fill(c, 0, 30, c->w, 2, COL_SEL);
-	settings_rows(c, 0, 46, c->w, 26);
-	draw_text(c, 8, c->h - 18, 2, COL_DIM, "B:back");
+	draw_text(c, 8, HEAD_Y, COL_HI, "Settings");
+	draw_battery(c, c->w - 8, HEAD_Y);
+	draw_fill(c, 0, HEAD_LINE_Y, c->w, 2, COL_SEL);
+	settings_rows(c, 0, SET_Y, c->w, SET_ROW_H);
+	draw_text(c, 8, FOOT_Y, COL_DIM, "B:back");
 }
 
 void message_draw(struct canvas *c, const char *title, const char *body,
 		  uint16_t col)
 {
-	int y = 60;
+	/* The body wrapped on spaces and newlines to the width less 16 px
+	 * margins, MSG_LINE px apart, above the POWER hint. */
+	const int cols = (c->w - 32) / FONT_W, foot = c->h - MSG_FOOT;
+	int y = MSG_BODY_Y;
 
 	draw_fill(c, 0, 0, c->w, c->h, COL_BG);
-	draw_text(c, 16, 24, 2, col, title);
-	/* Wrap at 28 columns on spaces and newlines. */
-	while (body && *body && y < c->h - 40) {
-		char line[32];
+	draw_text(c, 16, MSG_TITLE_Y, col, title);
+	while (body && *body && y < foot - 12) {
+		char line[CANVAS_W / FONT_W + 1];
 		int n = 0, brk = -1;
 
-		while (body[n] && body[n] != '\n' && n < 28) {
+		while (body[n] && body[n] != '\n' && n < cols &&
+		       n < (int)sizeof(line) - 1) {
 			if (body[n] == ' ')
 				brk = n;
 			n++;
@@ -925,11 +940,11 @@ void message_draw(struct canvas *c, const char *title, const char *body,
 		if (body[n] && body[n] != '\n' && brk > 0)
 			n = brk;
 		snprintf(line, sizeof(line), "%.*s", n, body);
-		draw_text(c, 16, y, 2, COL_FG, line);
+		draw_text(c, 16, y, COL_FG, line);
 		body += n;
 		while (*body == ' ' || *body == '\n')
 			body++;
-		y += 22;
+		y += MSG_LINE;
 	}
-	draw_text(c, 16, c->h - 28, 2, COL_DIM, "POWER: power off");
+	draw_text(c, 16, foot, COL_DIM, "POWER: power off");
 }

@@ -32,10 +32,7 @@
 #define REFRESH_NS 1000000000LL
 #define MAX_TEMPS 6
 #define MAX_POLICIES 4
-#define ROW_Y 40
-#define ROW_H 20
-#define VAL_X (8 + 16 * 8)
-#define VAL_COLS 21
+#define VAL_COLS(c) (((c)->w - SYSINFO_VAL_X - 8) / FONT_W)
 
 struct temp {
 	char name[32];
@@ -326,24 +323,27 @@ int sysinfo_update(uint32_t pressed, int64_t now)
 /* Label in the left column, value from VAL_X. */
 static void row(struct canvas *c, int *y, const char *label, const char *val)
 {
-	if (*y > c->h - 40)
+	if (*y > SYSINFO_ROW_MAX)
 		return;
-	draw_text(c, 8, *y, 2, COL_DIM, label);
-	draw_textf(c, VAL_X, *y, 2, COL_FG, "%.*s", VAL_COLS, val);
-	*y += ROW_H;
+	draw_text(c, 8, *y, COL_DIM, label);
+	draw_textf(c, SYSINFO_VAL_X, *y, COL_FG, "%.*s", VAL_COLS(c), val);
+	*y += SYSINFO_ROW_H;
 }
 
 /* Items joined by two spaces, wrapped onto further rows (no label). */
 static void row_list(struct canvas *c, int *y, const char *label,
 		     char items[][28], int n)
 {
-	char line[VAL_COLS + 1] = "";
-	int first = 1;
+	char line[CANVAS_W / FONT_W + 1] = "";
+	int first = 1, cols = VAL_COLS(c);
+
+	if (cols > (int)sizeof(line) - 1)
+		cols = sizeof(line) - 1;
 
 	for (int i = 0; i < n; i++) {
 		size_t len = strlen(line);
 
-		if (len && len + 2 + strlen(items[i]) > VAL_COLS) {
+		if (len && len + 2 + strlen(items[i]) > (size_t)cols) {
 			row(c, y, first ? label : "", line);
 			first = 0;
 			line[0] = 0;
@@ -364,13 +364,13 @@ void sysinfo_draw(struct canvas *c)
 {
 	char v[64], mode[16], items[MAX_TEMPS > SYSINFO_MAX_CPUS ?
 				    MAX_TEMPS : SYSINFO_MAX_CPUS][28];
-	int y = ROW_Y, n = 0;
+	int y = SYSINFO_ROW_Y, n = 0;
 	int64_t up = boot_ms() / 1000;
 	struct tm tm;
 
 	draw_fill(c, 0, 0, c->w, c->h, COL_BG);
-	draw_text(c, 8, 8, 2, COL_HI, "System info");
-	draw_fill(c, 0, 30, c->w, 2, COL_SEL);
+	draw_text(c, 8, HEAD_Y, COL_HI, "System info");
+	draw_fill(c, 0, HEAD_LINE_Y, c->w, 2, COL_SEL);
 
 	cpuctl_mode_label(settings.cpu, mode, sizeof(mode));
 	if (si.ncpu && si.usage[0] >= 0)
@@ -439,5 +439,5 @@ void sysinfo_draw(struct canvas *c)
 		snprintf(v, sizeof(v), "-");
 	row(c, &y, "Free", v);
 	row(c, &y, "Kernel", si.kernel);
-	draw_text(c, 8, c->h - 18, 2, COL_DIM, "B:back");
+	draw_text(c, 8, FOOT_Y, COL_DIM, "B:back");
 }

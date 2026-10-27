@@ -1,8 +1,10 @@
 /*
- * Menu drawing on a logical RGB565 canvas, with the 8x8 ASCII font in font8x8.h.
+ * Menu drawing on a logical RGB565 canvas, with the 8x8 ASCII font in
+ * font8x8.h drawn at 2x (FONT_W x FONT_H in draw.h).
  */
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "blit.h"
 #include "draw.h"
@@ -60,13 +62,8 @@ static void draw_char(struct canvas *c, int x, int y, int scale, uint16_t col,
 		}
 }
 
-int draw_text(struct canvas *c, int x, int y, int scale, uint16_t col,
-	      const char *s)
-{
-	return draw_text_clip(c, x, y, scale, col, s, 0, c->w);
-}
-
-int draw_text_clip(struct canvas *c, int x, int y, int scale, uint16_t col,
+/* font8x8's pixels at scale, only the columns in [x0, x1). */
+static int text_at(struct canvas *c, int x, int y, int scale, uint16_t col,
 		   const char *s, int x0, int x1)
 {
 	for (; *s; s++, x += 8 * scale)
@@ -75,7 +72,18 @@ int draw_text_clip(struct canvas *c, int x, int y, int scale, uint16_t col,
 	return x;
 }
 
-int draw_textf(struct canvas *c, int x, int y, int scale, uint16_t col,
+int draw_text(struct canvas *c, int x, int y, uint16_t col, const char *s)
+{
+	return text_at(c, x, y, FONT_W / 8, col, s, 0, c->w);
+}
+
+int draw_text_clip(struct canvas *c, int x, int y, uint16_t col,
+		   const char *s, int x0, int x1)
+{
+	return text_at(c, x, y, FONT_W / 8, col, s, x0, x1);
+}
+
+int draw_textf(struct canvas *c, int x, int y, uint16_t col,
 	       const char *fmt, ...)
 {
 	char buf[160];
@@ -84,7 +92,18 @@ int draw_textf(struct canvas *c, int x, int y, int scale, uint16_t col,
 	va_start(ap, fmt);
 	vsnprintf(buf, sizeof(buf), fmt, ap);
 	va_end(ap);
-	return draw_text(c, x, y, scale, col, buf);
+	return draw_text(c, x, y, col, buf);
+}
+
+int draw_text_scaled(struct canvas *c, int x, int y, int scale, uint16_t col,
+		     const char *s)
+{
+	return text_at(c, x, y, scale, col, s, 0, c->w);
+}
+
+int draw_text_width(const char *s)
+{
+	return FONT_W * (int)strlen(s);
 }
 
 void draw_image_dim(struct canvas *c, const uint16_t *src, int spitch,

@@ -106,7 +106,7 @@ enum state {
 
 static struct {
 	enum state st;
-	uint16_t canvas_px[480 * 320];
+	uint16_t canvas_px[CANVAS_W * CANVAS_H];
 	struct canvas cv;
 	char rom_path[512];
 	char rom_name[128];
@@ -143,7 +143,7 @@ static struct {
 	int64_t wake_ms;
 	const char *power_dir;
 	int sleep_test;        /* headless: light sleep wakes by itself */
-} m = { .cv = { .w = 480, .h = 320 }, .power_dir = "/sys/power" };
+} m = { .cv = { .w = CANVAS_W, .h = CANVAS_H }, .power_dir = "/sys/power" };
 
 /* ------------------------------------------------------- input events */
 
