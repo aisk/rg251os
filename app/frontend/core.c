@@ -24,8 +24,24 @@
  * Writes go through write_file_atomic() in a forked child, so a slow card
  * never stalls emulation; the child sees a consistent snapshot of the
  * buffer thanks to copy on write.
+ *
+ * Resume states: when a game ends normally (quit, power off, Restart
+ * with another core) or the device goes to sleep, main.c calls
+ * core_state_save(): the save RAM is written first, then
+ * retro_serialize goes to <data>/saves/<rom>.<core>.state (file name
+ * only, like the .sav; per core, since mGBA and gpSP states are not
+ * compatible), synchronously through write_file_atomic() so it is on the
+ * card before the power goes. core_load() reads it back after the .sav
+ * and before the first retro_run, and the game resumes where it was.
+ * The .sav stays the primary record: a state is skipped (logged, the
+ * game boots normally, nothing is deleted) when it is damaged, made for
+ * another ROM of that name, or the save data differs from what it was
+ * when the state was written (see struct state_header). Neither core
+ * restores save RAM from a state (mGBA stores it but loads without it,
+ * gpSP does not store it). core_reset() removes the state.
  */
 #include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -40,10 +56,13 @@
 #include "core_api.h"
 #include "fe.h"
 #include "libretro.h"
+#include "romdb.h"
 
 #define SAVE_TICK_NS 1000000000LL    /* how often save RAM is compared */
 #define SAVE_SETTLE_NS 1000000000LL  /* unchanged this long before a write */
 #define MAX_ROM_SIZE (64u << 20)
+#define MAX_STATE_SIZE (4u << 20)
+#define STATE_MAGIC "rg251st1"
 /* Core log lines per game. mGBA logs every DMA at info level (hundreds
  * per frame in some games); writing those to the card cost milliseconds
  * per frame and, when a write blocked on the card, stalled a frame for
@@ -62,6 +81,8 @@ static struct {
 	char bios_dir[300];
 	int have_bios;
 	char save_path[400];
+	char state_path[400];
+	uint32_t rom_size, rom_crc;  /* identify the ROM in state files */
 	uint8_t *sram;       /* the core's buffer */
 	size_t sram_cap;
 	uint8_t *last;       /* last seen contents */
@@ -423,6 +444,202 @@ void core_save_sync(void)
 		save_write(1);
 }
 
+/* -------------------------------------------------------------- states */
+
+/*
+ * The state file: this header, then what retro_serialize gave. The
+ * payload CRC catches a truncated or damaged file before the core sees
+ * it (gpSP does little checking of its own); the ROM's size and header
+ * CRC catch a different ROM under the same file name (gpSP does not
+ * check, mGBA only warns about another revision); the save CRC is of the
+ * save data as written to the .sav right before, so a .sav replaced or
+ * changed since makes the state stale. A file time comparison would do
+ * the last part worse: copies from a PC can keep the old time, and
+ * without a set RTC every boot starts the clock at the same point.
+ * Native (little endian) fields; the frontend only runs on AArch64.
+ */
+struct state_header {
+	char magic[8];        /* STATE_MAGIC */
+	char core[8];         /* struct core_api name, NUL padded */
+	uint32_t payload_len, payload_crc;
+	uint32_t save_len, save_crc;
+	uint32_t rom_size, rom_crc;
+};
+
+static const char *state_name(void)
+{
+	const char *p = strrchr(c.state_path, '/');
+
+	return p ? p + 1 : c.state_path;
+}
+
+/* Make an unlink durable: fsync the saves directory. */
+static void sync_dir_of(const char *path)
+{
+	char dir[400];
+	char *slash;
+	int fd;
+
+	snprintf(dir, sizeof(dir), "%s", path);
+	slash = strrchr(dir, '/');
+	if (!slash)
+		return;
+	*slash = 0;
+	fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (fd >= 0) {
+		fsync(fd);
+		close(fd);
+	}
+}
+
+static void state_remove(const char *why)
+{
+	if (unlink(c.state_path) == 0) {
+		sync_dir_of(c.state_path);
+		log_msg("state: removed %s (%s)", state_name(), why);
+	} else if (errno != ENOENT) {
+		log_msg("state: removing %s (%s): %s", state_name(), why,
+			strerror(errno));
+	}
+}
+
+void core_state_save(const char *why)
+{
+	struct state_header *h;
+	size_t size, slen;
+	int64_t t0, t1, t2;
+	uint8_t *buf;
+
+	if (!c.loaded || !c.api->serialize_size)
+		return;
+	/* The .sav first: it stays the primary record. */
+	core_save_sync();
+	t0 = now_ns();
+	size = c.api->serialize_size();
+	if (!size || size > MAX_STATE_SIZE) {
+		log_msg("state: %s gives a state size of %zu, not saving",
+			c.api->name, size);
+		return;
+	}
+	buf = calloc(1, sizeof(*h) + size);
+	if (!buf) {
+		log_msg("state: no memory for %zu bytes", size);
+		return;
+	}
+	if (!c.api->serialize(buf + sizeof(*h), size)) {
+		log_msg("state: %s could not serialize (%zu bytes), removing the "
+			"old state", c.api->name, size);
+		free(buf);
+		state_remove("serialize failed");
+		return;
+	}
+	t1 = now_ns();
+	h = (struct state_header *)buf;
+	memcpy(h->magic, STATE_MAGIC, sizeof(h->magic));
+	snprintf(h->core, sizeof(h->core), "%.7s", c.api->name);
+	h->payload_len = (uint32_t)size;
+	h->payload_crc = romdb_crc32(0, buf + sizeof(*h), size);
+	slen = c.sram ? save_size() : 0;
+	h->save_len = (uint32_t)slen;
+	h->save_crc = slen ? romdb_crc32(0, c.sram, slen) : 0;
+	h->rom_size = c.rom_size;
+	h->rom_crc = c.rom_crc;
+	if (write_file_atomic(c.state_path, buf, sizeof(*h) + size)) {
+		log_msg("state: writing %s failed (%s), removing the old state",
+			state_name(), strerror(errno));
+		state_remove("write failed");
+	} else {
+		t2 = now_ns();
+		log_msg("state: wrote %zu bytes to %s (%s): serialize %.1f ms, "
+			"write %.1f ms", sizeof(*h) + size, state_name(), why,
+			(t1 - t0) / 1e6, (t2 - t1) / 1e6);
+	}
+	free(buf);
+}
+
+/* After save_load, before the first retro_run. Anything wrong: the game
+ * boots normally, the state file is left for the next save to replace. */
+static void state_load(void)
+{
+	const struct state_header *h;
+	struct stat st;
+	size_t want, len;
+	int64_t t0 = now_ns(), t1;
+	uint8_t *buf;
+	const char *skip = NULL;
+	char why[96];
+	int n;
+
+	if (!c.api->unserialize)
+		return;
+	if (stat(c.state_path, &st)) {
+		if (errno == ENOENT)
+			log_msg("state: none (%s)", state_name());
+		else
+			log_msg("state: %s: %s, not loaded", state_name(),
+				strerror(errno));
+		return;
+	}
+	len = (size_t)st.st_size;
+	if (len < sizeof(*h) || len > sizeof(*h) + MAX_STATE_SIZE) {
+		log_msg("state: %s has %zu bytes, not a state file, not loaded",
+			state_name(), len);
+		return;
+	}
+	buf = malloc(len);
+	if (!buf) {
+		log_msg("state: no memory for %zu bytes, not loaded", len);
+		return;
+	}
+	n = read_file(c.state_path, buf, len);
+	h = (const struct state_header *)buf;
+	want = n >= (int)sizeof(*h) ? sizeof(*h) + h->payload_len : 0;
+	if (n != (int)len) {
+		snprintf(why, sizeof(why), "read %d of %zu bytes", n, len);
+		skip = why;
+	} else if (memcmp(h->magic, STATE_MAGIC, sizeof(h->magic))) {
+		skip = "not a state file (magic)";
+	} else if (strncmp(h->core, c.api->name, sizeof(h->core))) {
+		snprintf(why, sizeof(why), "made by %.8s", h->core);
+		skip = why;
+	} else if (want != len) {
+		snprintf(why, sizeof(why), "truncated or padded: %zu bytes, header "
+			 "says %zu", len, want);
+		skip = why;
+	} else if (romdb_crc32(0, buf + sizeof(*h), h->payload_len) !=
+		   h->payload_crc) {
+		skip = "corrupt (payload CRC mismatch)";
+	} else if (h->rom_size != c.rom_size || h->rom_crc != c.rom_crc) {
+		skip = "made with another ROM of this name";
+	} else if (h->save_len > (c.sram ? c.sram_cap : 0) ||
+		   (h->save_len &&
+		    romdb_crc32(0, c.sram, h->save_len) != h->save_crc)) {
+		skip = "the save data changed since (.sav replaced or written "
+		       "later)";
+	}
+	if (skip) {
+		log_msg("state: %s (%zu bytes) skipped: %s; booting normally",
+			state_name(), len, skip);
+		free(buf);
+		return;
+	}
+	/* mGBA's size depends on the save type detected so far, so it can
+	 * differ before the first frame; the core checks its own data. */
+	if (c.api->serialize_size() != h->payload_len)
+		log_msg("state: %s reports %zu bytes now, the state has %u",
+			c.api->name, c.api->serialize_size(), h->payload_len);
+	if (!c.api->unserialize(buf + sizeof(*h), h->payload_len)) {
+		log_msg("state: %s rejected %s (%u bytes); booting normally",
+			c.api->name, state_name(), h->payload_len);
+		free(buf);
+		return;
+	}
+	t1 = now_ns();
+	log_msg("state: loaded %zu bytes from %s in %.1f ms, resuming",
+		len, state_name(), (t1 - t0) / 1e6);
+	free(buf);
+}
+
 /* ---------------------------------------------------------------- load */
 
 static void *read_rom(const char *path, size_t *size)
@@ -479,6 +696,9 @@ int core_load(const char *rom_path, int core, char *err, size_t errlen)
 		blen -= 4;
 	snprintf(c.save_path, sizeof(c.save_path), "%s/saves/%.*s.sav",
 		 fe_data_dir, (int)blen, base);
+	/* Per core: mGBA and gpSP states are not compatible. */
+	snprintf(c.state_path, sizeof(c.state_path), "%s/saves/%.*s.%s.state",
+		 fe_data_dir, (int)blen, base, c.api->name);
 	c.options[0] = 0;
 	c.options_changed = 0;
 	c.in_game = 0;
@@ -499,6 +719,16 @@ int core_load(const char *rom_path, int core, char *err, size_t errlen)
 		struct stat st;
 
 		size = stat(rom_path, &st) ? 0 : (size_t)st.st_size;
+	}
+	{
+		uint8_t hdr[192];
+		int n = rom ? (int)(size < sizeof(hdr) ? size : sizeof(hdr)) :
+			read_file(rom_path, hdr, sizeof(hdr));
+
+		if (rom && n > 0)
+			memcpy(hdr, rom, n);
+		c.rom_size = (uint32_t)size;
+		c.rom_crc = n > 0 ? romdb_crc32(0, hdr, n) : 0;
 	}
 
 	c.api->set_environment(environment);
@@ -540,6 +770,7 @@ int core_load(const char *rom_path, int core, char *err, size_t errlen)
 	if (c.options[0])
 		log_msg("core: options %s", c.options);
 	save_load();
+	state_load();
 	c.in_game = 1;
 	return 0;
 }
@@ -584,7 +815,10 @@ const struct core_info *core_info(void)
  * cartridge mapped onto it, gpSP never clears it) and detect the save
  * type again on the first access, as after a load; gpSP also flushes its
  * translation caches. So the save is only written first, in case the
- * card is pulled while the game starts over.
+ * card is pulled while the game starts over. This core's state file is
+ * removed: the game runs on from the beginning, and a crash or a pulled
+ * battery must not resume what was before the reset. The next quit
+ * writes it again.
  */
 void core_reset(void)
 {
@@ -593,6 +827,7 @@ void core_reset(void)
 	if (!c.loaded)
 		return;
 	core_save_sync();
+	state_remove("restart game");
 	c.api->reset();
 	log_msg("core: %s reset in %.1f ms", core_labels[c.info.core],
 		(now_ns() - t0) / 1e6);

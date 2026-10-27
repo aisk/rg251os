@@ -3,43 +3,43 @@
  *
  * ROM list: one folder of roms/ at a time, its subfolders first (as
  * "name/", in yellow), then the ROMs by their No-Intro names (romdb.c;
- * the file name when unknown, " *" after the name of a modified ROM,
- * long names cut with "~"; the selected one, and the game's name above
- * the in-game menu, scroll after 1 s to show the rest, see
- * marquee_offset), up/down (left/right page), A or START starts a ROM or
- * opens a folder, B goes up to the parent folder with the folder left
- * selected (nothing at the top), the header shows the folder's path
- * relative to roms/ instead of "GBA", cut from the left with "~" when
- * long. The folder and the selected entry are kept while a game runs, so
- * quitting it comes back to the same ROM; a folder that is gone by then
- * falls back to its parent. Nothing of this is kept across boots. SELECT
- * opens the global settings (Volume, Brightness, CPU, Audio mode
- * Simple/Adaptive, Debug log on/off, see log.c, System info, the read
- * only page of sysinfo.c, and Power off). In game, SELECT+START opens the
- * in-game menu: Resume, Restart game, Volume, Brightness, CPU, Core, Frame
- * blend, Settings, System info, Quit to ROM list, Power off; B or
- * SELECT+START again resumes. Restart game starts the game over like the
- * console's reset button (its save written first). Restart game, Restart
+ * the file name when unknown, " *" after the name of a modified ROM, long
+ * names cut with "~"; the selected one, and the game's name above the
+ * in-game menu, scroll after 1 s to show the rest, see marquee_offset),
+ * up/down (left/right page), A or START starts a ROM or opens a folder, B
+ * goes up to the parent folder with the folder left selected (nothing at
+ * the top), the header shows the folder's path relative to roms/ instead
+ * of "GBA", cut from the left with "~" when long. The folder and the
+ * selected entry are kept while a game runs, so quitting it comes back to
+ * the same ROM; a folder that is gone by then falls back to its parent.
+ * Nothing of this is kept across boots. SELECT opens the global settings
+ * (Volume, Brightness, CPU, Audio mode Simple/Adaptive, Debug log on/off,
+ * see log.c, System info, the read only page of sysinfo.c, and Power
+ * off). In game, SELECT+START opens the in-game menu: Resume, Restart
+ * game, Volume, Brightness, CPU, Core, Frame blend, Settings, System
+ * info, Quit to ROM list, Power off; B or SELECT+START again resumes.
+ * Restart game starts the game over like the console's reset button (its
+ * save written first, its resume state removed). Restart game, Restart
  * with (below) and Power off, here and in the global settings, ask first:
  * the first A only turns the row into "Press A to restart" or "Press A to
  * power off", a second A within 3 s does it, moving away or waiting
- * cancels (see struct confirm). CPU is the global CPU mode (Adaptive,
- * Max or a fixed frequency, see cpuctl.c); changed in game it applies as
- * soon as the game resumes. Core (this game: mGBA or gpSP) shows the
- * running core; left/right pick another one, the row then reads "Restart
- * with" and A (confirmed, changing the core again cancels) saves and
- * restarts the game with it (resuming instead keeps it for the next
- * start). Frame blend (this game, gpSP's 50:50 mix of the current and
- * the previous frame for games that rely on LCD ghosting) applies on the
- * next frame; mGBA has none,
- * so with mGBA the row reads "gpSP only" and cannot be changed, the
- * setting is kept for gpSP. The in-game Settings screen shows the game
- * with the effects applied (live preview) under a panel with Color (this
- * game: Auto, showing what it resolved to as "Auto (GBA)", Off, GBA, GBA
- * light or SP101), LCD grid, Grid darkness, Dot boost and Debug log. In menus,
- * up/down select, left/right change a value, A activates, B goes back.
- * The battery level is shown in the ROM list header and above the
- * in-game menus.
+ * cancels (see struct confirm). CPU is the global CPU mode (Adaptive, Max
+ * or a fixed frequency, see cpuctl.c); changed in game it applies as soon
+ * as the game resumes. Core (this game: mGBA or gpSP) shows the running
+ * core; left/right pick another one, the row then reads "Restart with"
+ * and A (confirmed, changing the core again cancels) saves (the resume
+ * state under the old core's name, so switching back resumes there) and
+ * starts the game with it (resuming instead keeps it for the next start).
+ * Frame blend (this game, gpSP's 50:50 mix of the current and the
+ * previous frame for games that rely on LCD ghosting) applies on the next
+ * frame; mGBA has none, so with mGBA the row reads "gpSP only" and cannot
+ * be changed, the setting is kept for gpSP. The in-game Settings screen
+ * shows the game with the effects applied (live preview) under a panel
+ * with Color (this game: Auto, showing what it resolved to as "Auto
+ * (GBA)", Off, GBA, GBA light or SP101), LCD grid, Grid darkness, Dot
+ * boost and Debug log. In menus, up/down select, left/right change a
+ * value, A activates, B goes back. The battery level is shown in the ROM
+ * list header and above the in-game menus.
  */
 #include <stdio.h>
 #include <string.h>

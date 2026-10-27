@@ -132,6 +132,11 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	$(QEMU_AARCH64) $(FRONTEND_STUB_ELF) --headless $(FRONTEND_TEST_DIR)/stub \
 		$(FRONTEND_TEST_ROM) 600
 	grep -q 'save: loaded' $(FRONTEND_TEST_DIR)/stub/log/frontend.txt
+	# The first run's end wrote a resume state, this start loaded it.
+	grep -q 'state: wrote 72 bytes to test.stub.state (headless end)' \
+		$(FRONTEND_TEST_DIR)/stub/log/frontend.txt
+	grep -q 'state: loaded 72 bytes from test.stub.state' \
+		$(FRONTEND_TEST_DIR)/stub/log/frontend.txt
 	grep -q '\] perf: ' $(FRONTEND_TEST_DIR)/stub/log/frontend.txt
 	grep -q 'cpufreq: target .* observed' $(FRONTEND_TEST_DIR)/stub/log/frontend.txt
 	grep -q 'fx: color gba, grid on' $(FRONTEND_TEST_DIR)/stub/log/frontend.txt
@@ -164,19 +169,25 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	grep -q 'headless: after sleep, no new sleep request' $$f; \
 	! grep -q 'sleep #2' $$f; \
 	grep -q 'underruns after warmup 0' $$f
-	# Restart game from the in-game menu (gpSP, the default): the save
-	# written, the core reset, the game resumed in the same session (one
-	# perf.csv row), no underrun after the restart.
+	# Restart game from the in-game menu (gpSP, the default) after a
+	# start that resumed the previous run's state: the save written, the
+	# state removed, the core reset, the game resumed in the same session
+	# (one more perf.csv row), no underrun after the restart.
 	mkdir -p $(FRONTEND_TEST_DIR)/reset
+	$(QEMU_AARCH64) $(FRONTEND_ELF) --headless \
+		$(FRONTEND_TEST_DIR)/reset $(FRONTEND_TEST_ROM) 300
 	FE_RESET_AT=1500 $(QEMU_AARCH64) $(FRONTEND_ELF) --headless \
 		$(FRONTEND_TEST_DIR)/reset $(FRONTEND_TEST_ROM) 3000
 	set -e; f=$(FRONTEND_TEST_DIR)/reset/log/frontend.txt; \
+	grep -q 'state: loaded 426024 bytes from test.gpsp.state' $$f; \
 	grep -q 'restart: test.gba from the beginning (gpSP), same session' $$f; \
+	grep -q 'state: removed test.gpsp.state (restart game)' $$f; \
 	grep -q 'core: gpSP reset in' $$f; \
 	grep -q 'cpufreq: resume at' $$f; \
 	grep -q 'headless: restart at frame 1500 done' $$f; \
 	grep -q 'underruns after warmup 0' $$f; \
-	test $$(grep -c ',all,' $(FRONTEND_TEST_DIR)/reset/log/perf.csv) -eq 1
+	grep -q 'state: wrote 426024 bytes to test.gpsp.state (headless end)' $$f; \
+	test $$(grep -c ',all,' $(FRONTEND_TEST_DIR)/reset/log/perf.csv) -eq 2
 	# A perf.csv from an older build (other header) is moved aside.
 	mkdir -p $(FRONTEND_TEST_DIR)/core/log $(FRONTEND_TEST_DIR)/core/config/roms
 	printf 'time,old\n1,2\n' > $(FRONTEND_TEST_DIR)/core/log/perf.csv
@@ -191,6 +202,12 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	grep -q '^time,old' $(FRONTEND_TEST_DIR)/core/log/perf-old.csv
 	grep -q ',simple,48000 Hz S16 512x8,4[78][0-9][0-9][0-9],' \
 		$(FRONTEND_TEST_DIR)/core/log/perf.csv
+	# mGBA's resume state from that run, loaded by the next start.
+	FE_AUDIO=simple $(QEMU_AARCH64) $(FRONTEND_ELF) --headless \
+		$(FRONTEND_TEST_DIR)/core $(FRONTEND_TEST_ROM) 300
+	set -e; f=$(FRONTEND_TEST_DIR)/core/log/frontend.txt; \
+	grep -q 'state: wrote [0-9]* bytes to test.mgba.state (headless end)' $$f; \
+	grep -q 'state: loaded [0-9]* bytes from test.mgba.state' $$f
 	# gpSP (ARM64 dynarec, under qemu-user too) on mGBA's test ROMs,
 	# picked by the per ROM setting.
 	set -e; for r in $(FRONTEND_GPSP_TEST_ROMS); do \
@@ -214,11 +231,21 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	grep -q 'core: options .*gpsp_frame_mixing=enabled' $$f; \
 	grep -q 'headless: 1200 frames, frame 240x160' $$f
 	# mGBA -> gpSP -> mGBA in one process on one save, a .srm, a reset
-	# in each core keeping the save, and frame blending switched on and
-	# off in game.
+	# in each core keeping the save, frame blending switched on and off
+	# in game, and the resume states (resumed, skipped when the .sav
+	# changed, truncated, damaged or rejected, removed by Restart game,
+	# kept apart per core).
 	$(QEMU_AARCH64) $(FRONTEND_ELF) --core-switch $(FRONTEND_TEST_DIR)/switch 120
 	set -e; f=$(FRONTEND_TEST_DIR)/switch/log/frontend.txt; \
 	grep -q 'core switch: passed' $$f; \
+	for c in gpsp mgba; do \
+		grep -q "core switch: $$c state rounds done, counter 47" $$f; \
+		grep -q "state: removed statetest.$$c.state (restart game)" $$f; \
+		grep -q "statetest.$$c.state (.*) skipped: the save data changed" $$f; \
+		grep -q "statetest.$$c.state (.*) skipped: truncated" $$f; \
+		grep -q "statetest.$$c.state (.*) skipped: corrupt" $$f; \
+		grep -q "state: $$c rejected statetest.$$c.state" $$f; \
+	done; \
 	grep -q 'core switch: gpsp reset, counter 6' $$f; \
 	grep -q 'core switch: mgba reset, counter 8' $$f; \
 	grep -q 'core: gpsp_frame_mixing=enabled, applied live' $$f; \

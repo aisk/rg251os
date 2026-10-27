@@ -31,6 +31,9 @@ struct core_api {
 	void (*run)(void);
 	void *(*get_memory_data)(unsigned);
 	size_t (*get_memory_size)(unsigned);
+	size_t (*serialize_size)(void);
+	bool (*serialize)(void *, size_t);
+	bool (*unserialize)(const void *, size_t);
 	/* Bytes of the save buffer worth writing; NULL: get_memory_size. */
 	size_t (*save_size)(void);
 };

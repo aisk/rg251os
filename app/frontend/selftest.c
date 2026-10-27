@@ -17,6 +17,7 @@
 #include "battery.h"
 #include "blit.h"
 #include "core.h"
+#include "core_api.h"
 #include "cpuctl.h"
 #include "draw.h"
 #include "menu.h"
@@ -24,6 +25,7 @@
 #include "fx.h"
 #include "input.h"
 #include "resample.h"
+#include "romdb.h"
 #include "romlist.h"
 #include "sdgrow.h"
 #include "sleep.h"
@@ -2404,11 +2406,145 @@ static void menu_restart_with(const char *rom)
 	rom_settings.core = CORE_GPSP;
 }
 
+/* The save test ROM's counter in the .sav, -1 if there is none. */
+static int sav_counter(const char *sav)
+{
+	uint8_t buf[4];
+
+	return read_file(sav, buf, sizeof(buf)) > 1 && buf[1] == 0x5a ?
+	       buf[0] : -1;
+}
+
+/* Load, run, optionally write the resume state, unload; the .sav counter
+ * after it. The ROM bumps the counter once per boot, so a resumed game
+ * leaves it alone. */
+static int state_run(const char *rom, const char *sav, int core, long frames,
+		     int save_state, int reset)
+{
+	char err[128];
+
+	if (core_load(rom, core, err, sizeof(err))) {
+		CHECK(0, "state: %s: %s", core_names[core], err);
+		return -1;
+	}
+	audio_set_source(core_info()->sample_rate, core_info()->fps, 60.0186);
+	run_frames(frames);
+	if (reset) {
+		core_reset();
+		run_frames(frames);
+	}
+	if (save_state)
+		core_state_save("test");
+	core_unload();
+	return sav_counter(sav);
+}
+
+/*
+ * Resume states with one core: written on a quit and resumed on the next
+ * start (the boot counter stays), skipped when the .sav changed, removed
+ * by Restart game, and skipped when truncated, damaged, or (valid file,
+ * payload the core does not accept) rejected by the core; every skip
+ * boots the game normally.
+ */
+static void state_rounds(const char *data, int core, long frames)
+{
+	const char *name = core_api_get(core) ? core_api_get(core)->name : "?";
+	char rom[300], sav[300], st[300];
+	uint8_t blank[2] = { 41, 0x5a }, *buf;
+	struct stat sb;
+	int n, k;
+
+	snprintf(rom, sizeof(rom), "%s/statetest.gba", data);
+	snprintf(sav, sizeof(sav), "%s/saves/statetest.sav", data);
+	snprintf(st, sizeof(st), "%s/saves/statetest.%s.state", data, name);
+	save_test_rom(rom);
+	unlink(sav);
+	unlink(st);
+	n = state_run(rom, sav, core, frames, 1, 0);
+	CHECK(n == 1 && access(st, R_OK) == 0, "state %s: written, counter %d",
+	      name, n);
+	n = state_run(rom, sav, core, frames, 0, 0);
+	CHECK(n == 1, "state %s: resumed, counter %d (1 if not booted again)",
+	      name, n);
+	/* The .sav replaced (from a PC, say): the state is stale. */
+	CHECK(write_file_atomic(sav, blank, sizeof(blank)) == 0, "write .sav");
+	n = state_run(rom, sav, core, frames, 1, 0);
+	CHECK(n == 42, "state %s: .sav changed, booted: counter %d", name, n);
+	n = state_run(rom, sav, core, frames, 0, 0);
+	CHECK(n == 42, "state %s: resumed after the .sav change, counter %d",
+	      name, n);
+	/* Restart game: resumed, reset (boots: 43), state gone. */
+	n = state_run(rom, sav, core, frames, 0, 1);
+	CHECK(n == 43 && access(st, F_OK) != 0,
+	      "state %s: restart game, counter %d, state %s", name, n,
+	      access(st, F_OK) ? "removed" : "still there");
+	n = state_run(rom, sav, core, frames, 1, 0);
+	CHECK(n == 44, "state %s: no state after restart, counter %d", name, n);
+	/* Truncated. */
+	CHECK(stat(st, &sb) == 0 && truncate(st, sb.st_size / 2) == 0,
+	      "truncate state");
+	n = state_run(rom, sav, core, frames, 1, 0);
+	CHECK(n == 45, "state %s: truncated, booted: counter %d", name, n);
+	/* One byte damaged in the payload. */
+	buf = malloc(sb.st_size);
+	k = buf ? read_file(st, buf, sb.st_size) : -1;
+	CHECK(k > 200, "read state: %d", k);
+	if (k > 200) {
+		buf[k / 2] ^= 0x10;
+		write_file_atomic(st, buf, k);
+	}
+	n = state_run(rom, sav, core, frames, 1, 0);
+	CHECK(n == 46, "state %s: damaged, booted: counter %d", name, n);
+	/* A payload the core does not accept, with a matching CRC (header:
+	 * payload_crc at byte 20, payload from byte 40). */
+	k = buf ? read_file(st, buf, sb.st_size) : -1;
+	if (k > 200) {
+		uint32_t crc;
+
+		memset(buf + 40, 0, 16);
+		crc = romdb_crc32(0, buf + 40, k - 40);
+		memcpy(buf + 20, &crc, 4);
+		write_file_atomic(st, buf, k);
+	}
+	free(buf);
+	n = state_run(rom, sav, core, frames, 1, 0);
+	CHECK(n == 47, "state %s: rejected by the core, booted: counter %d",
+	      name, n);
+	n = state_run(rom, sav, core, frames, 0, 0);
+	CHECK(n == 47, "state %s: resumed at the end, counter %d", name, n);
+	log_msg("core switch: %s state rounds done, counter %d", name, n);
+}
+
+/*
+ * The other core does not see a state: with mGBA's state on the card
+ * gpSP boots the game (the counter goes up); with the .sav put back,
+ * mGBA then resumes its own state.
+ */
+static void state_other_core(const char *data, long frames)
+{
+	static uint8_t keep[1 << 15];
+	char rom[300], sav[300], st[300];
+	int n, len;
+
+	snprintf(rom, sizeof(rom), "%s/statetest.gba", data);
+	snprintf(sav, sizeof(sav), "%s/saves/statetest.sav", data);
+	snprintf(st, sizeof(st), "%s/saves/statetest.gpsp.state", data);
+	unlink(st);
+	n = sav_counter(sav);
+	len = read_file(sav, keep, sizeof(keep));
+	CHECK(state_run(rom, sav, CORE_GPSP, frames, 0, 0) == n + 1,
+	      "state: gpSP booted beside an mGBA state");
+	CHECK(len > 0 && write_file_atomic(sav, keep, len) == 0,
+	      "restore .sav");
+	CHECK(state_run(rom, sav, CORE_MGBA, frames, 0, 0) == n,
+	      "state: mGBA resumed its own state after gpSP");
+}
+
 /*
  * mGBA -> gpSP -> mGBA in one process on the same .sav, then a RetroArch
  * .srm picked up by gpSP when there is no .sav (and left untouched), a
- * reset in each core on that save, then frame blending switched live
- * and the in-game menu's Restart with.
+ * reset in each core on that save, then frame blending switched live,
+ * the in-game menu's Restart with, and the resume states with each core.
  */
 int selftest_core_switch(const char *data, long frames)
 {
@@ -2439,6 +2575,9 @@ int selftest_core_switch(const char *data, long frames)
 	reset_round(rom, sav, CORE_MGBA, 7, frames);
 	blend_live(rom);
 	menu_restart_with(rom);
+	state_rounds(data, CORE_GPSP, frames);
+	state_rounds(data, CORE_MGBA, frames);
+	state_other_core(data, frames);
 	log_msg("core switch: %s (%d failures)", failures ? "FAILED" : "passed",
 		failures);
 	return failures ? 1 : 0;

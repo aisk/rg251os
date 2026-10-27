@@ -41,13 +41,22 @@
  *
  * Power key (input.c has the timing): a short press sleeps, in the ROM
  * list, the menus or in game; the next press wakes. Holding it 2 s saves
- * and powers off. Sleep: the game is paused and its save written, the PCM
- * closed, backlight and panel (DPMS) off, then suspend to RAM (sleep.c).
- * If the kernel does not suspend, a light sleep instead: the same, plus
- * the CPU capped at its lowest OPP, blocked in poll() on the input
- * devices until the power key goes down. On wake everything is restored,
- * the audio rate control and frame pacing start over and the waking press
- * is not taken as a new one. Every step is logged ("sleep #N: ...").
+ * and powers off. Sleep: the game is paused and its save and resume state
+ * written, the PCM closed, backlight and panel (DPMS) off, then suspend
+ * to RAM (sleep.c). If the kernel does not suspend, a light sleep
+ * instead: the same, plus the CPU capped at its lowest OPP, blocked in
+ * poll() on the input devices until the power key goes down. On wake
+ * everything is restored, the audio rate control and frame pacing start
+ * over and the waking press is not taken as a new one. Every step is
+ * logged ("sleep #N: ...").
+
+ *
+ * Resume states (core.c): a game that ends by Quit to ROM list, Power off
+ * (in-game menu, settings or the power key held 2 s, all through
+ * do_poweroff) or Restart with another core writes its save and then a
+ * state, <data>/saves/<rom>.<core>.state, before the core is unloaded;
+ * so does sleep. The next start of that ROM with that core resumes from
+ * it. Restart game removes it; a fatal error writes none.
  *
  * First boot: before the GBA partition is mounted, it is grown to fill
  * the SD card (sdgrow.c), with a message on screen; later boots only
@@ -61,9 +70,12 @@
  *   frontend --selftest DIR            unit tests, using DIR as scratch
  *   frontend --headless DATA ROM N     run N frames without display or
  *                                      sound device, DATA as GBA partition
- *                                      (core from DATA's ROM settings)
+ *                                      (core from DATA's ROM settings),
+ *                                      resuming and writing the state like
+ *                                      a start and a quit
  *   frontend --core-switch DATA N      mGBA, gpSP, mGBA on one save in one
- *                                      process, N frames each
+ *                                      process, N frames each, then the
+ *                                      resume states with both cores
  *   frontend --data DIR                normal UI with DATA from DIR
  *   frontend --sdgrow IMG DIR HOOK     the first boot's partition grow on
  *                                      a card image (see sdgrow.h)
@@ -238,12 +250,15 @@ static void game_end_logs(const char *why)
 	klog_dump(name);
 }
 
-/* Stop the game if one runs: logs, save written, core unloaded, game
- * statistics out and the learned start OPP into the ROM settings. */
+/* Stop the game if one runs: logs, save and resume state written (not
+ * after a fatal error), core unloaded, game statistics out and the
+ * learned start OPP into the ROM settings. */
 static void end_game(const char *why)
 {
 	game_end_logs(why);
 	audio_pause();
+	if (core_loaded() && strcmp(why, "fatal"))
+		core_state_save(why);
 	core_unload();
 	if (cpuctl_in_game())
 		rom_settings.cpu_start = cpuctl_game_end();
@@ -483,8 +498,9 @@ static void do_sleep(void)
 		perf_report();
 	}
 	audio_suspend();
+	/* The battery may run out asleep: resume from here then. */
 	if (core_loaded())
-		core_save_sync();
+		core_state_save("sleep");
 	save_settings();
 	if (m.led_green && m.led_red) {
 		led_set_red(0);
@@ -1011,7 +1027,9 @@ static void run(void)
  * also sleeps after frame N, through a fake /sys/power that cannot
  * suspend, so the fallback light sleep and the wake path run (the light
  * sleep wakes itself with a simulated power key press). FE_RESET_AT=N
- * opens the in-game menu after frame N and confirms Restart game.
+ * opens the in-game menu after frame N and confirms Restart game. The
+ * resume state is loaded like on a start (core_load) and written at the
+ * end like on a quit.
  */
 static int headless(const char *data, const char *rom, long frames)
 {
@@ -1120,6 +1138,7 @@ static int headless(const char *data, const char *rom, long frames)
 		"fill %d..%d, underruns after warmup %u",
 		frames, fw, fh, fp, as->adj, as->fill_min, as->fill_max,
 		m.xrun_total);
+	core_state_save("headless end");
 	core_unload();
 	learned = cpuctl_game_end();
 	if (learned != rom_settings.cpu_start) {

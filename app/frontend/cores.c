@@ -25,7 +25,10 @@
 	void p##_retro_reset(void); \
 	void p##_retro_run(void); \
 	void *p##_retro_get_memory_data(unsigned); \
-	size_t p##_retro_get_memory_size(unsigned);
+	size_t p##_retro_get_memory_size(unsigned); \
+	size_t p##_retro_serialize_size(void); \
+	bool p##_retro_serialize(void *, size_t); \
+	bool p##_retro_unserialize(const void *, size_t);
 
 #define CORE_TABLE(p, label, save) { \
 	.name = label, \
@@ -45,6 +48,9 @@
 	.run = p##_retro_run, \
 	.get_memory_data = p##_retro_get_memory_data, \
 	.get_memory_size = p##_retro_get_memory_size, \
+	.serialize_size = p##_retro_serialize_size, \
+	.serialize = p##_retro_serialize, \
+	.unserialize = p##_retro_unserialize, \
 	.save_size = save, \
 }
 

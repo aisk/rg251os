@@ -2,7 +2,9 @@
  * Stand-in libretro core for building and testing without the real cores: a moving
  * test pattern at 240x160 RGB565, a 440 Hz tone at 32768 Hz in batches
  * like mGBA's, and a 32KiB "SRAM" that counts A presses so the save path
- * can be exercised. Buttons are drawn as boxes at the bottom.
+ * can be exercised. Buttons are drawn as boxes at the bottom. Its save
+ * state is the frame counter and the tone's phase (not the SRAM, like
+ * the real cores' loads).
  */
 #include <math.h>
 #include <stdbool.h>
@@ -142,4 +144,42 @@ void *retro_get_memory_data(unsigned id)
 size_t retro_get_memory_size(unsigned id)
 {
 	return id == RETRO_MEMORY_SAVE_RAM ? sizeof(sram) : 0;
+}
+
+struct stub_state {
+	char magic[8];
+	unsigned frame;
+	int prev_a;
+	double audio_acc, phase;
+};
+
+size_t retro_serialize_size(void)
+{
+	return sizeof(struct stub_state);
+}
+
+bool retro_serialize(void *data, size_t size)
+{
+	struct stub_state st = { "stubst1", frame, prev_a, audio_acc, phase };
+
+	if (size != sizeof(st))
+		return false;
+	memcpy(data, &st, sizeof(st));
+	return true;
+}
+
+bool retro_unserialize(const void *data, size_t size)
+{
+	struct stub_state st;
+
+	if (size != sizeof(st))
+		return false;
+	memcpy(&st, data, sizeof(st));
+	if (memcmp(st.magic, "stubst1", 8))
+		return false;
+	frame = st.frame;
+	prev_a = st.prev_a;
+	audio_acc = st.audio_acc;
+	phase = st.phase;
+	return true;
 }

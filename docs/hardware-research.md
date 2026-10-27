@@ -218,7 +218,7 @@ DDR blob 在两边是同一个文件，legacy 能启动，说明 DDR 初始化�
 
 ## 当前状态
 
-2026-10-18 更新。legacy U-Boot 加主线 6.18 内核，前端（`app/frontend`）作为 PID 1 直接启动，内置 gpSP 和 mGBA 两个核心。
+2026-10-27 更新。legacy U-Boot 加主线 6.18 内核，前端（`app/frontend`）作为 PID 1 直接启动，内置 gpSP 和 mGBA 两个核心。
 
 ### SD 卡布局
 
@@ -235,6 +235,7 @@ GBA 分区（下面写作 `<data>`）里的文件
 |---|---|
 | `roms/*.gba` | ROM，可以放在任意深度的子文件夹里 |
 | `saves/<rom>.sav` | 存档，两个核心通用，只按文件名（不含文件夹）；没有 `.sav` 时会读同名的 RetroArch `.srm`，之后写回 `.sav` |
+| `saves/<rom>.<core>.state` | 即时存档，退出游戏时自动写，下次启动同一个 ROM 用同一个核心时恢复（见下面的默认行为）。和 `.sav` 一样只按文件名，按核心分开（`gpsp`、`mgba`），因为两个核心的格式不通用。mGBA 约 420 到 520KiB（随存档类型变），gpSP 固定约 416KiB |
 | `bios/gba_bios.bin` | 可选的 GBA BIOS。没有的话 gpSP 用内置 BIOS，mGBA 用 HLE |
 | `config/settings.txt` | 全局设置：音量、亮度、LCD 网格、CPU 模式、音频模式、调试日志 |
 | `config/roms/<rom>.txt` | 单个游戏的设置：`color`（auto、off、gba、gba-light、sp101）、`core`、`blend`（gpSP 的帧混合）、学到的起始频率 `cpu_start`。只写和默认值不同的项。和存档一样只按文件名，不同文件夹里的同名 ROM 共用 |
@@ -260,6 +261,7 @@ GBA 分区（下面写作 `<data>`）里的文件
 - ROM 列表支持子文件夹：文件夹排在 ROM 前面，名字后面带 `/`，黄色显示。A 进入，B 回上一层并选中刚才的文件夹，顶层按 B 没有反应。标题栏在文件夹里显示相对 `roms/` 的路径，太长时从左边截掉。每次进入文件夹只扫描这一层。退出游戏回到原来的文件夹和 ROM，但当前文件夹和选中项不跨开机保存。
 - 按键：ROM 列表里按 SELECT 进设置，游戏中 SELECT+START 打开菜单。设置和游戏菜单里都有只读的 System info 页（`sysinfo.c`），每秒刷新 CPU 占用和频率、内存、温度、电池、开机时长和 GBA 分区剩余空间。
 - 会中断游戏的菜单项都要按两次 A：游戏菜单里的 Restart game、换了核心后的 Restart with 和 Power off，以及 ROM 列表设置里的 Power off。第一次按 A 该行变成黄色的 "Press A to restart" 或 "Press A to power off"，3 秒内再按一次才执行，移到别的行、超时或者再换核心就取消。
+- 退出游戏时自动保存即时存档，下次启动接着玩。退回 ROM 列表、关机（游戏菜单、设置、长按电源键）、Restart with 换核心（存在旧核心名下，换回来时还能接上）和休眠时，先写 `.sav`，再把 `retro_serialize` 的结果原子地写到 `saves/<rom>.<core>.state` 并 fsync。启动游戏时在读完 `.sav` 之后、第一帧之前读回来。`.sav` 仍然是主记录：文件被截断或损坏（头里有 CRC）、ROM 换了（大小和 ROM 头 CRC 对不上）、或者存档内容和写即时存档时不一样（比如从电脑换了 `.sav`）就跳过，正常开机，什么都不删。没有用文件时间比较，因为从电脑拷过来的文件可能保留旧时间，RTC 没设过时每次开机的时钟也是从同一个点开始。游戏菜单的 Restart game 会删掉当前核心的即时存档，出错退出（fatal）不写。日志都以 `state:` 开头，记文件名、大小、耗时和跳过的原因。
 - 电源键短按休眠，先尝试挂起到内存，内核挂不起来就退回浅睡眠（关背光和屏幕，CPU 降到最低频率），再按一次唤醒。长按 2 秒保存并关机。
 - 指示灯：内核阶段是 heartbeat 闪烁，前端启动时变红，第一帧出来后变绿，低电量时绿灯里隔 2 秒闪一下红，出错时红绿交替。
 
