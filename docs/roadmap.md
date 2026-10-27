@@ -31,6 +31,7 @@
 - 关机时卸载 GBA 分区：关机时 `frontend.txt` 里应该有 `power off: no child processes left`（`dmesg-poweroff.txt` 里也有），最后一行是 `powering off: unmounting /mnt/data`。卸载本身的结果（`power off: /mnt/data unmounted`，或者 `umount ...: ..., remounting read-only`）只进内核日志，关机后就没了，所以要看下次开机 `frontend.txt` 开头的 `mounted /dev/mmcblk0p3 ...` 一行，`clean` 说明上次干净地卸载了，`dirty bit set` 说明没有。注意 Linux 挂载时发现脏标记就不会再清它，以前的版本一直没卸载过，所以卡现在是脏的，要先在 Windows 上修复一次（或者 `fsck.fat -a`），之后正常关机几次，再插到 Windows 上看还会不会提示修复，开机日志是否一直是 `clean`。
 - 亮度下限：背光调到最低时屏幕什么都看不见，现在用户亮度最低是背光范围的 25%（`BRIGHTNESS_MIN`），菜单里是 25%、30%、40% 一直到 100%，卡上存的更低的值开机时会被提上来，日志里是 `settings: brightness N% raised to the minimum 25%`。开机日志的 `backlight ...: ... user minimum 25% = N` 一行是对应的原始值。要确认最低一档还看得清。如果太亮或者还是太暗，只改这一个常量。
 - 界面字体换成了 JetBrains Mono Regular（20px，灰度抗锯齿，按原生分辨率画），不再是 8x8 放大两倍。JetBrains Mono 20px 的字宽正好是 12px，字格和之前的 Spleen 12x24 一样，布局没有变。要看实机上抗锯齿的文字是否清晰（尤其灰色字在深色背景上和选中条上的边缘）、大小是否合适，Date & time 的两倍大数字是直接放大的，看是否发虚。各个画面（ROM 列表、设置、游戏菜单、游戏内设置、System info、Date & time、出错和关机画面）有没有文字重叠或被截掉。现在每个文字像素要和底色混合，看翻页、跑马灯滚动和 System info 每秒刷新时有没有可见的卡顿。ROM 列表一页从 14 行变成 9 行（行高 28px），名字从 29 列变成 38 列。游戏菜单的电量挪进了菜单框里游戏名的右边。System info 一页正好放 11 行，B:back 挪到了标题栏右边，如果温度一行放不下要换行，最后的 Kernel 一行会被挤掉。开机日志里有一行 `ui: font 12x24, ...` 记录这些尺寸。
+- 前端界面改成了页面栈（`ui.c`），游戏菜单和两个设置页改成共用的行表（`menu.c` 的 `struct row`）。selftest 的截图逐像素没有变化，但页面跳转换了实现，要在实机上点一遍：ROM 列表按 SELECT 进设置，进 System info 再按两次 B 回到列表，Date & time 进出一次，设置里的 Power off 按两次 A。游戏中 SELECT+START 打开菜单，进 Settings 后 B、B 回到游戏，在游戏内设置页和 System info 页直接按 SELECT+START 也应该回到游戏。再试 Restart game、换核心后的 Restart with、Frame blend（mGBA 下显示 gpSP only，不能改）和 Quit to ROM list（回到原来选中的 ROM）。换页后新页面在同一帧就画出来，以前有几处要等下一帧。打开 Debug log 时每次换页有一行 `ui: push ...`、`ui: pop ...` 或 `ui: back to game ...`。日志格式也有变化，设置一行变成 `settings: ... volume=255 brightness=50 ...` 这样的 `key=value`，mGBA 下切 Frame blend 是 `core: gpsp_frame_mixing=enabled kept for gpSP, mGBA does not have it`。
 
 ## 已知问题
 
@@ -44,7 +45,7 @@
 
 大致按优先级排。
 
-- 跳帧（`gpsp_frameskip` 自动模式加阈值，`mgba_frameskip`），按 ROM 设置，给重负载的游戏用。
+- 跳帧（`gpsp_frameskip` 自动模式加阈值，`mgba_frameskip`），按 ROM 设置，给重负载的游戏用。加一个按 ROM 的核心选项现在是 `settings.h` 的 `struct rom_settings` 加字段，`settings.c` 的 `rom_fields` 和 `core.c` 的 `rom_options` 各加一项（默认值不是 0 时再改 `rom_defaults`），要在菜单里改就在 `menu.c` 定义一行加进行表（放进游戏菜单还要改 `menu.h` 的 `IG_ROWS`）。
 - 太阳传感器亮度（`mgba_solar_sensor_level`），Boktai 系列需要，只有 mGBA 支持。
 - 前端自己实现帧间混合（smart 模式只混合闪烁的像素，以及 mGBA 下也能用）。
 - 中文文件名：GBA 分区已经用 utf8 挂载，还缺一套 CJK 字体。
