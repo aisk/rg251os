@@ -1,7 +1,6 @@
 /*
- * DRM/KMS output with raw ioctls (no libdrm), based on hwtest which
- * verified on the device: one DSI connector, 320x480@60.02, RG16 scanout,
- * page flip events on vblank.
+ * DRM/KMS output with raw ioctls (no libdrm). Verified on the device: one
+ * DSI connector, 320x480@60.02, RG16 scanout, page flip events on vblank.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -23,7 +22,7 @@
 /*
  * Software rotation from logical landscape to the native portrait buffer,
  * in degrees counter clockwise, matching the DT "rotation" property of the
- * panel (270 on RG351P/M, same as fbcon=rotate:3). Verified with hwtest.
+ * panel (270 on RG351P/M, same as fbcon=rotate:3). Verified on the device.
  */
 #define ROTATION 270
 #define FLIP_TIMEOUT_MS 200

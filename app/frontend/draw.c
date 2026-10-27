@@ -1,5 +1,5 @@
 /*
- * Menu drawing on a logical RGB565 canvas, with the 8x8 font from hwtest.
+ * Menu drawing on a logical RGB565 canvas, with the 8x8 ASCII font in font8x8.h.
  */
 #include <stdarg.h>
 #include <stdio.h>

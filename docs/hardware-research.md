@@ -159,7 +159,7 @@ DDR blob 在两边是同一个文件，legacy 能启动，说明 DDR 初始化�
 - 内核基于 allnoconfig 合并 `rg351p.config`，所有驱动内置，没有模块和 initramfs。`debug.config` 默认也合并进去（`LINUX_DEBUG=0` 去掉），里面是 fbcon 和前端调试日志要读的 `/proc/asound`、debugfs、`/dev/mem`。makefile 会检查片段里的符号是否都生效。
 - 两个核心各自用 `mk/core-archive.sh` 合成一个只导出 `<core>_retro_*` 的目标文件，这样能静态链接进同一个程序而不撞符号。
 - 主线 U-Boot 从 `odroid-go2_defconfig` 合并片段，proper 阶段改用主线 RG351M 的 DT 并通过 `DEVICE_TREE_INCLUDES` 加上自己的 dtsi，避开 OGA DT 里 `vcc_host` 打开震动马达的问题。`DDR_INIT=rkbin|open` 和 `BL31=tfa|rkbin` 留着给以后排查用。
-- 镜像里用前端直接当 PID 1（`/sbin/init`），不用 BusyBox。rootfs 里另有 `/sbin/hwtest`，内核命令行加 `init=/sbin/hwtest` 可以改跑硬件测试。
+- 镜像里用前端直接当 PID 1（`/sbin/init`），不用 BusyBox。rootfs 里只有这一个程序。
 - 镜像用 genimage 生成，布局见“当前状态”。
 - 主机依赖：`genimage mtools dosfstools fakeroot cmake ninja-build`，主线 U-Boot 另外要 `swig python3-setuptools python3-pyelftools python3-dev libssl-dev bison flex`，`make frontend-test` 要 `qemu-user`。
 
@@ -192,7 +192,7 @@ DDR blob 在两边是同一个文件，legacy 能启动，说明 DDR 初始化�
 
 ## 实机验证结果
 
-2026-10-18，legacy U-Boot 加主线 6.18.57 内核加 hwtest：
+2026-10-18，legacy U-Boot 加主线 6.18.57 内核加 hwtest（早期的硬件测试程序，已删除）：
 
 - 显示正常，DSI 面板、背光、fbcon 都工作，`fbcon=rotate:3` 和 hwtest 的 270° 旋转方向正确
 - VOP 支持 RGB565 扫描输出
@@ -228,7 +228,7 @@ DDR blob 在两边是同一个文件，legacy 能启动，说明 DDR 初始化�
 |---|---|
 | 32KiB 到 16MiB，分区表之外 | bootloader：legacy 是 idbloader（扇区 64）、`uboot.img`（8MiB）、`trust.img`（12MiB） |
 | p1，FAT，`BOOT`，从 16MiB 开始 | `Image`、`rk3326-anbernic-rg351p.dtb`、`boot.ini`、`extlinux/extlinux.conf` |
-| p2，ext4，只读 | rootfs：`/sbin/init`（前端）和 `/sbin/hwtest` |
+| p2，ext4，只读 | rootfs：`/sbin/init`（前端） |
 | p3，FAT，`GBA` | ROM、存档、设置和日志，前端挂在 `/mnt/data`。镜像里只有 64MiB，第一次开机时扩到整张卡并格式化成 FAT32（见下） |
 
 GBA 分区（下面写作 `<data>`）里的文件

@@ -34,7 +34,7 @@ FRONTEND_STUB_CORES_OBJ := $(FRONTEND_BUILD)/obj/cores-stub.o
 
 FRONTEND_CFLAGS := -std=c11 -O2 -Wall -Wextra -Wshadow -D_GNU_SOURCE \
 	-mcpu=cortex-a35 -isystem $(LIBRETRO_INCLUDE) -isystem $(TINYALSA_INCLUDE) \
-	-I$(TOP)/app/hwtest -MMD -MP
+	-MMD -MP
 FRONTEND_LDFLAGS := -static
 
 ifeq ($(FRONTEND_CORE),stub)

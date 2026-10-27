@@ -111,7 +111,7 @@ static void test_blit(void)
 			}
 	}
 
-	/* Orientation, as verified with hwtest: rotation 270 puts logical
+	/* Orientation, as verified on the device: rotation 270 puts logical
 	 * (0,0), the user's top-left, at native column 0 of the last row. */
 	blit_rotate(a, dpitch, 320, 480, 270, src, 256, 240, 160, 2, NULL);
 	CHECK(a[479 * dpitch + 0] == src[0], "top-left pixel not at native (0,479)");

@@ -27,8 +27,8 @@ struct blit_fx {
 /*
  * Copy an RGB565 image into a native scanout buffer of nw x nh pixels,
  * scaled by an integer factor, centered in the logical (rotated) screen,
- * with black borders. rot is 0, 90 or 270 degrees counter clockwise, as in
- * hwtest: for 270, native pixel (nx, ny) shows logical (lw-1-ny, nx).
+ * with black borders. rot is 0, 90 or 270 degrees counter clockwise. For
+ * 270, native pixel (nx, ny) shows logical (lw-1-ny, nx).
  * Pitches are in pixels. fx may be NULL (plain copy).
  */
 void blit_rotate(uint16_t *dst, int dpitch, int nw, int nh, int rot,
