@@ -161,13 +161,17 @@ void battery_format(const struct battery *b, char *buf, int size)
 	static const char *const names[] = {
 		"Unknown", "Discharging", "Charging", "Full", "Not charging",
 	};
+	char mw[24] = "";
 
 	if (!b->valid) {
 		snprintf(buf, size, "n/a");
 		return;
 	}
-	snprintf(buf, size, "%d%% %s %.3f V %+.3f A, charger %s", b->capacity,
-		 names[b->status], b->uv / 1e6, b->ua / 1e6,
+	if (b->uv > 0)
+		snprintf(mw, sizeof(mw), " %.0f mW",
+			 (b->ua < 0 ? -b->ua : b->ua) * (double)b->uv / 1e9);
+	snprintf(buf, size, "%d%% %s %.3f V %+.3f A%s, charger %s", b->capacity,
+		 names[b->status], b->uv / 1e6, b->ua / 1e6, mw,
 		 b->online ? "online" : "offline");
 }
 

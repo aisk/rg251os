@@ -35,7 +35,9 @@ int battery_read(struct battery *b);
 const struct battery *battery_get(void);
 /* Below BAT_LOW_PCT and not on a charger. */
 int battery_low(void);
-/* "87% Discharging 3.912 V -0.412 A, charger offline" for the log. */
+/* "87% Discharging 3.912 V -0.412 A 1612 mW, charger offline" for the
+ * log (the RK817 current is negative while discharging; the power is
+ * left out without a voltage). */
 void battery_format(const struct battery *b, char *buf, int size);
 /* "87%", "+87%" while charging, "" when unknown. */
 void battery_label(const struct battery *b, char *buf, int size);

@@ -571,9 +571,7 @@ static int menu_hotkey(uint32_t buttons)
  * and with debug logging the perf line. */
 static void perf_report(void)
 {
-	char run[48], blit[48], aud[48], cpu[96];
-	char bat[80] = "n/a", temp[24] = "n/a";
-	const struct battery *b = battery_get();
+	char run[48], blit[48], aud[48], cpu[96], bat[96], temp[24] = "n/a";
 	struct audio_stats as;
 	long khz, mc;
 
@@ -592,12 +590,7 @@ static void perf_report(void)
 	mc = soc_temp_mc();
 	if (mc != -1)
 		snprintf(temp, sizeof(temp), "%.1f C", mc / 1000.0);
-	/* RK817 current is negative while discharging. */
-	if (b->valid)
-		snprintf(bat, sizeof(bat), "%d%% %.3f V %+.0f mA %.0f mW%s",
-			 b->capacity, b->uv / 1e6, b->ua / 1e3,
-			 (b->ua < 0 ? -b->ua : b->ua) * (double)b->uv / 1e9,
-			 b->online ? " (charger)" : "");
+	battery_format(battery_get(), bat, sizeof(bat));
 	cpuctl_format(cpu, sizeof(cpu));
 	perf_format(&m.p_run, run, sizeof(run));
 	perf_format(&m.p_blit, blit, sizeof(blit));

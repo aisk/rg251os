@@ -606,6 +606,8 @@ static void test_battery(const char *base)
 	CHECK(!strcmp(label, "87%"), "label %s", label);
 	battery_format(&b, line, sizeof(line));
 	log_msg("selftest: battery %s", line);
+	CHECK(!strcmp(line, "87% Discharging 3.912 V -0.412 A 1612 mW, charger "
+		      "offline"), "battery line %s", line);
 
 	put(bat, "capacity", "5\n");
 	battery_poll(1000000000000000LL);
