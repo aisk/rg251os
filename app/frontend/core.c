@@ -44,6 +44,7 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -131,10 +132,8 @@ static void core_log(enum retro_log_level level, const char *fmt, ...)
 /*
  * Core options. Keys are prefixed per core, so one table serves both;
  * keys not listed get the core's default. The BIOS options depend on
- * whether <data>/bios/gba_bios.bin exists, gpSP's frame mixing (a 50:50
- * mix of this and the previous frame, for games that rely on the GBA
- * LCD's ghosting) on the game's blend setting. mGBA's libretro port has
- * no frame blending.
+ * whether <data>/bios/gba_bios.bin exists; the ones in rom_options[] on
+ * the game's settings. The rest are fixed.
  */
 static const char *const options[][2] = {
 	{ "mgba_skip_bios", "OFF" },
@@ -153,6 +152,55 @@ static const char *const options[][2] = {
 	{ "gpsp_color_correction", "disabled" },  /* ours, see fx.c */
 };
 
+/*
+ * Core options from the game's settings (struct rom_settings): the key,
+ * the core that has it, the setting, the option's value for each value of
+ * the setting, and whether the core takes a change while running (gpSP
+ * reads its options again after RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE)
+ * or only at the next start. A setting changed in game reaches the core
+ * through core_options_changed().
+ *
+ * gpsp_frame_mixing: a 50:50 mix of this and the previous frame, for
+ * games that rely on the GBA LCD's ghosting; mGBA's libretro port has no
+ * frame blending.
+ */
+struct rom_option {
+	const char *key;
+	int core;                   /* enum core_id */
+	size_t off;                 /* its int in struct rom_settings */
+	const char *const *values;  /* by the setting's value */
+	int nvalues;
+	int live;
+};
+
+static const char *const disabled_enabled[] = { "disabled", "enabled" };
+
+#define ROM_OPTION(key, core, member, values, live) \
+	{ key, core, offsetof(struct rom_settings, member), values, \
+	  ARRAY_SIZE(values), live }
+
+static const struct rom_option rom_options[] = {
+	ROM_OPTION("gpsp_frame_mixing", CORE_GPSP, blend, disabled_enabled, 1),
+};
+
+/* The setting each rom option was last given to the core with. */
+static int rom_option_set[ARRAY_SIZE(rom_options)];
+
+static int rom_option_setting(const struct rom_option *o)
+{
+	int v = *(const int *)((const char *)&rom_settings + o->off);
+
+	return v < 0 ? 0 : v >= o->nvalues ? o->nvalues - 1 : v;
+}
+
+int core_option_core(const char *key)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(rom_options); i++)
+		if (!strcmp(key, rom_options[i].key))
+			return rom_options[i].core;
+	return -1;
+}
+
 static const char *get_variable(const char *key)
 {
 	const char *v = NULL;
@@ -162,8 +210,9 @@ static const char *get_variable(const char *key)
 		v = c.have_bios ? "ON" : "OFF";
 	else if (!strcmp(key, "gpsp_bios"))
 		v = c.have_bios ? "auto" : "builtin";
-	else if (!strcmp(key, "gpsp_frame_mixing"))
-		v = rom_settings.blend ? "enabled" : "disabled";
+	for (size_t i = 0; !v && i < ARRAY_SIZE(rom_options); i++)
+		if (!strcmp(key, rom_options[i].key))
+			v = rom_options[i].values[rom_option_setting(&rom_options[i])];
 	for (size_t i = 0; !v && i < ARRAY_SIZE(options); i++)
 		if (!strcmp(key, options[i][0]))
 			v = options[i][1];
@@ -173,8 +222,6 @@ static const char *get_variable(const char *key)
 	    n + strlen(key) + 16 < sizeof(c.options))
 		snprintf(c.options + n, sizeof(c.options) - n, "%s%s=%s",
 			 n ? " " : "", key, v ? v : "(default)");
-	if (c.loaded && !strcmp(key, "gpsp_frame_mixing"))
-		log_msg("core: %s=%s, applied live", key, v);
 	return v;
 }
 
@@ -701,6 +748,8 @@ int core_load(const char *rom_path, int core, char *err, size_t errlen)
 		 fe_data_dir, blen, base, c.api->name);
 	c.options[0] = 0;
 	c.options_changed = 0;
+	for (size_t i = 0; i < ARRAY_SIZE(rom_options); i++)
+		rom_option_set[i] = rom_option_setting(&rom_options[i]);
 	c.in_game = 0;
 	c.info_lines = c.warn_lines = c.dropped_lines = 0;
 	c.bad_cmds = 0;
@@ -850,12 +899,26 @@ void core_options_changed(void)
 {
 	if (!c.loaded)
 		return;
-	if (c.info.core == CORE_GPSP)
-		c.options_changed = 1;
-	else
-		log_msg("core: blend %s kept for gpSP, %s has no frame blending",
-			rom_settings.blend ? "on" : "off",
-			core_labels[c.info.core]);
+	for (size_t i = 0; i < ARRAY_SIZE(rom_options); i++) {
+		const struct rom_option *o = &rom_options[i];
+		int v = rom_option_setting(o);
+
+		if (v == rom_option_set[i])
+			continue;
+		rom_option_set[i] = v;
+		if (o->core != c.info.core) {
+			log_msg("core: %s=%s kept for %s, %s does not have it",
+				o->key, o->values[v], core_labels[o->core],
+				core_labels[c.info.core]);
+		} else if (o->live) {
+			/* Read again after the next retro_run. */
+			c.options_changed = 1;
+			log_msg("core: %s=%s, applied live", o->key, o->values[v]);
+		} else {
+			log_msg("core: %s=%s from the next start", o->key,
+				o->values[v]);
+		}
+	}
 }
 
 const uint16_t *core_frame(int *w, int *h, int *pitch_px)

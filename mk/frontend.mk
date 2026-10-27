@@ -250,7 +250,7 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	grep -q 'core switch: mgba reset, counter 8' $$f; \
 	grep -q 'core: gpsp_frame_mixing=enabled, applied live' $$f; \
 	grep -q 'core: gpsp_frame_mixing=disabled, applied live' $$f; \
-	grep -q 'core: blend on kept for gpSP, mGBA has no frame blending' $$f
+	grep -q 'core: gpsp_frame_mixing=enabled kept for gpSP, mGBA does not have it' $$f
 	# The first boot's partition grow on card images, with mtools as the
 	# file system and fsck.fat on the result (see the script).
 	$(TOP)/mk/sdgrow-test.sh $(QEMU_AARCH64) $(FRONTEND_STUB_ELF) \

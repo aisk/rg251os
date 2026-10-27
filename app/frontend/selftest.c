@@ -2783,12 +2783,12 @@ static void blend_live(const char *rom)
 	      "blend live: frames %p %p %p", (const void *)f0, (const void *)f1,
 	      (const void *)f2);
 	core_unload();
-	rom_settings.blend = 1;
 	if (core_load(rom, CORE_MGBA, err, sizeof(err))) {
 		CHECK(0, "blend: %s", err);
 		return;
 	}
 	run_frames(2);
+	rom_settings.blend = 1;
 	core_options_changed();
 	run_frames(2);
 	core_unload();
