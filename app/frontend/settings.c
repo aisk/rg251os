@@ -19,17 +19,13 @@
  * folders share them. Unknown keys, bad values, comments (#), blank lines
  * and CRLF line ends are ignored, so a missing or damaged file just leaves
  * the defaults. Files are replaced atomically.
- * Before config/ existed the global settings lived in <data>/settings.txt;
- * that file is still read when config/settings.txt is missing.
  *
  * A per ROM file is only written once something was changed for that
  * game, and only with the fields that were in the file or differ from the
  * defaults (rom_settings_defaults()), so a changed default still reaches
  * every game the user has not touched: core= appears only once a core
- * other than the default was picked for that game (files from before
- * gpSP became the default contain no core= at all). Likewise color= is
- * only there for games where a mode was picked (or that had one in their
- * file before auto became the default, which keep it).
+ * other than the default was picked for that game, color= only once a
+ * mode other than auto was.
  */
 #include <ctype.h>
 #include <stdio.h>
@@ -236,19 +232,12 @@ int settings_format(const struct settings *s, char *buf, size_t size)
 void settings_load(void)
 {
 	char path[300], cpu[16];
-	const char *from = "config/settings.txt";
 	int n;
 
 	settings = settings_defaults;
 	snprintf(path, sizeof(path), "%s/config/settings.txt", fe_data_dir);
 	n = load_file(path, &settings, global_fields, ARRAY_SIZE(global_fields),
 		      NULL);
-	if (n < 0) {
-		from = "settings.txt (old location)";
-		snprintf(path, sizeof(path), "%s/settings.txt", fe_data_dir);
-		n = load_file(path, &settings, global_fields,
-			      ARRAY_SIZE(global_fields), NULL);
-	}
 	if (settings.brightness < BRIGHTNESS_MIN) {
 		log_msg("settings: brightness %d%% raised to the minimum %d%%",
 			settings.brightness, BRIGHTNESS_MIN);
@@ -260,7 +249,7 @@ void settings_load(void)
 		snprintf(cpu, sizeof(cpu), "%s", cpu_modes[settings.cpu]);
 	log_msg("settings: %s, %d values: volume %d, brightness %d%%, grid %s "
 		"dim %d%% boost %d%%, cpu %s, audio %s, debug %s",
-		n < 0 ? "defaults (no file)" : from,
+		n < 0 ? "defaults (no file)" : "config/settings.txt",
 		n < 0 ? 0 : n, settings.volume, settings.brightness,
 		settings.grid ? "on" : "off", settings.grid_dim,
 		settings.grid_boost, cpu, audio_modes[settings.audio],

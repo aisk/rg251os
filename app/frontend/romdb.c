@@ -10,9 +10,8 @@
  * tells apart only by content, Virtual Console and collection builds,
  * unrelated prototypes reusing a code), the CRC32 of the whole file
  * decides. It is computed once and kept in config/romdb-cache.txt, keyed
- * by the path relative to <data>/roms (romdb_key: the bare file name for
- * ROMs directly in roms/, as before folders existed, so older caches
- * still match), size and modification time; the ROM list computes missing
+ * by the path relative to <data>/roms (romdb_key: "a/b/x.gba", the bare
+ * file name for ROMs directly in roms/), size and modification time; the ROM list computes missing
  * ones a slice at a time while it shows their folder (romlist.c), a game
  * start computes its own. A CRC matching none of the code's entries means a
  * modified ROM: it gets the most likely entry's name with " *" after it.
@@ -32,7 +31,7 @@
  *                         model
  *   unknown       off     no year (homebrew, unidentified ROMs, entries
  *                         without data): the picture as the core makes
- *                         it, as before color=auto existed
+ *                         it
  *
  * with the exceptions in color_exceptions[] (per game, by the first three
  * letters of the header's game code, all regions) taking precedence.

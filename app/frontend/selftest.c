@@ -438,16 +438,12 @@ static void test_settings(const char *base)
 	CHECK(rom_settings_parse(&r, "blend=no\n") == 1 && r.blend == 0,
 	      "blend parse no");
 
-	/* Files: missing, old location, config/, per ROM. */
+	/* Files: missing, config/, per ROM. */
 	sys_make_dirs();
 	settings_load();
 	CHECK(!memcmp(&settings, &settings_defaults, sizeof(settings)),
 	      "no file gives defaults");
-	snprintf(path, sizeof(path), "%s/settings.txt", base);
-	write_text(path, "volume=40\nbrightness=30\n");
-	settings_load();
-	CHECK(settings.volume == 40 && settings.brightness == 30,
-	      "old settings.txt still read");
+	settings.volume = 40;
 	settings.grid = 1;
 	settings.grid_dim = 25;
 	settings_save();
