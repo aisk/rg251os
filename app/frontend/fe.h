@@ -109,10 +109,15 @@ extern const char *const core_labels[CORE_COUNT];  /* in menus */
 #define CPU_MODE_ADAPTIVE 0
 #define CPU_MODE_MAX 1
 
+/* settings.brightness: the panel shows nothing at the lowest backlight
+ * levels, so the user setting never goes below this percent (settings.c
+ * raises a lower saved value, backlight_set clamps). */
+#define BRIGHTNESS_MIN 25
+
 /* Global, in config/settings.txt. */
 struct settings {
 	int volume;      /* raw "Master Playback Volume", 0..255 */
-	int brightness;  /* backlight percent, 5..100 */
+	int brightness;  /* backlight percent, BRIGHTNESS_MIN..100 */
 	int grid;        /* LCD pixel grid effect on/off */
 	int grid_dim;    /* darkening of the 3 unlit pixels of a cell, percent */
 	int grid_boost;  /* brightening of the lit pixel, percent */

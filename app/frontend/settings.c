@@ -248,6 +248,11 @@ void settings_load(void)
 		n = load_file(path, &settings, global_fields,
 			      ARRAY_SIZE(global_fields), NULL);
 	}
+	if (settings.brightness < BRIGHTNESS_MIN) {
+		log_msg("settings: brightness %d%% raised to the minimum %d%%",
+			settings.brightness, BRIGHTNESS_MIN);
+		settings.brightness = BRIGHTNESS_MIN;
+	}
 	if (settings.cpu >= (int)ARRAY_SIZE(cpu_modes))
 		snprintf(cpu, sizeof(cpu), "%d MHz", settings.cpu);
 	else

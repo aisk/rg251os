@@ -148,11 +148,14 @@ static void cpu_step(int d)
 	cpuctl_set_mode(settings.cpu);
 }
 
+/* In tens, plus the minimum: 25%, 30%, 40% ... 100%. */
 static void brightness_step(int d)
 {
-	int b = settings.brightness + d * 10;
+	int b = settings.brightness;
 
-	settings.brightness = b < 10 ? 5 : b > 100 ? 100 : b;
+	b = d > 0 ? (b / 10 + 1) * 10 : ((b + 9) / 10 - 1) * 10;
+	settings.brightness = b < BRIGHTNESS_MIN ? BRIGHTNESS_MIN :
+			      b > 100 ? 100 : b;
 	backlight_set(settings.brightness);
 }
 

@@ -460,6 +460,10 @@ static void test_settings(const char *base)
 	settings_load();
 	CHECK(settings.volume == 12 && settings.brightness == 50,
 	      "corrupt config file: defaults plus what parses");
+	write_text(path, "brightness=10\n");
+	settings_load();
+	CHECK(settings.brightness == BRIGHTNESS_MIN,
+	      "a saved brightness below the minimum is raised");
 
 	rom_settings_load("Some Game (USA).gba");
 	CHECK(rom_settings.color == COLOR_AUTO, "rom without file");

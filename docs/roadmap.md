@@ -28,6 +28,7 @@
 - 菜单里的两次确认：游戏菜单的 Restart with、Power off 和 ROM 列表设置里新加的 Power off 现在和 Restart game 一样要 3 秒内按两次 A。从设置关机时日志里是 `power off: settings`，看看保存和关机流程是否和长按电源键一样。
 - 退出时的即时存档：退出、关机、长按电源键关机、换核心、休眠后再开同一个游戏，日志里应该有 `state: wrote N bytes to <rom>.<core>.state (原因): serialize X ms, write Y ms` 和下次的 `state: loaded ... resuming`，画面接着上次的位置。qemu 下（PC 硬盘）序列化 0.3 到 3 ms，写 416 到 520KiB 约 9 到 27 ms，真卡上的写入时间要看日志，关机路径上它在 "Saving..." 画面之后、`dmesg-poweroff.txt` 之前。还要看 Restart game 后的 `state: removed`，以及用电脑换掉 `.sav` 后是否显示 `skipped: the save data changed`。另外看看从即时存档恢复时游戏内的 RTC（宝可梦等）是否正常。
 - 日期和时间（ROM 列表设置里的 Date & time，`clock.c`）：开机日志里的 `clock: system ..., RTC ...` 是否读到了 RTC（内核新开了 `CONFIG_RTC_INTF_DEV`，要有 `/dev/rtc0`），没设过时是否带 `looks never set`。设置一次后看 `clock: setting`、`clock: settimeofday(...)`、`clock: RTC_SET_TIME on /dev/rtc0` 和 `clock: RTC reads back` 几行是否都是 ok，系统信息页的 Clock 和 ROM 列表标题栏的时间是否跟着变。然后关机再开、隔一段时间再开，看时间有没有走对；再试一次电池完全耗尽后充电开机，看 RTC 是否还保持（RK817 的 RTC 应该和 PMIC 一起由电池供电，没有单独的纽扣电池）。rk808 驱动里有 Rockchip 日历 11 月 31 日的换算，跨 11 月底设时间时留意 read back 的结果。最后用宝可梦宝石系列确认游戏里的时间。
+- 亮度下限：背光调到最低时屏幕什么都看不见，现在用户亮度最低是背光范围的 25%（`BRIGHTNESS_MIN`），菜单里是 25%、30%、40% 一直到 100%，卡上存的更低的值开机时会被提上来，日志里是 `settings: brightness N% raised to the minimum 25%`。开机日志的 `backlight ...: ... user minimum 25% = N` 一行是对应的原始值。要确认最低一档还看得清。如果太亮或者还是太暗，只改这一个常量。
 
 ## 已知问题
 

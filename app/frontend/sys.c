@@ -564,8 +564,10 @@ void backlight_init(int percent)
 	snprintf(path, sizeof(path), "%s/max_brightness", bl_dir);
 	bl_max = read_sysfs_long(path, 0);
 	snprintf(path, sizeof(path), "%s/brightness", bl_dir);
-	log_msg("backlight %s: max_brightness %ld, brightness was %ld",
-		bl_dir, bl_max, read_sysfs_long(path, -1));
+	log_msg("backlight %s: max_brightness %ld, brightness was %ld, "
+		"user minimum %d%% = %ld", bl_dir, bl_max,
+		read_sysfs_long(path, -1), BRIGHTNESS_MIN,
+		(bl_max * BRIGHTNESS_MIN + 50) / 100);
 	if (bl_max <= 0) {
 		bl_dir[0] = 0;
 		return;
@@ -580,8 +582,8 @@ void backlight_set(int percent)
 
 	if (!bl_dir[0] || !fe_is_init)
 		return;
-	if (percent < 5)
-		percent = 5;
+	if (percent < BRIGHTNESS_MIN)
+		percent = BRIGHTNESS_MIN;
 	if (percent > 100)
 		percent = 100;
 	v = (bl_max * percent + 50) / 100;
