@@ -284,6 +284,8 @@ static void do_poweroff(void)
 	led_set_red(1);
 	end_game("power off");
 	save_settings();
+	/* The save child is done (core_unload), others may still run. */
+	sys_wait_children(3000);
 	log_msg("uptime %lld ms, dumping dmesg", (long long)boot_ms());
 	log_sync();
 	klog_dump("dmesg-poweroff.txt");

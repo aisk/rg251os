@@ -1,7 +1,8 @@
 /*
  * Logging and clocks. Every line gets a CLOCK_BOOTTIME timestamp so it
  * lines up with dmesg. Until the GBA partition is mounted, lines are kept
- * in memory and written out when the log file opens. Important lines also
+ * in memory and written out when the log file opens; once it is closed at
+ * power off, lines only go to the kernel log. Important lines also
  * go to /dev/kmsg (stderr when not PID 1), so they show up in the dmesg
  * dumps as well.
  *
@@ -158,6 +159,18 @@ void log_open_file(const char *path)
 	if (backlog_len)
 		out_file(backlog, backlog_len);
 	backlog_len = 0;
+}
+
+/* At power off, before the unmount: later lines only go to the kernel
+ * log (and stderr when not PID 1). */
+void log_close_file(void)
+{
+	if (file_fd < 0)
+		return;
+	fsync(file_fd);
+	close(file_fd);
+	file_fd = -1;
+	backlog_len = sizeof(backlog);  /* keep nothing back from now on */
 }
 
 void log_sync(void)

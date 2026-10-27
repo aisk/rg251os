@@ -30,6 +30,7 @@ int realtime_utc(struct tm *tm);
 /* ---- log.c: frontend.txt on the GBA partition plus /dev/kmsg */
 void log_set_kmsg(int fd);
 void log_open_file(const char *path);
+void log_close_file(void);
 /* Important lines: to the log file and the kernel log. */
 void log_msg(const char *fmt, ...) FE_PRINTF(1, 2);
 /* Chatty lines, only with debug logging: log file only. */
@@ -54,6 +55,9 @@ void klog_dump(const char *name);
 void klog_dump_since(const char *name, const char *marker);
 void klog_dump_async(const char *name);
 pid_t sys_reap(int *status);
+/* Reap every child, waiting up to timeout_ms; logs what is left. */
+void sys_wait_children(int timeout_ms);
+/* Closes the log file, unmounts the GBA partition and powers off. */
 void sys_poweroff(void) __attribute__((noreturn));
 /* Up to max bytes; returns the length or -1 with errno. */
 int read_file(const char *path, void *buf, size_t max);

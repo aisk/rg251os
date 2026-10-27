@@ -1,8 +1,8 @@
 /*
  * PID 1 duties and small system helpers: mounts, per boot log
- * directories, status LED, kernel log dumps, child reaping, power off,
- * file and sysfs access, atomic file writes, backlight, CPU info and
- * temperature.
+ * directories, status LED, kernel log dumps, child reaping, power off
+ * (with the GBA partition unmounted first), file and sysfs access, atomic
+ * file writes, backlight, CPU info and temperature.
  */
 #include <dirent.h>
 #include <errno.h>
@@ -19,6 +19,13 @@
 #include <unistd.h>
 
 #include "fe.h"
+
+#define DATA_DEV "/dev/mmcblk0p3"
+#define DATA_FLAGS (MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_NOATIME)
+#define DATA_OPTS "utf8,errors=remount-ro"
+/* What the FAT driver says when it mounts a volume whose dirty bit is
+ * set: it was not unmounted (or remounted read-only) at some point. */
+#define FAT_DIRTY_MSG "Volume was not properly unmounted"
 
 int fe_is_init;
 char fe_data_dir[256] = "/mnt/data";
@@ -62,31 +69,63 @@ void sys_early_init(void)
 	log_set_kmsg(open("/dev/kmsg", O_WRONLY | O_CLOEXEC));
 }
 
+/* The whole kernel log buffer, NUL terminated (free it); NULL on error. */
+static char *klog_read(int *len)
+{
+	int size = klogctl(10 /* SYSLOG_ACTION_SIZE_BUFFER */, NULL, 0);
+	char *buf;
+	int n;
+
+	if (size <= 0)
+		size = 1 << 17;
+	buf = malloc(size + 1);
+	if (!buf)
+		return NULL;
+	n = klogctl(3 /* SYSLOG_ACTION_READ_ALL */, buf, size);
+	if (n < 0)
+		n = 0;
+	buf[n] = 0;
+	*len = n;
+	return buf;
+}
+
 /*
  * The GBA partition holds ROMs, saves and logs, so it is mounted read-write
  * right away. The card was already probed when the root fs was found
  * (rootwait), so the partition is normally there; retry briefly anyway.
+ * Whether the FAT dirty bit was set is logged: it is set while mounted
+ * and cleared by a clean unmount (sys_poweroff), but the kernel leaves a
+ * bit it found set at mount alone, so once set it stays until a repair
+ * (Windows, fsck.fat).
  */
 int sys_mount_data(void)
 {
-	static const char *const dev = "/dev/mmcblk0p3";
-	int err = 0;
+	int err = 0, len;
+	char *klog;
 
 	if (!fe_is_init)
 		return 0;
 	for (int i = 0; i < 20; i++) {
-		if (mount(dev, fe_data_dir, "vfat", MS_NOSUID | MS_NODEV | MS_NOEXEC |
-			  MS_NOATIME, "utf8,errors=remount-ro") == 0) {
-			log_msg("mounted %s on %s (vfat, rw)", dev, fe_data_dir);
-			return 0;
-		}
+		if (mount(DATA_DEV, fe_data_dir, "vfat", DATA_FLAGS, DATA_OPTS) == 0)
+			break;
 		err = errno;
 		if (err == EBUSY)
 			return 0;
+		if (i == 19) {
+			log_msg("mount %s: %s", DATA_DEV, strerror(err));
+			return -1;
+		}
 		usleep(50000);
 	}
-	log_msg("mount %s: %s", dev, strerror(err));
-	return -1;
+	klog = klog_read(&len);
+	log_msg("mounted %s on %s (vfat, rw), %s", DATA_DEV, fe_data_dir,
+		!klog ? "dirty bit unknown" : strstr(klog, FAT_DIRTY_MSG) ?
+		"dirty bit set: not cleanly unmounted at some point (power "
+		"lost, card pulled or a failed unmount; Linux never clears "
+		"it, a repair on a PC does)" :
+		"clean (unmounted at the last power off)");
+	free(klog);
+	return 0;
 }
 
 void sys_make_dirs(void)
@@ -227,21 +266,14 @@ void led_set_red(int red)
  */
 void klog_dump_since(const char *name, const char *marker)
 {
-	int size = klogctl(10 /* SYSLOG_ACTION_SIZE_BUFFER */, NULL, 0);
 	char path[400], *buf, *from, *p;
 	int n, fd;
 
 	if (!fe_is_init)
 		return;
-	if (size <= 0)
-		size = 1 << 17;
-	buf = malloc(size + 1);
+	buf = klog_read(&n);
 	if (!buf)
 		return;
-	n = klogctl(3 /* SYSLOG_ACTION_READ_ALL */, buf, size);
-	if (n < 0)
-		n = 0;
-	buf[n] = 0;
 	from = buf;
 	for (p = buf; marker && (p = strstr(p, marker)); p++)
 		from = p;
@@ -287,17 +319,66 @@ pid_t sys_reap(int *status)
 	return waitpid(-1, status, WNOHANG);
 }
 
+/*
+ * Before the unmount: children (background saves, log fsyncs, kernel log
+ * dumps) may still hold files on the GBA partition open.
+ */
+void sys_wait_children(int timeout_ms)
+{
+	int64_t end = now_ns() + timeout_ms * 1000000LL;
+	unsigned reaped = 0;
+	pid_t pid;
+	int st;
+
+	for (;;) {
+		pid = waitpid(-1, &st, WNOHANG);
+		if (pid > 0) {
+			reaped++;
+			continue;
+		}
+		if (pid < 0 || now_ns() >= end)
+			break;
+		usleep(10000);
+	}
+	if (pid < 0 && errno == ECHILD)
+		log_msg("power off: no child processes left (%u reaped)", reaped);
+	else
+		log_msg("power off: child processes still running after %d ms "
+			"(%u reaped)", timeout_ms, reaped);
+}
+
+/*
+ * vfat keeps its dirty bit set on the card until a clean unmount (or a
+ * remount read-only), and Windows offers to repair a card with it set.
+ * So the log file is closed and the GBA partition unmounted, or if
+ * something still has a file open there (EBUSY), remounted read-only.
+ * The outcome only reaches the kernel log, which does not survive the
+ * power off; the next boot's mount line tells whether it worked (see
+ * sys_mount_data). Not PID 1: nothing is unmounted.
+ */
 void sys_poweroff(void)
 {
-	log_msg("powering off");
-	log_sync();
+	log_msg("powering off: unmounting %s", fe_data_dir);
+	log_close_file();
 	sync();
 	if (!fe_is_init)
 		exit(0);
+	if (umount2(fe_data_dir, 0) == 0) {
+		log_msg("power off: %s unmounted", fe_data_dir);
+	} else {
+		log_msg("power off: umount %s: %s, remounting read-only",
+			fe_data_dir, strerror(errno));
+		if (mount(DATA_DEV, fe_data_dir, "vfat",
+			  MS_REMOUNT | MS_RDONLY | DATA_FLAGS, DATA_OPTS) == 0)
+			log_msg("power off: %s remounted read-only", fe_data_dir);
+		else
+			log_msg("power off: remount %s read-only: %s",
+				fe_data_dir, strerror(errno));
+	}
+	sync();
 	reboot(RB_POWER_OFF);
 	/* Still here: no pm_power_off. Halting is better than a PID 1 exit. */
 	log_msg("power off failed: %s", strerror(errno));
-	log_sync();
 	reboot(RB_HALT_SYSTEM);
 	for (;;)
 		pause();
