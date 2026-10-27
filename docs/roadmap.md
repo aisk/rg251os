@@ -32,6 +32,7 @@
 - 亮度下限：背光调到最低时屏幕什么都看不见，现在用户亮度最低是背光范围的 25%（`BRIGHTNESS_MIN`），菜单里是 25%、30%、40% 一直到 100%，卡上存的更低的值开机时会被提上来，日志里是 `settings: brightness N% raised to the minimum 25%`。开机日志的 `backlight ...: ... user minimum 25% = N` 一行是对应的原始值。要确认最低一档还看得清。如果太亮或者还是太暗，只改这一个常量。
 - 界面字体换成了 JetBrains Mono Regular（20px，灰度抗锯齿，按原生分辨率画），不再是 8x8 放大两倍。JetBrains Mono 20px 的字宽正好是 12px，字格和之前的 Spleen 12x24 一样，布局没有变。要看实机上抗锯齿的文字是否清晰（尤其灰色字在深色背景上和选中条上的边缘）、大小是否合适，Date & time 的两倍大数字是直接放大的，看是否发虚。各个画面（ROM 列表、设置、游戏菜单、游戏内设置、System info、Date & time、出错和关机画面）有没有文字重叠或被截掉。现在每个文字像素要和底色混合，看翻页、跑马灯滚动和 System info 每秒刷新时有没有可见的卡顿。ROM 列表一页从 14 行变成 9 行（行高 28px），名字从 29 列变成 38 列。游戏菜单的电量挪进了菜单框里游戏名的右边。System info 一页正好放 11 行，B:back 挪到了标题栏右边，如果温度一行放不下要换行，最后的 Kernel 一行会被挤掉。开机日志里有一行 `ui: font 12x24, ...` 记录这些尺寸。
 - 前端界面改成了页面栈（`ui.c`），游戏菜单和两个设置页改成共用的行表（`menu.c` 的 `struct row`）。selftest 的截图逐像素没有变化，但页面跳转换了实现，要在实机上点一遍：ROM 列表按 SELECT 进设置，进 System info 再按两次 B 回到列表，Date & time 进出一次，设置里的 Power off 按两次 A。游戏中 SELECT+START 打开菜单，进 Settings 后 B、B 回到游戏，在游戏内设置页和 System info 页直接按 SELECT+START 也应该回到游戏。再试 Restart game、换核心后的 Restart with、Frame blend（mGBA 下显示 gpSP only，不能改）和 Quit to ROM list（回到原来选中的 ROM）。换页后新页面在同一帧就画出来，以前有几处要等下一帧。打开 Debug log 时每次换页有一行 `ui: push ...`、`ui: pop ...` 或 `ui: back to game ...`。日志格式也有变化，设置一行变成 `settings: ... volume=255 brightness=50 ...` 这样的 `key=value`，mGBA 下切 Frame blend 是 `core: gpsp_frame_mixing=enabled kept for gpSP, mGBA does not have it`。
+- 菜单只在有变化时重绘：以前 ROM 列表和菜单每个 vblank 都整屏重绘（约 60 次每秒），现在停着不动时不重绘，主循环睡在 `poll()` 里。打开 Debug log 后，在菜单里每 60 秒和离开菜单（进游戏、休眠、关机）时有一行 `ui: menus for X s (...): N redraws (R/s), M updates, P% asleep in poll; bat ...`。要看：停在 ROM 列表、设置或游戏菜单不动时 R 应该接近 0（选中的名字太长在滚动时，滚动期间约 60，两端各停 1 秒；System info 每秒最多 3 次，Date & time 每秒 1 次），P 应该接近 100%；菜单按键、方向键按住连发是否和以前一样跟手；走马灯速度是否和以前一样（每秒 60 像素，开头和结尾各停 1 秒）；两次确认的 "Press A to ..." 是否 3 秒后恢复；标题栏时间是否按分钟跳；电量变化、插拔充电线、按音量键时菜单上的电量和 Volume 是否马上更新；ROM 列表里有 ROM 在算 CRC 时名字是否还会改过来。省电效果：同一行里的 `bat` 有功率（mW），和以前版本 Debug log 里 ROM 列表停着时的 `battery:` 行（每分钟一行）比较，同样亮度下看功率差多少。selftest 里模拟的结果是：菜单静止 10 秒 0 次重绘，滚动时 0.5 秒 30 次，System info 3 秒 9 次。
 
 ## 已知问题
 
@@ -53,7 +54,6 @@
 - zip 格式 ROM。
 - 震动卡带（`gpsp_rumble`），需要前端驱动 pwm-vibrator。
 - mGBA 的性能：多线程视频、LTO、PGO。
-- ROM 列表和菜单现在每个 vblank 都整屏重绘一次（约 60 Hz），列表停着不动时也一样。可以改成只在有变化时重绘（按键、走马灯、电量更新、CRC 算完改名），省一点电。
 - 开机速度优化，见 hardware-research.md 里“对精简和快速开机的初步判断”。2026-10-18 的一次实机日志（debug 开着）：内核启动后 0.81 s 进入前端，0.86 s 挂好 GBA 分区，2.43 s 才打开日志，2.49 s 出 ROM 列表。挂载后到打开日志之间这 1.5 s 还没分析。bootloader 阶段的耗时没量过，要接串口或者用高速摄像来测。
 - 接上 UART2 以后再查主线 U-Boot。
 - 把 RG351P 的 DTS 整理后提交到主线内核。
