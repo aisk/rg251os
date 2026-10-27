@@ -144,7 +144,7 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	test $$(grep -c ',all,' $(FRONTEND_TEST_DIR)/stub/log/perf.csv) -eq 2
 	grep -q ',max,1296000,' $(FRONTEND_TEST_DIR)/stub/log/perf.csv
 	# Audio: summary line and the audio columns at the end of perf.csv.
-	grep -q 'audio summary (headless): adaptive mode' \
+	grep -q 'audio summary (headless end): adaptive mode' \
 		$(FRONTEND_TEST_DIR)/stub/log/frontend.txt
 	grep -q ',audio_fill_max$$' $(FRONTEND_TEST_DIR)/stub/log/perf.csv
 	grep -q ',adaptive,48000 Hz S16 512x8,4[78][0-9][0-9][0-9],' \
@@ -196,7 +196,7 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	printf 'core=mgba\n' > $(FRONTEND_TEST_DIR)/core/config/roms/test.txt
 	FE_AUDIO=simple $(QEMU_AARCH64) $(FRONTEND_ELF) --headless \
 		$(FRONTEND_TEST_DIR)/core $(FRONTEND_TEST_ROM) 3000
-	grep -q 'audio summary (headless): simple mode, 48000 Hz S16 512x8' \
+	grep -q 'audio summary (headless end): simple mode, 48000 Hz S16 512x8' \
 		$(FRONTEND_TEST_DIR)/core/log/frontend.txt
 	grep -q 'core: mGBA .* loaded test.gba' $(FRONTEND_TEST_DIR)/core/log/frontend.txt
 	grep -q '^time,old' $(FRONTEND_TEST_DIR)/core/log/perf-old.csv

@@ -127,6 +127,8 @@ static struct {
 	struct audio_stats last_as;
 	unsigned games;        /* started this boot, numbers the dmesg dumps */
 	uint64_t game_frames;  /* frames of the current game */
+	int64_t game_start_ns;
+	double nodisplay_hz;   /* refresh rate without a display */
 	/* Power key and sleep */
 	struct pwrkey pk;
 	int sleep_req;         /* short press seen, sleep from the main loop */
@@ -138,7 +140,11 @@ static struct {
 	int64_t wake_ms;
 	const char *power_dir;
 	int sleep_test;        /* headless: light sleep wakes by itself */
-} m = { .cv = { .w = CANVAS_W, .h = CANVAS_H }, .power_dir = "/sys/power" };
+} m = {
+	.cv = { .w = CANVAS_W, .h = CANVAS_H },
+	.power_dir = "/sys/power",
+	.nodisplay_hz = 60.0,
+};
 
 /* ------------------------------------------------------- input events */
 
@@ -282,7 +288,8 @@ static void identify_game(const char *path)
 
 static void start_game(const char *path)
 {
-	double hz = display_ready() ? display_info()->refresh_hz : 60.0;
+	double hz = display_ready() ? display_info()->refresh_hz :
+		    m.nodisplay_hz;
 	const char *base = strrchr(path, '/');
 	char err[128];
 
@@ -307,7 +314,9 @@ static void start_game(const char *path)
 	m.games++;
 	m.game_frames = 0;
 	fx_update();
-	cpuctl_game_start(m.rom_name, hz, rom_settings.cpu_start, now_ns());
+	m.game_start_ns = now_ns();
+	cpuctl_game_start(m.rom_name, hz, rom_settings.cpu_start,
+			  m.game_start_ns);
 	ui_reset(&game_page, now_ns());
 	ui_suppress(input_buttons());
 	display_take_missed();
@@ -881,23 +890,23 @@ static void run(void)
  * suspend, so the fallback light sleep and the wake path run (the light
  * sleep wakes itself with a simulated power key press). FE_RESET_AT=N
  * opens the in-game menu after frame N and confirms Restart game, with
- * key presses through the page stack (ui_frame). The
- * resume state is loaded like on a start (core_load) and written at the
- * end like on a quit.
+ * key presses through the page stack (ui_frame). The game starts and
+ * ends like on the device (start_game, end_game and the settings saved),
+ * so the resume state is loaded and written like on a start and a quit.
  */
 static int headless(const char *data, const char *rom, long frames)
 {
 	static uint16_t native[320 * 480];
 	static char power[320];
-	const char *base = strrchr(rom, '/') ? strrchr(rom, '/') + 1 : rom;
 	const char *sleep_env = getenv("FE_SLEEP_AT"), *mode = getenv("FE_AUDIO");
 	const char *reset_env = getenv("FE_RESET_AT");
 	long sleep_at = sleep_env ? strtol(sleep_env, NULL, 0) : -1;
 	long reset_at = reset_env ? strtol(reset_env, NULL, 0) : -1;
 	const struct audio_stats *as = &m.last_as;
-	char err[128], path[300];
+	char path[300];
 	const uint16_t *fr;
-	int fw = 0, fh = 0, fp = 0, st, learned;
+	int fw = 0, fh = 0, fp = 0, st;
+	int64_t t;
 	pid_t pid;
 
 	snprintf(fe_data_dir, sizeof(fe_data_dir), "%s", data);
@@ -906,10 +915,6 @@ static int headless(const char *data, const char *rom, long frames)
 	log_open_file(path);
 	/* Settings from DATA, so effects can be exercised too. */
 	settings_load();
-	rom_settings_load(base);
-	snprintf(m.rom_name, sizeof(m.rom_name), "%.127s", base);
-	identify_game(rom);
-	fx_update();
 	/* FE_AUDIO=simple: the simple path with a realistic 50 ppm codec
 	 * drift (it has no rate control); otherwise adaptive with 0.1%. */
 	settings.audio = mode && !strcmp(mode, "simple") ? AUDIO_SIMPLE :
@@ -920,17 +925,15 @@ static int headless(const char *data, const char *rom, long frames)
 	cpuctl_fake_sysfs(path);
 	cpuctl_init(path);
 	cpuctl_set_mode(settings.cpu);
-	if (core_load(rom, rom_settings.core, err, sizeof(err))) {
-		log_msg("headless: %s", err);
+	m.saved = settings;
+	m.cv.px = m.canvas_px;
+	m.nodisplay_hz = HEADLESS_HZ;
+	ui_set_handler(on_ui);
+	start_game(rom);
+	if (ui_top() != &game_page) {
+		log_msg("headless: %s did not start", rom);
 		return 1;
 	}
-	audio_set_source(core_info()->sample_rate, core_info()->fps, HEADLESS_HZ);
-	cpuctl_game_start(base, HEADLESS_HZ, rom_settings.cpu_start, 0);
-	m.saved = settings;
-	m.saved_rom = rom_settings;
-	m.cv.px = m.canvas_px;
-	ui_set_handler(on_ui);
-	ui_reset(&game_page, 0);
 	if (sleep_at >= 0) {
 		snprintf(power, sizeof(power), "%s/fake-power", fe_data_dir);
 		sleep_fake_sysfs(power);
@@ -941,6 +944,8 @@ static int headless(const char *data, const char *rom, long frames)
 		/* Tap A for 10 frames every 2 s of emulated time. */
 		int64_t t0 = now_ns(), t2;
 
+		/* Fake time from the start: 60 frames per second. */
+		t = m.game_start_ns + i * HEADLESS_FRAME_NS;
 		emulate(i % 120 < 10 ? JOY_BIT(A) : 0);
 		fr = core_frame(&fw, &fh, &fp);
 		t2 = now_ns();
@@ -948,9 +953,8 @@ static int headless(const char *data, const char *rom, long frames)
 			blit_rotate(native, 320, 320, 480, 270, fr, fp, fw, fh, 2,
 				    fx_current());
 		perf_add(&m.p_blit, now_ns() - t2);
-		cpuctl_game_frame(now_ns() - t0, 0, (i + 1) * HEADLESS_FRAME_NS);
-		/* Fake time for the save timer: 60 frames per second. */
-		core_save_tick(i * HEADLESS_FRAME_NS);
+		cpuctl_game_frame(now_ns() - t0, 0, t + HEADLESS_FRAME_NS);
+		core_save_tick(t);
 		while ((pid = sys_reap(&st)) > 0)
 			core_child_exited(pid, st);
 		if (i == sleep_at) {
@@ -990,18 +994,13 @@ static int headless(const char *data, const char *rom, long frames)
 	}
 	if (m.perf_frames)
 		perf_report();
-	audio_summary("headless");
 	log_msg("headless: %ld frames, frame %dx%d pitch %d, final drc %.4f, "
 		"fill %d..%d, underruns after warmup %u",
 		frames, fw, fh, fp, as->adj, as->fill_min, as->fill_max,
 		m.xrun_total);
-	core_state_save("headless end");
-	core_unload();
-	learned = cpuctl_game_end();
-	if (learned != rom_settings.cpu_start) {
-		rom_settings.cpu_start = learned;
-		rom_settings_save();
-	}
+	/* Like a quit, without going back to the ROM list. */
+	end_game("headless end");
+	save_settings();
 	snprintf(path, sizeof(path), "%s/native.raw", fe_data_dir);
 	write_file_atomic(path, native, sizeof(native));
 	return m.xrun_total ? 2 : 0;
