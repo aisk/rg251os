@@ -241,7 +241,7 @@ GBA 分区（下面写作 `<data>`）里的文件
 | `bios/gba_bios.bin` | 可选的 GBA BIOS。没有的话 gpSP 用内置 BIOS，mGBA 用 HLE |
 | `config/settings.txt` | 全局设置：音量、亮度、LCD 网格、CPU 模式、音频模式、调试日志 |
 | `config/roms/<rom>.txt` | 单个游戏的设置：`color`（auto、off、gba、gba-light、sp101）、`core`、`blend`（gpSP 的帧混合）、学到的起始频率 `cpu_start`。只写和默认值不同的项。和存档一样只按文件名，不同文件夹里的同名 ROM 共用 |
-| `config/romdb-cache.txt` | ROM 识别时算过的 CRC32 缓存，按相对 `roms/` 的路径（顶层的 ROM 就是文件名，和旧缓存兼容）、大小和 mtime |
+| `config/romdb-cache.txt` | ROM 识别时算过的 CRC32 缓存，按相对 `roms/` 的路径（顶层的 ROM 就是文件名）、大小和 mtime |
 | `mixer.txt` | 可选，开机时应用的 ALSA mixer 设置，行前可加 `speaker:` 或 `headphones:` |
 | `log/boot-NNNN/` | 每次开机一个目录，保留最近 20 个，有 `frontend.txt` 和各个时间点的 dmesg；`log/LATEST.txt` 指向最新的一个 |
 | `log/perf.csv` | 每局游戏的性能、功耗和音频统计，跨开机追加 |
@@ -260,12 +260,13 @@ GBA 分区（下面写作 `<data>`）里的文件
 - 色彩校正默认 `auto`，按首次发行年份选：2004 年及以前 `gba`，2005 年以后 `sp101`，年份未知 `off`。
 - Frame blend（gpSP 的 50:50 帧混合）默认关，按游戏在菜单里开，切换立即生效。mGBA 的 libretro 接口没有这个功能。
 - LCD 网格效果每次开机随机选 2x2 里的一个像素当亮点。
+- 音量键和菜单里的音量一样每次 3dB，低于 -60dB 就静音。亮度最低 25%，再低屏幕就看不见了。
 - ROM 列表支持子文件夹：文件夹排在 ROM 前面，名字后面带 `/`，黄色显示。A 进入，B 回上一层并选中刚才的文件夹，顶层按 B 没有反应。标题栏在文件夹里显示相对 `roms/` 的路径，太长时从左边截掉。每次进入文件夹只扫描这一层。退出游戏回到原来的文件夹和 ROM，但当前文件夹和选中项不跨开机保存。
 - 按键：ROM 列表里按 SELECT 进设置，游戏中 SELECT+START 打开菜单。设置和游戏菜单里都有只读的 System info 页（`sysinfo.c`），每秒刷新 CPU 占用和频率、内存、温度、电池、日期时间、开机时长和 GBA 分区剩余空间。
 - 日期和时间：ROM 列表设置里的 Date & time（`clock.c`）可以设 年-月-日 时:分，左右选字段，上下改数值（月份和闰年会限制日期），A 保存，B 取消。保存时先 `settimeofday` 再用 `RTC_SET_TIME` 写 RK817 的 RTC（秒归零），写 RTC 失败时页面上显示红色提示。没有时区，输入的时间按 UTC 存，`localtime()` 等于 `gmtime()`，所以核心给游戏卡带 RTC 的就是输入的时间。系统信息页显示当前日期时间，ROM 列表标题栏在时钟设过以后显示 HH:MM。开机日志记 `clock: system ..., RTC ...`，RTC 早于 2024 年会标 `looks never set`；每次设置记旧时间、新时间、每一步的结果和 RTC 读回的值。
 - 会中断游戏的菜单项都要按两次 A：游戏菜单里的 Restart game、换了核心后的 Restart with 和 Power off，以及 ROM 列表设置里的 Power off。第一次按 A 该行变成黄色的 "Press A to restart" 或 "Press A to power off"，3 秒内再按一次才执行，移到别的行、超时或者再换核心就取消。
 - 退出游戏时自动保存即时存档，下次启动接着玩。退回 ROM 列表、关机（游戏菜单、设置、长按电源键）、Restart with 换核心（存在旧核心名下，换回来时还能接上）和休眠时，先写 `.sav`，再把 `retro_serialize` 的结果原子地写到 `saves/<rom>.<core>.state` 并 fsync。启动游戏时在读完 `.sav` 之后、第一帧之前读回来。`.sav` 仍然是主记录：文件被截断或损坏（头里有 CRC）、ROM 换了（大小和 ROM 头 CRC 对不上）、或者存档内容和写即时存档时不一样（比如从电脑换了 `.sav`）就跳过，正常开机，什么都不删。没有用文件时间比较，因为从电脑拷过来的文件可能保留旧时间，RTC 没设过时每次开机的时钟也是从同一个点开始。游戏菜单的 Restart game 会删掉当前核心的即时存档，出错退出（fatal）不写。日志都以 `state:` 开头，记文件名、大小、耗时和跳过的原因。
-- 电源键短按休眠，先尝试挂起到内存，内核挂不起来就退回浅睡眠（关背光和屏幕，CPU 降到最低频率），再按一次唤醒。长按 2 秒保存并关机。
+- 电源键短按休眠，先尝试挂起到内存，内核挂不起来就退回浅睡眠（关背光和屏幕，CPU 降到最低频率），再按一次唤醒。长按 2 秒保存并关机，关机前先卸载 GBA 分区（卸载不了就重新挂成只读），让 FAT 的脏标记清掉。下次开机挂载时日志会记这个标记是否还在。
 - 指示灯：内核阶段是 heartbeat 闪烁，前端启动时变红，第一帧出来后变绿，低电量时绿灯里隔 2 秒闪一下红，出错时红绿交替。
 
 ### 以后
