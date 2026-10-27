@@ -1,6 +1,6 @@
 # 进度、已知问题和待办
 
-2026-10-19 更新。硬件调研和设计决定见 [hardware-research.md](hardware-research.md)，这里记录还没验证的、已知的问题、以后可以做的事，以及开发过程中踩过的坑。
+2026-10-27 更新。硬件调研和设计决定见 [hardware-research.md](hardware-research.md)，这里记录还没验证的、已知的问题、以后可以做的事，以及开发过程中踩过的坑。
 
 ## 开发流程
 
@@ -25,6 +25,7 @@
 - adaptive 音频去掉开机校准以后，第一局开头有没有爆音或 underrun。
 - 开机时 LED 心跳闪烁，前端起来后接管。
 - 系统信息页（ROM 列表的设置里和游戏菜单里的 System info）：打开时日志里有 `sysinfo:` 开头的几行，看找到了哪些温度传感器。2026-10-19 实机上 tsadc 的两个 thermal zone（`soc-thermal`、`gpu-thermal`）都能看到，GPU 节点关掉了 `gpu-thermal` 也照样注册。没有 hwmon（没开 `CONFIG_HWMON`），RK817 的驱动不报电池温度。还要确认 CPU 占用、频率、内存和剩余空间的数字是否合理。
+- 菜单里的两次确认：游戏菜单的 Restart with、Power off 和 ROM 列表设置里新加的 Power off 现在和 Restart game 一样要 3 秒内按两次 A。从设置关机时日志里是 `power off: settings`，看看保存和关机流程是否和长按电源键一样。
 
 ## 已知问题
 

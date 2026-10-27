@@ -750,7 +750,12 @@ static void frame(int64_t now)
 		case UI_SYSINFO:
 			open_sysinfo(buttons, now);
 			break;
+		case UI_POWEROFF:
+			request_poweroff("settings");
+			break;
 		}
+		if (m.st == ST_POWEROFF)
+			break;
 		fr = NULL;
 		fw = fh = fp = 0;
 		if (m.settings_from == ST_MENU)

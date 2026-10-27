@@ -1475,6 +1475,8 @@ static int count_color(const uint16_t *px, int y0, int y1, uint16_t col)
  * In-game menu: Restart game is the 2nd row and needs a second A within
  * 3 s (180 updates, one per vblank); moving away or waiting cancels, B
  * resumes. All 11 rows fit in the box, which ends above the bottom edge.
+ * Power off, the last row, asks the same way, and so does Power off in
+ * the global settings.
  */
 static void test_ingame_restart(const char *dir)
 {
@@ -1548,8 +1550,62 @@ static void test_ingame_restart(const char *dir)
 	      count_color(px, 312, 320, COL_SEL) == 0 &&
 	      count_color(px, 312, 320, COL_BOX) == 0,
 	      "restart: menu box fits on screen");
+	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_NONE,
+	      "power off: first A arms");
+	ingame_menu_draw(&cv, NULL, 0, 0, 0);
+	CHECK(count_color(px, 290, 312, COL_HI) > 0,
+	      "power off: armed row highlighted");
+	snprintf(path, sizeof(path), "%s/ui-ingame-poweroff.raw", dir);
+	write_file_atomic(path, px, sizeof(px));
 	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_POWEROFF,
-	      "restart: last row is Power off");
+	      "power off: second A confirms");
+	/* Armed on Restart game, A on Power off only arms that row. */
+	ingame_menu_enter("Game");
+	ingame_menu_update(JOY_BIT(DOWN));
+	ingame_menu_update(JOY_BIT(A));
+	ingame_menu_update(JOY_BIT(UP));
+	ingame_menu_update(JOY_BIT(UP));
+	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_NONE,
+	      "power off: not confirmed by another row's arming");
+	for (int i = 0; i < 179; i++)
+		ingame_menu_update(0);
+	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_NONE,
+	      "power off: times out after 3 s");
+
+	/* Global settings: Power off is the row before Back. */
+	settings_menu_enter(0);
+	for (int i = 0; i < 6; i++)
+		settings_menu_update(JOY_BIT(DOWN));
+	settings_menu_draw(&cv, NULL, 0, 0, 0);
+	/* Row 6 at y 46 + 6 * 26 = 202. */
+	plain = count_color(px, 197, 223, COL_HI);
+	CHECK(settings_menu_update(JOY_BIT(A)) == UI_NONE,
+	      "settings power off: first A arms");
+	settings_menu_draw(&cv, NULL, 0, 0, 0);
+	armed = count_color(px, 197, 223, COL_HI);
+	CHECK(plain == 0 && armed > 0,
+	      "settings power off: armed row %d/%d highlighted", plain, armed);
+	CHECK(count_color(px, 280, 300, COL_SEL) == 0 &&
+	      count_color(px, 280, 300, COL_FG) == 0 &&
+	      count_color(px, 280, 300, COL_DIM) == 0,
+	      "settings: rows end above B:back");
+	snprintf(path, sizeof(path), "%s/ui-settings-poweroff.raw", dir);
+	write_file_atomic(path, px, sizeof(px));
+	CHECK(settings_menu_update(JOY_BIT(A)) == UI_POWEROFF,
+	      "settings power off: second A confirms");
+	settings_menu_update(JOY_BIT(A));
+	settings_menu_update(JOY_BIT(DOWN));
+	settings_menu_update(JOY_BIT(UP));
+	CHECK(settings_menu_update(JOY_BIT(A)) == UI_NONE,
+	      "settings power off: moving away cancels");
+	settings_menu_enter(0);
+	for (int i = 0; i < 6; i++)
+		settings_menu_update(JOY_BIT(DOWN));
+	settings_menu_update(JOY_BIT(A));
+	for (int i = 0; i < 179; i++)
+		settings_menu_update(0);
+	CHECK(settings_menu_update(JOY_BIT(A)) == UI_NONE,
+	      "settings power off: times out after 3 s");
 }
 
 /* Each directory of a path under base, then the file. */
@@ -1707,8 +1763,8 @@ static void test_ui(const char *dir)
 	settings_menu_draw(&cv, NULL, 0, 0, 0);
 	snprintf(path, sizeof(path), "%s/ui-settings.raw", dir);
 	write_file_atomic(path, px, sizeof(px));
-	/* Volume, Brightness, CPU, Audio, Debug log, System info, Back: no
-	 * grid rows outside a game. */
+	/* Volume, Brightness, CPU, Audio, Debug log, System info, Power off,
+	 * Back: no grid rows outside a game. */
 	settings_menu_update(JOY_BIT(DOWN));
 	settings_menu_update(JOY_BIT(DOWN));
 	settings_menu_update(JOY_BIT(A));
@@ -1719,8 +1775,11 @@ static void test_ui(const char *dir)
 	CHECK(settings_menu_update(JOY_BIT(A)) == UI_SYSINFO,
 	      "settings: 6th row is System info");
 	settings_menu_update(JOY_BIT(DOWN));
+	CHECK(settings_menu_update(JOY_BIT(A)) == UI_NONE,
+	      "settings: 7th row is Power off (asks first)");
+	settings_menu_update(JOY_BIT(DOWN));
 	CHECK(settings_menu_update(JOY_BIT(A)) == UI_BACK,
-	      "settings: 7th row is Back");
+	      "settings: 8th row is Back");
 	settings_menu_enter(1);
 	for (int i = 0; i < 5; i++)
 		settings_menu_update(JOY_BIT(DOWN));
@@ -2312,9 +2371,44 @@ static void blend_live(const char *rom)
 }
 
 /*
+ * In-game menu with a core running: Core set to another one reads
+ * "Restart with", which asks for a second A like Restart game; changing
+ * the core again in between cancels.
+ */
+static void menu_restart_with(const char *rom)
+{
+	char err[128];
+	int act;
+
+	rom_settings.core = CORE_GPSP;
+	if (core_load(rom, CORE_GPSP, err, sizeof(err))) {
+		CHECK(0, "restart with: %s", err);
+		return;
+	}
+	ingame_menu_enter("Game");
+	for (int i = 0; i < 5; i++)
+		ingame_menu_update(JOY_BIT(DOWN));
+	ingame_menu_update(JOY_BIT(RIGHT));
+	CHECK(rom_settings.core == CORE_MGBA, "restart with: core picked");
+	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_NONE,
+	      "restart with: first A arms");
+	CHECK(ingame_menu_update(JOY_BIT(A)) == UI_RESTART,
+	      "restart with: second A confirms");
+	ingame_menu_update(JOY_BIT(A));
+	ingame_menu_update(JOY_BIT(RIGHT));
+	ingame_menu_update(JOY_BIT(RIGHT));
+	act = ingame_menu_update(JOY_BIT(A));
+	CHECK(rom_settings.core == CORE_MGBA && act == UI_NONE,
+	      "restart with: changing the core cancels");
+	core_unload();
+	rom_settings.core = CORE_GPSP;
+}
+
+/*
  * mGBA -> gpSP -> mGBA in one process on the same .sav, then a RetroArch
  * .srm picked up by gpSP when there is no .sav (and left untouched), a
- * reset in each core on that save, then frame blending switched live.
+ * reset in each core on that save, then frame blending switched live
+ * and the in-game menu's Restart with.
  */
 int selftest_core_switch(const char *data, long frames)
 {
@@ -2344,6 +2438,7 @@ int selftest_core_switch(const char *data, long frames)
 	reset_round(rom, sav, CORE_GPSP, 5, frames);
 	reset_round(rom, sav, CORE_MGBA, 7, frames);
 	blend_live(rom);
+	menu_restart_with(rom);
 	log_msg("core switch: %s (%d failures)", failures ? "FAILED" : "passed",
 		failures);
 	return failures ? 1 : 0;

@@ -14,21 +14,24 @@
  * quitting it comes back to the same ROM; a folder that is gone by then
  * falls back to its parent. Nothing of this is kept across boots. SELECT
  * opens the global settings (Volume, Brightness, CPU, Audio mode
- * Simple/Adaptive, Debug log on/off, see log.c, and System info, the read
- * only page of sysinfo.c). In game, SELECT+START opens the in-game menu:
- * Resume, Restart game, Volume, Brightness, CPU, Core, Frame blend,
- * Settings, System info, Quit to ROM list, Power off; B or
+ * Simple/Adaptive, Debug log on/off, see log.c, System info, the read
+ * only page of sysinfo.c, and Power off). In game, SELECT+START opens the
+ * in-game menu: Resume, Restart game, Volume, Brightness, CPU, Core, Frame
+ * blend, Settings, System info, Quit to ROM list, Power off; B or
  * SELECT+START again resumes. Restart game starts the game over like the
- * console's reset button (its save written first); the first A only turns
- * the row into "Press A to restart", a second A within 3 s does it,
- * moving away or waiting cancels. CPU is the global CPU mode
- * (Adaptive, Max or a fixed frequency, see cpuctl.c); changed in game it
- * applies as soon as the game resumes. Core (this game: mGBA or gpSP)
- * shows the running core; left/right pick another one, the row then
- * reads "Restart with" and A saves and restarts the game with it
- * (resuming instead keeps it for the next start). Frame blend (this
- * game, gpSP's 50:50 mix of the current and the previous frame for games
- * that rely on LCD ghosting) applies on the next frame; mGBA has none,
+ * console's reset button (its save written first). Restart game, Restart
+ * with (below) and Power off, here and in the global settings, ask first:
+ * the first A only turns the row into "Press A to restart" or "Press A to
+ * power off", a second A within 3 s does it, moving away or waiting
+ * cancels (see struct confirm). CPU is the global CPU mode (Adaptive,
+ * Max or a fixed frequency, see cpuctl.c); changed in game it applies as
+ * soon as the game resumes. Core (this game: mGBA or gpSP) shows the
+ * running core; left/right pick another one, the row then reads "Restart
+ * with" and A (confirmed, changing the core again cancels) saves and
+ * restarts the game with it (resuming instead keeps it for the next
+ * start). Frame blend (this game, gpSP's 50:50 mix of the current and
+ * the previous frame for games that rely on LCD ghosting) applies on the
+ * next frame; mGBA has none,
  * so with mGBA the row reads "gpSP only" and cannot be changed, the
  * setting is kept for gpSP. The in-game Settings screen shows the game
  * with the effects applied (live preview) under a panel with Color (this
@@ -73,9 +76,24 @@ static char cur_dir[ROMLIST_PATH];
 static char message[96];
 static struct marquee list_mq = { .sel = -1 };
 
+/*
+ * Two-press confirmation for the rows that restart the game or power off:
+ * the first A arms the row (its label then asks for another A), a second
+ * A on that row within CONFIRM_FRAMES acts. Selecting another row or
+ * waiting disarms it.
+ */
+struct confirm {
+	int row;
+	int frames;  /* left for the confirming A, 0: not armed */
+};
+
+/* Restart and power off armed: frames (the menus are updated on every
+ * vblank) left for the confirming A. */
+#define CONFIRM_FRAMES (3 * 60)
+
 static struct {
 	int sel;
-	int confirm;  /* Restart game armed: frames left, see IG_CONFIRM_FRAMES */
+	struct confirm confirm;
 	char name[ROMDB_NAME_MAX + 2];
 	struct marquee mq;
 } ig;
@@ -479,6 +497,34 @@ void romlist_menu_draw(struct canvas *c)
 		draw_text(c, 8, c->h - 18, 2, COL_DIM, keys);
 }
 
+/* -------------------------------------------------------- confirmation */
+
+/* Once per update, before the input: count down, disarm off the row. */
+static void confirm_tick(struct confirm *cf, int row)
+{
+	if (cf->frames > 0)
+		cf->frames--;
+	if (row != cf->row)
+		cf->frames = 0;
+}
+
+static int confirm_armed(const struct confirm *cf, int row)
+{
+	return cf->frames > 0 && cf->row == row;
+}
+
+/* An A on the row: 1 when it confirms, otherwise it arms the row. */
+static int confirm_press(struct confirm *cf, int row)
+{
+	if (confirm_armed(cf, row)) {
+		cf->frames = 0;
+		return 1;
+	}
+	cf->row = row;
+	cf->frames = CONFIRM_FRAMES;
+	return 0;
+}
+
 /* -------------------------------------------------------- in-game menu */
 
 enum {
@@ -489,9 +535,6 @@ enum {
  * battery. */
 #define IG_HEAD_H 36
 #define IG_ROW_H 22
-/* Restart game armed: frames (the menu is updated on every vblank) left
- * for the confirming A. */
-#define IG_CONFIRM_FRAMES (3 * 60)
 
 /* The game's core setting, to the next core that is built in. */
 static void core_step(int d)
@@ -530,23 +573,20 @@ static void blend_toggle(void)
 void ingame_menu_enter(const char *rom_name)
 {
 	ig.sel = 0;
-	ig.confirm = 0;
+	ig.confirm.frames = 0;
 	snprintf(ig.name, sizeof(ig.name), "%s", rom_name);
 	ig.mq.sel = -1;
 }
 
 int ingame_menu_update(uint32_t pressed)
 {
-	int d = 0, prev = ig.sel;
+	int d = 0;
 
-	if (ig.confirm > 0)
-		ig.confirm--;
 	if (pressed & JOY_BIT(UP))
 		ig.sel = (ig.sel + IG_COUNT - 1) % IG_COUNT;
 	if (pressed & JOY_BIT(DOWN))
 		ig.sel = (ig.sel + 1) % IG_COUNT;
-	if (ig.sel != prev)
-		ig.confirm = 0;
+	confirm_tick(&ig.confirm, ig.sel);
 	if (pressed & JOY_BIT(LEFT))
 		d = -1;
 	if (pressed & JOY_BIT(RIGHT))
@@ -560,8 +600,11 @@ int ingame_menu_update(uint32_t pressed)
 		brightness_step(d);
 	if (d && ig.sel == IG_CPU)
 		cpu_step(d);
-	if (d && ig.sel == IG_CORE)
+	if (d && ig.sel == IG_CORE) {
+		/* Another core: "Restart with" asks again. */
 		core_step(d);
+		ig.confirm.frames = 0;
+	}
 	if (d && ig.sel == IG_BLEND)
 		blend_toggle();
 	if (pressed & (JOY_BIT(A) | JOY_BIT(START))) {
@@ -569,16 +612,14 @@ int ingame_menu_update(uint32_t pressed)
 		case IG_RESUME:
 			return UI_RESUME;
 		case IG_RESET:
-			if (ig.confirm > 0) {
-				ig.confirm = 0;
+			if (confirm_press(&ig.confirm, IG_RESET))
 				return UI_RESET;
-			}
-			ig.confirm = IG_CONFIRM_FRAMES;
 			break;
 		case IG_CORE:
-			if (core_pending())
+			if (!core_pending())
+				core_step(1);
+			else if (confirm_press(&ig.confirm, IG_CORE))
 				return UI_RESTART;
-			core_step(1);
 			break;
 		case IG_BLEND:
 			blend_toggle();
@@ -590,7 +631,9 @@ int ingame_menu_update(uint32_t pressed)
 		case IG_QUIT:
 			return UI_QUIT;
 		case IG_POWEROFF:
-			return UI_POWEROFF;
+			if (confirm_press(&ig.confirm, IG_POWEROFF))
+				return UI_POWEROFF;
+			break;
 		}
 	}
 	return UI_NONE;
@@ -623,8 +666,9 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 			col = i == ig.sel ? COL_DIM : COL_OFF;
 		if (i == IG_CORE && core_pending())
 			label = "Restart with";
-		if (i == IG_RESET && ig.confirm > 0) {
-			label = "Press A to restart";
+		if (confirm_armed(&ig.confirm, i)) {
+			label = i == IG_POWEROFF ? "Press A to power off" :
+						   "Press A to restart";
 			col = COL_HI;
 		}
 		if (i == ig.sel)
@@ -662,17 +706,17 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 
 enum {
 	SI_VOLUME, SI_BRIGHTNESS, SI_CPU, SI_COLOR, SI_GRID, SI_GRID_DIM,
-	SI_GRID_BOOST, SI_AUDIO, SI_DEBUG, SI_SYSINFO, SI_BACK,
+	SI_GRID_BOOST, SI_AUDIO, SI_DEBUG, SI_SYSINFO, SI_POWEROFF, SI_BACK,
 };
 
 static const char *const si_names[] = {
 	"Volume", "Brightness", "CPU", "Color", "LCD grid", "Grid darkness",
-	"Dot boost", "Audio", "Debug log", "System info", "Back",
+	"Dot boost", "Audio", "Debug log", "System info", "Power off", "Back",
 };
 
 static const uint8_t si_romlist[] = {
 	SI_VOLUME, SI_BRIGHTNESS, SI_CPU, SI_AUDIO, SI_DEBUG, SI_SYSINFO,
-	SI_BACK,
+	SI_POWEROFF, SI_BACK,
 };
 static const uint8_t si_ingame[] = {
 	SI_COLOR, SI_GRID, SI_GRID_DIM, SI_GRID_BOOST, SI_DEBUG, SI_BACK,
@@ -681,6 +725,7 @@ static const uint8_t si_ingame[] = {
 static struct {
 	const uint8_t *items;
 	int count, sel, ingame;
+	struct confirm confirm;  /* row: the item */
 } st;
 
 void settings_menu_enter(int ingame)
@@ -689,6 +734,7 @@ void settings_menu_enter(int ingame)
 	st.items = ingame ? si_ingame : si_romlist;
 	st.count = ingame ? (int)sizeof(si_ingame) : (int)sizeof(si_romlist);
 	st.sel = 0;
+	st.confirm.frames = 0;
 }
 
 static void settings_change(int item, int d)
@@ -740,6 +786,7 @@ int settings_menu_update(uint32_t pressed)
 		st.sel = (st.sel + st.count - 1) % st.count;
 	if (pressed & JOY_BIT(DOWN))
 		st.sel = (st.sel + 1) % st.count;
+	confirm_tick(&st.confirm, st.items[st.sel]);
 	if (pressed & JOY_BIT(B))
 		return UI_BACK;
 	if (pressed & JOY_BIT(LEFT))
@@ -751,6 +798,8 @@ int settings_menu_update(uint32_t pressed)
 			return UI_BACK;
 		if (item == SI_SYSINFO)
 			return UI_SYSINFO;
+		if (item == SI_POWEROFF && confirm_press(&st.confirm, item))
+			return UI_POWEROFF;
 		if (item == SI_GRID || item == SI_COLOR || item == SI_AUDIO ||
 		    item == SI_DEBUG)
 			settings_change(item, 1);
@@ -802,6 +851,7 @@ static void settings_rows(struct canvas *c, int x, int y, int w, int row_h)
 	for (int i = 0; i < st.count; i++, y += row_h) {
 		int item = st.items[i];
 		uint16_t col = i == st.sel ? COL_FG : COL_DIM;
+		const char *label = si_names[item];
 		char v[24];
 
 		if (!settings.grid && (item == SI_GRID_DIM || item == SI_GRID_BOOST))
@@ -809,7 +859,11 @@ static void settings_rows(struct canvas *c, int x, int y, int w, int row_h)
 		if (i == st.sel)
 			draw_fill(c, x + 4, y - (row_h - 16) / 2, w - 8, row_h,
 				  COL_SEL);
-		draw_text(c, x + 12, y, 2, col, si_names[item]);
+		if (confirm_armed(&st.confirm, item)) {
+			label = "Press A to power off";
+			col = COL_HI;
+		}
+		draw_text(c, x + 12, y, 2, col, label);
 		settings_value(item, v, sizeof(v));
 		/* "(game)" unless a long value like "Auto (GBA light)" needs
 		 * the room. */

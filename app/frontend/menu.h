@@ -11,10 +11,10 @@ enum ui_action {
 	UI_START_ROM,
 	UI_RESUME,
 	UI_QUIT,
-	UI_POWEROFF,
+	UI_POWEROFF,  /* confirmed */
 	UI_SETTINGS,  /* open the settings screen */
 	UI_BACK,      /* leave the settings screen */
-	UI_RESTART,   /* restart the game with rom_settings.core */
+	UI_RESTART,   /* restart the game with rom_settings.core (confirmed) */
 	UI_RESET,     /* start the game over (confirmed) */
 	UI_SYSINFO,   /* open the system info page (sysinfo.c) */
 };
