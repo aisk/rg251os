@@ -14,20 +14,22 @@
 
 启动、显示、按键、关机、电量读数（RK817 库仑计，读到过 78%、3.8V）、耳机检测、喇叭和耳机出声（simple 和 adaptive 两种模式）、存档、uclamp 调频、两个核心。超级马里奥 GBA 在 50% 背光下整机约 1.5 到 1.7W。mGBA 跑马里奥已经接近满负荷，所以默认核心改成了 gpSP。龙珠大冒险（Dragon Ball Advanced Adventure）在 mGBA 下屏幕上有敌人就卡，切到 gpSP 后目测不卡了。
 
+- adaptive 音频去掉开机校准以后：2026-10-19 到 10-25 的 17 次开机，第一局都没有 underrun。唯一的一次 underrun 是休眠唤醒后马上出现的，已经改了（见待实机验证的电源键休眠）。
+- 系统信息页：2026-10-19 到 10-24 的日志里 CPU 占用、频率、内存（MemTotal 约 993 MiB）、温度（tsadc 的两个 thermal zone `soc-thermal` 和 `gpu-thermal`，39 到 46 °C）和剩余空间（15114 MiB 里 14898 MiB 空闲）都合理。GPU 节点关掉了 `gpu-thermal` 也照样注册。没有 hwmon（没开 `CONFIG_HWMON`），RK817 的驱动不报电池温度。
+- ROM 名称识别：20 个 ROM 冷缓存扫描 44 到 50 ms，名字都对。
+
 ## 待实机验证
 
-- 电源键休眠：是否真的进了深度睡眠（日志 `sleep #N: result: suspended to RAM`），唤醒后屏幕、USB 手柄、SD 卡、声音是否正常，唤醒时有没有 pop 声，深睡时指示灯是否熄灭。
+- 电源键休眠：实机上两次休眠都进了深度睡眠（`result: suspended to RAM, mem (deep)`，唤醒中断是 IRQ 27，427 ms 恢复），唤醒的那一下按键被正确忽略，SD 卡和声音都恢复了。还要看：唤醒后 USB 手柄会断开再重新枚举，最长约 2.2 s 按键没反应；深睡 1.95 小时掉了 2%（约 35 mA，对 RK3326 来说偏高）；屏幕、pop 声和指示灯要用眼睛看。有用户说用电源键唤醒时偶尔亮一下又灭掉，要再按一次，这批日志里没看到，要用新版本开着 Debug log 再看。以前唤醒后马上有一次 underrun（boot-0015：PCM 在唤醒时重新打开，第一帧要 340 ms 才上屏，第一帧写进去的声音早就放完了），可能就是唤醒时的 pop 声。现在 PCM 打开后先不启动，等唤醒后第一帧上屏再按开局的方式启动，日志是 `audio: resumed, ... stream held until a frame is on screen` 和 `audio: frame on screen N ms after the resume, stream starts with the next frame (...)`，要确认这之后没有 `audio: underrun`，pop 声是否还在。
 - 首次开机扩展 GBA 分区：`sdgrow:` 日志，扩展后 Windows 和 macOS 能否读写。
-- ROM 名称识别：名字是否正确，冷缓存下扫描耗时（`romdb: scanned N ROMs in X ms`），大 ROM 首次算 CRC 的耗时。
+- ROM 名称识别：大 ROM 第一次算 CRC 的耗时还没量过（目前的日志都命中了缓存）。
 - ROM 列表的子文件夹：真卡（vfat）上文件夹的识别和排序，进出文件夹和退出游戏后的选中项，每层扫描的耗时（`roms: folder /<路径>: N ROMs, M folders (X ms)`），子文件夹里需要算 CRC 的 ROM 改名是否正常，`config/romdb-cache.txt` 里子文件夹的条目是否带路径并且在别的文件夹扫描后保留。注意存档和单游戏设置只按文件名，不同文件夹里的同名 ROM 会共用。
 - `color=auto` 的效果是否合适。现在是 2004 年及以前用 `gba`，2005 年以后用 `sp101`，年份未知用 `off`。按 2005 年分界是推断出来的，没有出处。例外表 `color_exceptions[]` 是空的，遇到不合适的游戏再加。
 - Frame blend 开启后的实际开销（用 perf.csv 对比开关时的 `work_avg`）。
-- adaptive 音频去掉开机校准以后，第一局开头有没有爆音或 underrun。
 - 开机时 LED 心跳闪烁，前端起来后接管。
-- 系统信息页（ROM 列表的设置里和游戏菜单里的 System info）：打开时日志里有 `sysinfo:` 开头的几行，看找到了哪些温度传感器。2026-10-19 实机上 tsadc 的两个 thermal zone（`soc-thermal`、`gpu-thermal`）都能看到，GPU 节点关掉了 `gpu-thermal` 也照样注册。没有 hwmon（没开 `CONFIG_HWMON`），RK817 的驱动不报电池温度。还要确认 CPU 占用、频率、内存和剩余空间的数字是否合理。
 - 菜单里的两次确认：游戏菜单的 Restart with、Power off 和 ROM 列表设置里新加的 Power off 现在和 Restart game 一样要 3 秒内按两次 A。从设置关机时日志里是 `power off: settings`，看看保存和关机流程是否和长按电源键一样。
 - 退出时的即时存档：退出、关机、长按电源键关机、换核心、休眠后再开同一个游戏，日志里应该有 `state: wrote N bytes to <rom>.<core>.state (原因): serialize X ms, write Y ms` 和下次的 `state: loaded ... resuming`，画面接着上次的位置。qemu 下（PC 硬盘）序列化 0.3 到 3 ms，写 416 到 520KiB 约 9 到 27 ms，真卡上的写入时间要看日志，关机路径上它在 "Saving..." 画面之后、`dmesg-poweroff.txt` 之前。还要看 Restart game 后的 `state: removed`，以及用电脑换掉 `.sav` 后是否显示 `skipped: the save data changed`。另外看看从即时存档恢复时游戏内的 RTC（宝可梦等）是否正常。
-- 日期和时间（ROM 列表设置里的 Date & time，`clock.c`）：开机日志里的 `clock: system ..., RTC ...` 是否读到了 RTC（内核新开了 `CONFIG_RTC_INTF_DEV`，要有 `/dev/rtc0`），没设过时是否带 `looks never set`。设置一次后看 `clock: setting`、`clock: settimeofday(...)`、`clock: RTC_SET_TIME on /dev/rtc0` 和 `clock: RTC reads back` 几行是否都是 ok，系统信息页的 Clock 和 ROM 列表标题栏的时间是否跟着变。然后关机再开、隔一段时间再开，看时间有没有走对；再试一次电池完全耗尽后充电开机，看 RTC 是否还保持（RK817 的 RTC 应该和 PMIC 一起由电池供电，没有单独的纽扣电池）。rk808 驱动里有 Rockchip 日历 11 月 31 日的换算，跨 11 月底设时间时留意 read back 的结果。最后用宝可梦宝石系列确认游戏里的时间。
+- 日期和时间（ROM 列表设置里的 Date & time，`clock.c`）：这台机器的 RTC 出厂时就是正确的 UTC，关机放几天也一直走得对（旧版本的 `clock: realtime` 一行）。新版本还要看开机日志里的 `clock: system ..., RTC ...` 是否读到了 RTC（内核新开了 `CONFIG_RTC_INTF_DEV`，要有 `/dev/rtc0`），没设过时是否带 `looks never set`。设置一次后看 `clock: setting`、`clock: settimeofday(...)`、`clock: RTC_SET_TIME on /dev/rtc0` 和 `clock: RTC reads back` 几行是否都是 ok，系统信息页的 Clock 和 ROM 列表标题栏的时间是否跟着变。然后关机再开、隔一段时间再开，看时间有没有走对；再试一次电池完全耗尽后充电开机，看 RTC 是否还保持（RK817 的 RTC 应该和 PMIC 一起由电池供电，没有单独的纽扣电池）。rk808 驱动里有 Rockchip 日历 11 月 31 日的换算，跨 11 月底设时间时留意 read back 的结果。最后用宝可梦宝石系列确认游戏里的时间。
 - 关机时卸载 GBA 分区：关机时 `frontend.txt` 里应该有 `power off: no child processes left`（`dmesg-poweroff.txt` 里也有），最后一行是 `powering off: unmounting /mnt/data`。卸载本身的结果（`power off: /mnt/data unmounted`，或者 `umount ...: ..., remounting read-only`）只进内核日志，关机后就没了，所以要看下次开机 `frontend.txt` 开头的 `mounted /dev/mmcblk0p3 ...` 一行，`clean` 说明上次干净地卸载了，`dirty bit set` 说明没有。注意 Linux 挂载时发现脏标记就不会再清它，以前的版本一直没卸载过，所以卡现在是脏的，要先在 Windows 上修复一次（或者 `fsck.fat -a`），之后正常关机几次，再插到 Windows 上看还会不会提示修复，开机日志是否一直是 `clean`。
 - 亮度下限：背光调到最低时屏幕什么都看不见，现在用户亮度最低是背光范围的 25%（`BRIGHTNESS_MIN`），菜单里是 25%、30%、40% 一直到 100%，卡上存的更低的值开机时会被提上来，日志里是 `settings: brightness N% raised to the minimum 25%`。开机日志的 `backlight ...: ... user minimum 25% = N` 一行是对应的原始值。要确认最低一档还看得清。如果太亮或者还是太暗，只改这一个常量。
 - 界面字体换成了 JetBrains Mono Regular（20px，灰度抗锯齿，按原生分辨率画），不再是 8x8 放大两倍。JetBrains Mono 20px 的字宽正好是 12px，字格和之前的 Spleen 12x24 一样，布局没有变。要看实机上抗锯齿的文字是否清晰（尤其灰色字在深色背景上和选中条上的边缘）、大小是否合适，Date & time 的两倍大数字是直接放大的，看是否发虚。各个画面（ROM 列表、设置、游戏菜单、游戏内设置、System info、Date & time、出错和关机画面）有没有文字重叠或被截掉。现在每个文字像素要和底色混合，看翻页、跑马灯滚动和 System info 每秒刷新时有没有可见的卡顿。ROM 列表一页从 14 行变成 9 行（行高 28px），名字从 29 列变成 38 列。游戏菜单的电量挪进了菜单框里游戏名的右边。System info 一页正好放 11 行，B:back 挪到了标题栏右边，如果温度一行放不下要换行，最后的 Kernel 一行会被挤掉。开机日志里有一行 `ui: font 12x24, ...` 记录这些尺寸。
@@ -41,7 +43,7 @@
 - 声音还有轻微的爆音。还没定位。先看每局游戏结束时的摘要行里 underrun 次数。如果是 0，最可能是重采样，现在 32768Hz 到 48000Hz 用的是线性插值（`resample.c`），可以换成多相 FIR。另外 gpSP 的音频模拟本身比 mGBA 粗糙，可以拿同一个游戏两个核心对比。
 - 界面字体只有 ASCII（JetBrains Mono，`app/frontend/font.c`），中文文件名显示不了。
 - 不支持 zip 格式的 ROM。
-- 硬件时钟出厂时可能没设过，用到 RTC 的游戏（宝可梦宝石系列的树果和潮汐等）时间会不对，要先在设置的 Date & time 里设一次，开机日志会标出没设过的情况。没有时区，输入的时间按 UTC 存进系统时钟和 RTC，游戏看到的就是输入的时间，日志和 perf.csv 里写的 UTC 其实是这个时间。
+- 硬件时钟出厂时可能没设过（这台是设过的），用到 RTC 的游戏（宝可梦宝石系列的树果和潮汐等）时间会不对，要先在设置的 Date & time 里设一次，开机日志会标出没设过的情况。没有时区，输入的时间按 UTC 存进系统时钟和 RTC，游戏看到的就是输入的时间，日志和 perf.csv 里写的 UTC 其实是这个时间。
 - 插拔充电线也会把机器从休眠唤醒（PMIC 中断），现在唤醒后一律亮屏。
 - 插上充电器经常显示 Not charging，电池也确实没充进去，同样的线和充电器要拔插几次才开始充。指示灯颜色会变，但那是 VBUS 直接点亮的另一颗灯，和 PMIC 无关。旧日志里 boot-0003、0004、0019 是插着线开机的：电池电流为正（+0.09 到 +0.15A），电压在 4.12V 以上，但 rk817-charger 的 ONLINE=0，STATUS 是 Not charging。看驱动（`rk817_charger.c`）：电流不为负时 STATUS 取 CHRG_STS（0xeb）的 6:4 位，CHRG_OFF 就报 Not charging；ONLINE 只在 probe 时从 SYS_STS（0xf0）的 PLUG_IN_STS 读一次，之后只跟着 plug_in 和 plug_out 两个中断变；输入限制 CHRG_IN（0xe5，4.5V、1.5A）只在 probe 和拔出中断里写（驱动注释说拔线时这个寄存器会复位），插入时不写；充电使能位驱动从来不写；这些值每 8 秒刷新一次。BSP 用来检测充电器的 dc_det GPIO（gpio0 PB3）主线和我们的 DTS 都没用。怀疑两个方向：一是 PMIC 没认到插入（PLUG_IN_STS=0，充电状态机停在 OFF），二是 CHRG_IN 被复位，要等下一次拔出中断才写回。新加的 `charger:` 日志用来区分这两种，见待实机验证。
 
@@ -58,7 +60,7 @@
 - zip 格式 ROM。
 - 震动卡带（`gpsp_rumble`），需要前端驱动 pwm-vibrator。
 - mGBA 的性能：多线程视频、LTO、PGO。
-- 开机速度优化，见 hardware-research.md 里“对精简和快速开机的初步判断”。2026-10-18 的一次实机日志（debug 开着）：内核启动后 0.81 s 进入前端，0.86 s 挂好 GBA 分区，2.43 s 才打开日志，2.49 s 出 ROM 列表。挂载后到打开日志之间这 1.5 s 还没分析。bootloader 阶段的耗时没量过，要接串口或者用高速摄像来测。
+- 开机速度优化，见 hardware-research.md 里“对精简和快速开机的初步判断”。2026-10-18 的一次实机日志（debug 开着）：内核启动后 0.81 s 进入前端，0.86 s 挂好 GBA 分区，2.43 s 才打开日志，2.49 s 出 ROM 列表。挂载后到打开日志之间的间隔从 2026-10-19 的版本起是 75 到 105 ms，只有一次 850 ms（boot-0011，可能是 FAT 脏标记还在时的第一次写入）。现在前端在 0.75 到 0.85 s 启动，第一帧在 0.96 到 1.09 s。bootloader 阶段的耗时没量过，要接串口或者用高速摄像来测。
 - 接上 UART2 以后再查主线 U-Boot。
 - 把 RG351P 的 DTS 整理后提交到主线内核。
 
