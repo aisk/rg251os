@@ -1,6 +1,7 @@
 /*
- * Menu drawing on a logical RGB565 canvas; text in the ASCII bitmap font
- * of font.h at its own size, or scaled up for the clock page.
+ * Menu drawing on a logical RGB565 canvas; text in the anti-aliased ASCII
+ * font of font.h, blended over the canvas, at its own size or scaled up
+ * (nearest neighbor) for the clock page.
  */
 #include <stdarg.h>
 #include <stdio.h>
@@ -37,11 +38,22 @@ void draw_frame(struct canvas *c, int x, int y, int w, int h, uint16_t col)
 	draw_fill(c, x + w - 2, y, 2, h, col);
 }
 
+/* col over the pixel at alpha a (0..15), per RGB565 channel. */
+static uint16_t blend(uint16_t bg, uint16_t col, int a)
+{
+	int r = bg >> 11, g = (bg >> 5) & 63, b = bg & 31;
+
+	r += ((col >> 11) - r) * a / 15;
+	g += (((col >> 5) & 63) - g) * a / 15;
+	b += ((col & 31) - b) * a / 15;
+	return (uint16_t)(r << 11 | g << 5 | b);
+}
+
 /* One glyph, only its columns in [x0, x1) (and on the canvas). */
 static void draw_char(struct canvas *c, int x, int y, int scale, uint16_t col,
 		      unsigned char ch, int x0, int x1)
 {
-	const uint16_t *g;
+	const uint8_t (*g)[FONT_W / 2];
 
 	if (ch < FONT_FIRST || ch > FONT_LAST)
 		ch = '?';
@@ -51,18 +63,20 @@ static void draw_char(struct canvas *c, int x, int y, int scale, uint16_t col,
 	if (x1 > c->w)
 		x1 = c->w;
 	for (int r = 0; r < FONT_H * scale; r++) {
-		unsigned bits = g[r / scale];
+		const uint8_t *row = g[r / scale];
 		int py = y + r;
 		uint16_t *p;
 
-		if (!bits || py < 0 || py >= c->h)
+		if (py < 0 || py >= c->h)
 			continue;
 		p = c->px + (long)py * c->w;
 		for (int i = 0; i < FONT_W * scale; i++) {
-			int px = x + i;
+			int px = x + i, k = i / scale;
+			int a = (row[k / 2] >> (k & 1 ? 0 : 4)) & 15;
 
-			if (px >= x0 && px < x1 && (bits & (0x8000u >> (i / scale))))
-				p[px] = col;
+			if (!a || px < x0 || px >= x1)
+				continue;
+			p[px] = a == 15 ? col : blend(p[px], col, a);
 		}
 	}
 }

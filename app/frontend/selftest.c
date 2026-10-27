@@ -1410,6 +1410,38 @@ static void test_cpuctl(const char *base)
 	CHECK(csv_field(csv, ",fixed,816000,", 5) >= 1200, "fixed mode row");
 }
 
+/* The anti-aliased font: an 'H' on the selection bar has opaque stem
+ * pixels and blended edges, a 2x one the same pixels doubled, and no
+ * pixel outside its cell changes. */
+static void test_font(void)
+{
+	static uint16_t px[64 * 64];
+	struct canvas cv = { px, 64, 64 };
+	int opaque = 0, mixed = 0, outside = 0, same = 1;
+
+	draw_fill(&cv, 0, 0, 64, 64, COL_SEL);
+	draw_text(&cv, 4, 4, COL_FG, "H");
+	for (int y = 0; y < 64; y++)
+		for (int x = 0; x < 64; x++) {
+			uint16_t v = px[y * 64 + x];
+			int in = x >= 4 && x < 4 + FONT_W && y >= 4 && y < 4 + FONT_H;
+
+			opaque += in && v == COL_FG;
+			mixed += in && v != COL_FG && v != COL_SEL;
+			outside += !in && v != COL_SEL;
+		}
+	CHECK(opaque > 20 && mixed > 0 && outside == 0,
+	      "font: %d opaque, %d blended, %d outside", opaque, mixed, outside);
+	draw_fill(&cv, 0, 0, 64, 64, COL_SEL);
+	draw_text(&cv, 0, 0, COL_FG, "H");
+	draw_text_scaled(&cv, 2 * FONT_W, 0, 2, COL_FG, "H");
+	for (int y = 0; y < 2 * FONT_H; y++)
+		for (int x = 0; x < 2 * FONT_W; x++)
+			same &= px[y * 64 + 2 * FONT_W + x] ==
+				px[y / 2 * 64 + x / 2];
+	CHECK(same, "font: 2x glyph is the 1x one doubled");
+}
+
 /* Long ROM names: the marquee timing and a scrolled, clipped row, in
  * the ROM list's columns. */
 static void test_marquee(void)
@@ -2448,6 +2480,7 @@ int selftest(const char *dir)
 	test_sleep_sysfs(dir);
 	test_sdgrow(dir);
 	test_cpuctl(dir);
+	test_font();
 	test_marquee();
 	test_ingame_restart(dir);
 	test_romlist_folders(dir);

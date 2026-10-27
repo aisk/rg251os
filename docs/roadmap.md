@@ -30,12 +30,12 @@
 - 日期和时间（ROM 列表设置里的 Date & time，`clock.c`）：开机日志里的 `clock: system ..., RTC ...` 是否读到了 RTC（内核新开了 `CONFIG_RTC_INTF_DEV`，要有 `/dev/rtc0`），没设过时是否带 `looks never set`。设置一次后看 `clock: setting`、`clock: settimeofday(...)`、`clock: RTC_SET_TIME on /dev/rtc0` 和 `clock: RTC reads back` 几行是否都是 ok，系统信息页的 Clock 和 ROM 列表标题栏的时间是否跟着变。然后关机再开、隔一段时间再开，看时间有没有走对；再试一次电池完全耗尽后充电开机，看 RTC 是否还保持（RK817 的 RTC 应该和 PMIC 一起由电池供电，没有单独的纽扣电池）。rk808 驱动里有 Rockchip 日历 11 月 31 日的换算，跨 11 月底设时间时留意 read back 的结果。最后用宝可梦宝石系列确认游戏里的时间。
 - 关机时卸载 GBA 分区：关机时 `frontend.txt` 里应该有 `power off: no child processes left`（`dmesg-poweroff.txt` 里也有），最后一行是 `powering off: unmounting /mnt/data`。卸载本身的结果（`power off: /mnt/data unmounted`，或者 `umount ...: ..., remounting read-only`）只进内核日志，关机后就没了，所以要看下次开机 `frontend.txt` 开头的 `mounted /dev/mmcblk0p3 ...` 一行，`clean` 说明上次干净地卸载了，`dirty bit set` 说明没有。注意 Linux 挂载时发现脏标记就不会再清它，以前的版本一直没卸载过，所以卡现在是脏的，要先在 Windows 上修复一次（或者 `fsck.fat -a`），之后正常关机几次，再插到 Windows 上看还会不会提示修复，开机日志是否一直是 `clean`。
 - 亮度下限：背光调到最低时屏幕什么都看不见，现在用户亮度最低是背光范围的 25%（`BRIGHTNESS_MIN`），菜单里是 25%、30%、40% 一直到 100%，卡上存的更低的值开机时会被提上来，日志里是 `settings: brightness N% raised to the minimum 25%`。开机日志的 `backlight ...: ... user minimum 25% = N` 一行是对应的原始值。要确认最低一档还看得清。如果太亮或者还是太暗，只改这一个常量。
-- 界面字体换成了 Spleen 12x24 点阵字体，按原生分辨率画，不再是 8x8 放大两倍。要看实机上文字是否清晰、大小是否合适，各个画面（ROM 列表、设置、游戏菜单、游戏内设置、System info、Date & time、出错和关机画面）有没有文字重叠或被截掉。ROM 列表一页从 14 行变成 9 行（行高 28px），名字从 29 列变成 38 列。游戏菜单的电量挪进了菜单框里游戏名的右边。System info 一页正好放 11 行，B:back 挪到了标题栏右边，如果温度一行放不下要换行，最后的 Kernel 一行会被挤掉。开机日志里有一行 `ui: font 12x24, ...` 记录这些尺寸。
+- 界面字体换成了 JetBrains Mono Regular（20px，灰度抗锯齿，按原生分辨率画），不再是 8x8 放大两倍。JetBrains Mono 20px 的字宽正好是 12px，字格和之前的 Spleen 12x24 一样，布局没有变。要看实机上抗锯齿的文字是否清晰（尤其灰色字在深色背景上和选中条上的边缘）、大小是否合适，Date & time 的两倍大数字是直接放大的，看是否发虚。各个画面（ROM 列表、设置、游戏菜单、游戏内设置、System info、Date & time、出错和关机画面）有没有文字重叠或被截掉。现在每个文字像素要和底色混合，看翻页、跑马灯滚动和 System info 每秒刷新时有没有可见的卡顿。ROM 列表一页从 14 行变成 9 行（行高 28px），名字从 29 列变成 38 列。游戏菜单的电量挪进了菜单框里游戏名的右边。System info 一页正好放 11 行，B:back 挪到了标题栏右边，如果温度一行放不下要换行，最后的 Kernel 一行会被挤掉。开机日志里有一行 `ui: font 12x24, ...` 记录这些尺寸。
 
 ## 已知问题
 
 - 声音还有轻微的爆音。还没定位。先看每局游戏结束时的摘要行里 underrun 次数。如果是 0，最可能是重采样，现在 32768Hz 到 48000Hz 用的是线性插值（`resample.c`），可以换成多相 FIR。另外 gpSP 的音频模拟本身比 mGBA 粗糙，可以拿同一个游戏两个核心对比。
-- 界面字体只有 ASCII（Spleen 12x24，`app/frontend/font.c`），中文文件名显示不了。
+- 界面字体只有 ASCII（JetBrains Mono，`app/frontend/font.c`），中文文件名显示不了。
 - 不支持 zip 格式的 ROM。
 - 硬件时钟出厂时可能没设过，用到 RTC 的游戏（宝可梦宝石系列的树果和潮汐等）时间会不对，要先在设置的 Date & time 里设一次，开机日志会标出没设过的情况。没有时区，输入的时间按 UTC 存进系统时钟和 RTC，游戏看到的就是输入的时间，日志和 perf.csv 里写的 UTC 其实是这个时间。
 - 插拔充电线也会把机器从休眠唤醒（PMIC 中断），现在唤醒后一律亮屏。
