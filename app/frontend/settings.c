@@ -38,6 +38,7 @@
 #include <strings.h>
 
 #include "fe.h"
+#include "romdb.h"
 
 const char *const color_mode_names[COLOR_COUNT] = {
 	"off", "gba", "gba-light", "sp101", "auto",
@@ -303,7 +304,6 @@ static void rom_path(char *buf, size_t size)
 void rom_settings_load(const char *rom_name)
 {
 	char path[400];
-	size_t len;
 	int n;
 
 	rom_base[0] = 0;
@@ -312,10 +312,8 @@ void rom_settings_load(const char *rom_name)
 	rom_settings_defaults(rom_name, &rom_settings);
 	if (!rom_name)
 		return;
-	len = strlen(rom_name);
-	if (len > 4 && !strcasecmp(rom_name + len - 4, ".gba"))
-		len -= 4;
-	snprintf(rom_base, sizeof(rom_base), "%.*s", (int)len, rom_name);
+	snprintf(rom_base, sizeof(rom_base), "%.*s", romdb_stem_len(rom_name),
+		 rom_name);
 	rom_path(path, sizeof(path));
 	n = load_file(path, &rom_settings, rom_fields, ARRAY_SIZE(rom_fields),
 		      &rom_in_file);

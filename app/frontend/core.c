@@ -674,7 +674,8 @@ int core_load(const char *rom_path, int core, char *err, size_t errlen)
 	struct retro_game_info gi = { 0 };
 	const char *base = strrchr(rom_path, '/');
 	char bios[340];
-	size_t size = 0, blen;
+	size_t size = 0;
+	int blen;
 	void *rom = NULL;
 	int64_t t0 = now_ns();
 
@@ -691,14 +692,12 @@ int core_load(const char *rom_path, int core, char *err, size_t errlen)
 	snprintf(c.bios_dir, sizeof(c.bios_dir), "%s/bios", fe_data_dir);
 	snprintf(bios, sizeof(bios), "%s/gba_bios.bin", c.bios_dir);
 	c.have_bios = access(bios, R_OK) == 0;
-	blen = strlen(base);
-	if (blen > 4 && base[blen - 4] == '.')
-		blen -= 4;
+	blen = romdb_stem_len(base);
 	snprintf(c.save_path, sizeof(c.save_path), "%s/saves/%.*s.sav",
-		 fe_data_dir, (int)blen, base);
+		 fe_data_dir, blen, base);
 	/* Per core: mGBA and gpSP states are not compatible. */
 	snprintf(c.state_path, sizeof(c.state_path), "%s/saves/%.*s.%s.state",
-		 fe_data_dir, (int)blen, base, c.api->name);
+		 fe_data_dir, blen, base, c.api->name);
 	c.options[0] = 0;
 	c.options_changed = 0;
 	c.in_game = 0;

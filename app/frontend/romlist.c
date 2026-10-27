@@ -42,11 +42,7 @@ static int cmp_roms(const void *a, const void *b)
 
 static int is_rom(const char *name)
 {
-	size_t n = strlen(name);
-
-	if (name[0] == '.' || n < 5)
-		return 0;
-	return !strcasecmp(name + n - 4, ".gba");
+	return name[0] != '.' && (size_t)romdb_stem_len(name) < strlen(name);
 }
 
 static void log_summary(const struct romlist *rl, const char *what,

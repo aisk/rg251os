@@ -136,13 +136,18 @@ static int code_range(const char *code, int *first)
 	return end - lo;
 }
 
-static void file_title(const char *file, char *buf, size_t size)
+int romdb_stem_len(const char *file)
 {
 	size_t n = strlen(file);
 
 	if (n > 4 && !strcasecmp(file + n - 4, ".gba"))
 		n -= 4;
-	snprintf(buf, size, "%.*s", (int)n, file);
+	return (int)n;
+}
+
+static void file_title(const char *file, char *buf, size_t size)
+{
+	snprintf(buf, size, "%.*s", romdb_stem_len(file), file);
 }
 
 /* What candidates have in common, cut back to whole words; "" if

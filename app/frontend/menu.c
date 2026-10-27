@@ -45,7 +45,6 @@
  */
 #include <stdio.h>
 #include <string.h>
-#include <strings.h>
 
 #include "audio.h"
 #include "battery.h"
@@ -355,11 +354,7 @@ int romlist_menu_update(uint32_t pressed, char *path, size_t size)
 /* A name's length as shown, without a file name's ".gba". */
 static int name_len(const char *name)
 {
-	size_t n = strlen(name);
-
-	if (n > 4 && !strcasecmp(name + n - 4, ".gba"))
-		n -= 4;
-	return n;
+	return romdb_stem_len(name);
 }
 
 /*
