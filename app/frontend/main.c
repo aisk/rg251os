@@ -128,6 +128,7 @@ static struct {
 	struct rom_settings saved_rom;
 	struct perf_series p_run, p_blit, p_audio;
 	uint64_t perf_frames;
+	unsigned perf_skipped;  /* frames the core skipped (frameskip) */
 	unsigned missed;
 	unsigned xrun_total;
 	unsigned reports;
@@ -547,6 +548,7 @@ static void perf_report(void)
 		perf_reset(&m.p_blit);
 		perf_reset(&m.p_audio);
 		m.perf_frames = 0;
+		m.perf_skipped = 0;
 		m.missed = 0;
 		return;
 	}
@@ -559,33 +561,38 @@ static void perf_report(void)
 	perf_format(&m.p_run, run, sizeof(run));
 	perf_format(&m.p_blit, blit, sizeof(blit));
 	perf_format(&m.p_audio, aud, sizeof(aud));
-	log_msg("perf: %llu frames, ms avg/p99/max: run %s blit %s audio %s; "
-		"missed vblanks %u, underruns %u, overflow %u frames, fill %d..%d, "
-		"drc %.4f, codec %.0f Hz, cpu0 %ld MHz, %s, temp %s, bat %s, "
-		"backlight %d%%",
-		(unsigned long long)m.perf_frames, run, blit, aud, m.missed,
+	log_msg("perf: %llu frames (%u skipped), ms avg/p99/max: run %s blit %s "
+		"audio %s; missed vblanks %u, underruns %u, overflow %u frames, "
+		"fill %d..%d, drc %.4f, codec %.0f Hz, cpu0 %ld MHz, %s, temp %s, "
+		"bat %s, backlight %d%%",
+		(unsigned long long)m.perf_frames, m.perf_skipped, run, blit, aud,
+		m.missed,
 		as.xruns, as.overflows, as.fill_min, as.fill_max, as.adj,
 		as.hw_rate, khz > 0 ? khz / 1000 : -1, cpu, temp, bat,
 		settings.brightness);
 	m.perf_frames = 0;
+	m.perf_skipped = 0;
 	m.missed = 0;
 	if (++m.reports % 6 == 0 && fe_is_init)
 		log_sync_async();
 }
 
 /* One retro_run (the core pushes its audio meanwhile) and the audio
- * write, into the run and audio timing series. */
-static void emulate(uint32_t buttons)
+ * write, into the run and audio timing series; 1 if the core skipped
+ * the frame (frameskip). */
+static int emulate(uint32_t buttons)
 {
 	int64_t t0 = now_ns(), t1, push;
+	int skipped = core_run(buttons);
 
-	core_run(buttons);
 	t1 = now_ns();
 	push = audio_take_time_ns();
 	audio_flush();
 	perf_add(&m.p_run, t1 - t0 - push);
 	perf_add(&m.p_audio, audio_take_time_ns() + push);
 	m.perf_frames++;
+	m.perf_skipped += (unsigned)skipped;
+	return skipped;
 }
 
 static void blit_canvas(void)
@@ -610,11 +617,12 @@ static struct ui_result game_update(uint32_t held, int64_t now)
 	int fw, fh, fp, pitch, scale;
 	unsigned missed;
 	uint16_t *dst;
+	int skipped;
 
 	if (ui_hotkey())
 		return open_menu();
 	t0 = now_ns();
-	emulate(held & 0xffff);
+	skipped = emulate(held & 0xffff);
 	t2 = now_ns();
 
 	fr = core_frame(&fw, &fh, &fp);
@@ -636,8 +644,9 @@ static struct ui_result game_update(uint32_t held, int64_t now)
 	perf_add(&m.p_blit, t3 - t2);
 	missed = display_take_missed();
 	m.missed += missed;
-	/* Work: CPU time until the frame is ready for the flip. */
-	cpuctl_game_frame(t3 - t0, missed, now);
+	/* Work: CPU time until the frame is ready for the flip. A skipped
+	 * frame does not tell the controller how much the clock needs. */
+	cpuctl_game_frame(t3 - t0, missed, skipped, now);
 	if (now >= m.next_perf) {
 		perf_report();
 		m.next_perf = now + PERF_INTERVAL_NS;
@@ -1026,6 +1035,7 @@ static int headless(const char *data, const char *rom, long frames)
 	char path[300];
 	const uint16_t *fr;
 	int fw = 0, fh = 0, fp = 0, st;
+	unsigned nrun, nskip;
 	int64_t t;
 	pid_t pid;
 
@@ -1063,17 +1073,19 @@ static int headless(const char *data, const char *rom, long frames)
 	for (long i = 0; i < frames; i++) {
 		/* Tap A for 10 frames every 2 s of emulated time. */
 		int64_t t0 = now_ns(), t2;
+		int skipped;
 
 		/* Fake time from the start: 60 frames per second. */
 		t = m.game_start_ns + i * HEADLESS_FRAME_NS;
-		emulate(i % 120 < 10 ? JOY_BIT(A) : 0);
+		skipped = emulate(i % 120 < 10 ? JOY_BIT(A) : 0);
 		fr = core_frame(&fw, &fh, &fp);
 		t2 = now_ns();
 		if (fr)
 			blit_rotate(native, 320, 320, 480, 270, fr, fp, fw, fh, 2,
 				    fx_current());
 		perf_add(&m.p_blit, now_ns() - t2);
-		cpuctl_game_frame(now_ns() - t0, 0, t + HEADLESS_FRAME_NS);
+		cpuctl_game_frame(now_ns() - t0, 0, skipped,
+				  t + HEADLESS_FRAME_NS);
 		core_save_tick(t);
 		while ((pid = sys_reap(&st)) > 0)
 			core_child_exited(pid, st);
@@ -1114,10 +1126,11 @@ static int headless(const char *data, const char *rom, long frames)
 	}
 	if (m.perf_frames)
 		perf_report();
+	core_frame_counts(&nrun, &nskip);
 	log_msg("headless: %ld frames, frame %dx%d pitch %d, final drc %.4f, "
-		"fill %d..%d, underruns after warmup %u",
+		"fill %d..%d, underruns after warmup %u, skipped %u of %u",
 		frames, fw, fh, fp, as->adj, as->fill_min, as->fill_max,
-		m.xrun_total);
+		m.xrun_total, nskip, nrun);
 	/* Like a quit, without going back to the ROM list. */
 	end_game("headless end");
 	save_settings();

@@ -10,8 +10,10 @@
  *                                (color=auto|off|gba|gba-light|sp101,
  *                                auto by default, see romdb.c), the
  *                                learned start OPP (cpu_start=<MHz>),
- *                                the core (core=mgba|gpsp) and gpSP's
- *                                frame blending (blend=off|on)
+ *                                the core (core=mgba|gpsp), gpSP's
+ *                                frame blending (blend=off|on) and
+ *                                frame skipping
+ *                                (frameskip=off|auto|1|2|3)
  *
  * <rom name> is the ROM file name without ".gba", whichever folder of
  * roms/ it is in: moving a ROM to another folder keeps its settings (and
@@ -44,6 +46,12 @@ const char *const color_mode_labels[COLOR_COUNT] = {
 	"Off", "GBA", "GBA light", "SP101", "Auto",
 };
 const char *const core_names[CORE_COUNT] = { "mgba", "gpsp" };
+const char *const frameskip_names[FRAMESKIP_COUNT] = {
+	"off", "auto", "1", "2", "3",
+};
+const char *const frameskip_labels[FRAMESKIP_COUNT] = {
+	"Off", "Auto", "1 (30fps)", "2 (20fps)", "3 (15fps)",
+};
 const char *const core_labels[CORE_COUNT] = { "mGBA", "gpSP" };
 
 const struct settings settings_defaults = {
@@ -100,6 +108,8 @@ static const struct field rom_fields[] = {
 	F(rom_settings, cpu_start, 0, 5000, NULL),
 	F(rom_settings, core, 0, CORE_COUNT - 1, core_names),
 	F(rom_settings, blend, 0, 1, on_off),
+	/* Only the names: no number range besides them (min > max). */
+	FN(rom_settings, frameskip, 1, 0, frameskip_names),
 };
 
 static int field_nnames(const struct field *f)

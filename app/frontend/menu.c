@@ -24,7 +24,7 @@
  * see log.c, Date & time, the page of clock.c that sets the clock and the
  * RTC, System info, the read only page of sysinfo.c, and Power off). In
  * game, SELECT+START opens the in-game menu: Resume, Restart game,
- * Volume, Brightness, CPU, Core, Frame blend, Settings, System info, Quit
+ * Volume, Brightness, CPU, Core, Frameskip, Settings, System info, Quit
  * to ROM list, Power off; B or SELECT+START again resumes. Restart game
  * starts the game over like the console's reset button (its save written
  * first, its resume state removed). Restart game, Restart with (below)
@@ -37,19 +37,24 @@
  * left/right pick another one, the row then reads "Restart with" and A
  * (confirmed, changing the core again cancels) saves (the resume state
  * under the old core's name, so switching back resumes there) and starts
- * the game with it (resuming instead keeps it for the next start). Frame
- * blend (this game, gpSP's 50:50 mix of the current and the previous
- * frame for games that rely on LCD ghosting) applies on the next frame;
- * mGBA has none, so with mGBA the row reads "gpSP only" and cannot be
- * changed, the setting is kept for gpSP. The in-game Settings screen
- * shows the game with the effects applied (live preview) under a panel
- * with Color (this game: Auto, showing what it resolved to as "Auto
- * (GBA)", Off, GBA, GBA light or SP101), LCD grid, Grid darkness, Dot
- * boost and Debug log. In menus, up/down select, left/right change a
- * value, A activates, B goes back. The battery level is shown in the ROM
- * list and settings headers and right of the game's name in the in-game
- * menu; the ROM list header also has the time (HH:MM, UTC as entered,
- * see clock.c) once the clock is set.
+ * the game with it (resuming instead keeps it for the next start).
+ * Frameskip (this game: Off, Auto, which skips while the audio buffer
+ * runs low, or 1, 2, 3 frames skipped after each one shown, see core.c)
+ * applies on the next frame; Auto is gpSP only, so with mGBA it is
+ * skipped over, and a game set to Auto under gpSP reads "Auto: gpSP
+ * only" and runs without skipping. The in-game Settings screen shows the
+ * game with the effects applied (live preview) under a panel with Color
+ * (this game: Auto, showing what it resolved to as "Auto (GBA)", Off,
+ * GBA, GBA light or SP101), Frame blend (this game, gpSP's 50:50 mix of
+ * the current and the previous frame for games that rely on LCD
+ * ghosting; it applies on the next frame, mGBA has none, so with mGBA
+ * the row reads "gpSP only" and cannot be changed, the setting is kept
+ * for gpSP), LCD grid, Grid darkness, Dot boost and Debug log. In
+ * menus, up/down select, left/right change a value, A activates, B goes
+ * back. The battery level is shown in the ROM list and settings headers
+ * and right of the game's name in the in-game menu; the ROM list header
+ * also has the time (HH:MM, UTC as entered, see clock.c) once the clock
+ * is set.
  */
 #include <stdio.h>
 #include <string.h>
@@ -610,9 +615,12 @@ static int confirm_press(struct confirm *cf, int row, int64_t now)
  * A row of the in-game menu or the settings. Its value is an int (field)
  * that left/right step through min..max, wrapping, shown as names[v -
  * min] or as a number; or step() changes it, and value() formats it. A
- * core option of the game (option, a key of core.c's rom_options) can
- * only be changed with a core that has it, otherwise the row is dimmed
- * and reads "<core> only"; a change goes to core_options_changed(). A or
+ * game setting behind core options (option, core.c's rom_options[]) can
+ * only be changed with a core that has it (the one picked or the one
+ * running), otherwise the row is dimmed and reads "<core> only"; values
+ * that core does not have are stepped over, and one already set reads
+ * "<value>: <core> only", dimmed; a change goes to
+ * core_options_changed(). A or
  * START steps a ROW_TOGGLE row forward and returns press, after a second
  * A when ROW_CONFIRM (struct confirm, the label reads armed meanwhile). A
  * row with pending() (the core) takes effect only through press: while
@@ -626,7 +634,7 @@ struct row {
 	const char *const *names;
 	void (*step)(int d);
 	void (*value)(char *buf, size_t size);
-	const char *option;
+	int option;           /* field is a game setting behind core options */
 	int (*active)(void);  /* NULL: always; dimmed (still changes) when 0 */
 	const char *note;     /* after the label, when there is room */
 	unsigned flags;
@@ -657,12 +665,28 @@ static void menu_open(struct menu *mn, const struct row *const *rows,
 	mn->back = back;
 }
 
+/* A core option row's value v (any for v < 0) with the core picked for
+ * the game or the one running. */
+static int row_has(const struct row *r, int v)
+{
+	return !r->option ||
+	       core_setting_supported(r->field, rom_settings.core, v) ||
+	       (core_loaded() &&
+		core_setting_supported(r->field, core_info()->core, v));
+}
+
 static int row_usable(const struct row *r)
 {
-	int core = r->option ? core_option_core(r->option) : -1;
+	return row_has(r, -1);
+}
 
-	return !r->option || rom_settings.core == core ||
-	       (core_loaded() && core_info()->core == core);
+/* The first core that has value v (any for v < 0) of a row's setting. */
+static const char *row_core_label(const struct row *r, int v)
+{
+	for (int i = 0; i < CORE_COUNT; i++)
+		if (core_setting_supported(r->field, i, v))
+			return core_labels[i];
+	return "?";
 }
 
 static void row_step(struct menu *mn, const struct row *r, int d)
@@ -672,9 +696,15 @@ static void row_step(struct menu *mn, const struct row *r, int d)
 	if (r->step) {
 		r->step(d);
 	} else if (r->field) {
-		int v = *r->field + d;
+		int v = *r->field;
 
-		*r->field = v > r->max ? r->min : v < r->min ? r->max : v;
+		for (int i = r->min; i <= r->max; i++) {
+			v += d;
+			v = v > r->max ? r->min : v < r->min ? r->max : v;
+			if (row_has(r, v))
+				break;
+		}
+		*r->field = v;
 	} else {
 		return;
 	}
@@ -689,8 +719,10 @@ static void row_value(const struct row *r, char *buf, size_t size)
 {
 	buf[0] = 0;
 	if (!row_usable(r))
-		snprintf(buf, size, "%s only",
-			 core_labels[core_option_core(r->option)]);
+		snprintf(buf, size, "%s only", row_core_label(r, -1));
+	else if (r->field && r->names && !row_has(r, *r->field))
+		snprintf(buf, size, "%s: %s only", r->names[*r->field - r->min],
+			 row_core_label(r, *r->field));
 	else if (r->value)
 		r->value(buf, size);
 	else if (r->field && r->names)
@@ -749,7 +781,8 @@ static void menu_draw_rows(struct canvas *c, const struct menu *mn, int x,
 		uint16_t col = on ? COL_FG : COL_DIM;
 		char v[24];
 
-		if (!row_usable(r) || (r->active && !r->active()))
+		if (!row_usable(r) || (r->active && !r->active()) ||
+		    (r->field && !row_has(r, *r->field)))
 			col = on ? COL_DIM : COL_OFF;
 		if (confirm_armed(&mn->confirm, i)) {
 			label = r->armed;
@@ -870,7 +903,11 @@ static const struct row
 	},
 	row_blend = {
 		"Frame blend", &rom_settings.blend, 0, 1, off_on,
-		.option = "gpsp_frame_mixing", .flags = ROW_TOGGLE,
+		.option = 1, .note = "(game)", .flags = ROW_TOGGLE,
+	},
+	row_frameskip = {
+		"Frameskip", &rom_settings.frameskip, 0, FRAMESKIP_COUNT - 1,
+		frameskip_labels, .option = 1, .flags = ROW_TOGGLE,
 	},
 	row_game_settings = {
 		"Settings", .press = { UI_PUSH, &game_settings_page },
@@ -911,7 +948,7 @@ static const struct row
 
 static const struct row *const ig_rows[] = {
 	&row_resume, &row_reset, &row_volume, &row_brightness, &row_cpu,
-	&row_core, &row_blend, &row_game_settings, &row_sysinfo, &row_quit,
+	&row_core, &row_frameskip, &row_game_settings, &row_sysinfo, &row_quit,
 	&row_poweroff,
 };
 _Static_assert(ARRAY_SIZE(ig_rows) == IG_ROWS, "IG_ROWS in menu.h");
@@ -980,8 +1017,8 @@ static const struct row *const settings_rows[] = {
 	&row_datetime, &row_sysinfo, &row_poweroff, &row_back,
 };
 static const struct row *const game_settings_rows[] = {
-	&row_color, &row_grid, &row_grid_dim, &row_grid_boost, &row_debug,
-	&row_back,
+	&row_color, &row_blend, &row_grid, &row_grid_dim, &row_grid_boost,
+	&row_debug, &row_back,
 };
 
 /* Both pages share the menu; only one is open at a time. */

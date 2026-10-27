@@ -39,6 +39,24 @@
  * when the state was written (see struct state_header). Neither core
  * restores save RAM from a state (mGBA stores it but loads without it,
  * gpSP does not store it). core_reset() removes the state.
+ *
+ * Frame skipping (rom_settings.frameskip, rom_options[]): a fixed
+ * interval with either core, Auto (skip while the audio buffer is low)
+ * with gpSP only. For Auto gpSP registers an audio buffer status
+ * callback, which core_run() calls right before every retro_run with
+ * audio_buffer_status(); gpSP skips while the occupancy is under its
+ * threshold (33% by default; audio.c gives the occupancy so that its
+ * target fill reads 50%). core_run() reports whether the frame was
+ * skipped, so the CPU controller (cpuctl.c) judges rendered frames only:
+ * gpSP passes NULL to video_refresh for a skipped frame. mGBA hands over
+ * its buffer again and cannot be asked (it also redraws only the
+ * scanlines that changed, so the buffer does not tell either), so its
+ * counter is followed here: like GBAVideo's frameskipCounter it starts
+ * at 0 on load and reset, a frame is drawn when it is 0 or less, and at
+ * the frame's end it counts down and goes back to mgba_frameskip as mGBA
+ * last read it (in that retro_run, after GET_VARIABLE_UPDATE). The
+ * settings and the keys sent are logged at the start, skipped frames at
+ * the end of each game.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -97,6 +115,14 @@ static struct {
 	unsigned info_lines, warn_lines, dropped_lines;
 	char options[512];   /* answered core options, logged after load */
 	int options_changed; /* for RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE */
+	retro_audio_buffer_status_callback_t audio_status;  /* from the core */
+	unsigned min_latency_ms;
+	int refreshed, null_frame;  /* video_refresh in this retro_run */
+	int mgba_skip, mgba_count;  /* mGBA's frameskip and counter */
+	unsigned frames, skipped;   /* this game */
+	unsigned audio_low;  /* frames the status said underrun likely */
+	unsigned occ_n, occ_min;    /* buffer status reports, lowest one */
+	uint64_t occ_sum;
 } c;
 
 /* ----------------------------------------------------------- callbacks */
@@ -138,7 +164,6 @@ static void core_log(enum retro_log_level level, const char *fmt, ...)
 static const char *const options[][2] = {
 	{ "mgba_skip_bios", "OFF" },
 	{ "mgba_idle_optimization", "Remove Known" },
-	{ "mgba_frameskip", "0" },
 	{ "mgba_audio_low_pass_filter", "disabled" },
 	{ "gpsp_boot_mode", "game" },
 	{ "gpsp_drc", "enabled" },
@@ -148,39 +173,66 @@ static const char *const options[][2] = {
 	{ "gpsp_serial", "disabled" },
 	{ "gpsp_rumble", "disabled" },
 	{ "gpsp_sound_rate", "32768" },
-	{ "gpsp_frameskip", "disabled" },
 	{ "gpsp_color_correction", "disabled" },  /* ours, see fx.c */
 };
 
 /*
  * Core options from the game's settings (struct rom_settings): the key,
- * the core that has it, the setting, the option's value for each value of
- * the setting, and whether the core takes a change while running (gpSP
- * reads its options again after RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE)
- * or only at the next start. A setting changed in game reaches the core
- * through core_options_changed().
+ * the core that has it, the setting (its name and value names, for the
+ * log), the option's value for each value of the setting, NULL for a
+ * value that core does not have (then the core gets the first one), and
+ * whether the core takes a change while running (both read these again
+ * after RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE) or only at the next
+ * start. A setting changed in game reaches the core through
+ * core_options_changed(); a setting may need several keys.
  *
  * gpsp_frame_mixing: a 50:50 mix of this and the previous frame, for
  * games that rely on the GBA LCD's ghosting; mGBA's libretro port has no
  * frame blending.
+ *
+ * frameskip: gpSP's auto_threshold for Auto (gpsp_frameskip_threshold
+ * is left at its default, 33%), fixed_interval with the interval for the
+ * numbers. This mGBA has no automatic mode, only mgba_frameskip, the
+ * frames skipped after each rendered one.
  */
 struct rom_option {
 	const char *key;
 	int core;                   /* enum core_id */
+	const char *setting;        /* its key in the settings file */
+	const char *const *names;   /* the setting's values there */
 	size_t off;                 /* its int in struct rom_settings */
 	const char *const *values;  /* by the setting's value */
 	int nvalues;
 	int live;
 };
 
+static const char *const off_on[] = { "off", "on" };
 static const char *const disabled_enabled[] = { "disabled", "enabled" };
+static const char *const gpsp_frameskip[FRAMESKIP_COUNT] = {
+	"disabled", "auto_threshold", "fixed_interval", "fixed_interval",
+	"fixed_interval",
+};
+/* gpSP's default for Off and Auto, where it is not used. */
+static const char *const gpsp_frameskip_interval[FRAMESKIP_COUNT] = {
+	"1", "1", "1", "2", "3",
+};
+static const char *const mgba_frameskip[FRAMESKIP_COUNT] = {
+	"0", NULL, "1", "2", "3",
+};
 
-#define ROM_OPTION(key, core, member, values, live) \
-	{ key, core, offsetof(struct rom_settings, member), values, \
-	  ARRAY_SIZE(values), live }
+#define ROM_OPTION(key, core, member, names, values, live) \
+	{ key, core, #member, names, offsetof(struct rom_settings, member), \
+	  values, ARRAY_SIZE(values), live }
 
 static const struct rom_option rom_options[] = {
-	ROM_OPTION("gpsp_frame_mixing", CORE_GPSP, blend, disabled_enabled, 1),
+	ROM_OPTION("gpsp_frame_mixing", CORE_GPSP, blend, off_on,
+		   disabled_enabled, 1),
+	ROM_OPTION("gpsp_frameskip", CORE_GPSP, frameskip, frameskip_names,
+		   gpsp_frameskip, 1),
+	ROM_OPTION("gpsp_frameskip_interval", CORE_GPSP, frameskip,
+		   frameskip_names, gpsp_frameskip_interval, 1),
+	ROM_OPTION("mgba_frameskip", CORE_MGBA, frameskip, frameskip_names,
+		   mgba_frameskip, 1),
 };
 
 /* The setting each rom option was last given to the core with. */
@@ -193,18 +245,33 @@ static int rom_option_setting(const struct rom_option *o)
 	return v < 0 ? 0 : v >= o->nvalues ? o->nvalues - 1 : v;
 }
 
-int core_option_core(const char *key)
+/* The option's value for setting value v; one the core does not have
+ * gets the first. */
+static const char *rom_option_value(const struct rom_option *o, int v)
 {
-	for (size_t i = 0; i < ARRAY_SIZE(rom_options); i++)
-		if (!strcmp(key, rom_options[i].key))
-			return rom_options[i].core;
-	return -1;
+	return o->values[v] ? o->values[v] : o->values[0];
 }
 
-static const char *get_variable(const char *key)
+int core_setting_supported(const int *field, int core, int v)
+{
+	size_t off = (size_t)((const char *)field - (const char *)&rom_settings);
+	int found = 0;
+
+	for (size_t i = 0; i < ARRAY_SIZE(rom_options); i++) {
+		const struct rom_option *o = &rom_options[i];
+
+		if (o->off != off || o->core != core)
+			continue;
+		if (v >= 0 && v < o->nvalues && !o->values[v])
+			return 0;
+		found = 1;
+	}
+	return found;
+}
+
+const char *core_option_value(const char *key)
 {
 	const char *v = NULL;
-	size_t n;
 
 	if (!strcmp(key, "mgba_use_bios"))
 		v = c.have_bios ? "ON" : "OFF";
@@ -212,10 +279,69 @@ static const char *get_variable(const char *key)
 		v = c.have_bios ? "auto" : "builtin";
 	for (size_t i = 0; !v && i < ARRAY_SIZE(rom_options); i++)
 		if (!strcmp(key, rom_options[i].key))
-			v = rom_options[i].values[rom_option_setting(&rom_options[i])];
+			v = rom_option_value(&rom_options[i],
+					     rom_option_setting(&rom_options[i]));
 	for (size_t i = 0; !v && i < ARRAY_SIZE(options); i++)
 		if (!strcmp(key, options[i][0]))
 			v = options[i][1];
+	return v;
+}
+
+/*
+ * The game's settings behind core options and what the running core got
+ * for them, one line at the start:
+ * "frameskip=auto (gpsp_frameskip=auto_threshold ...), blend=off (...)",
+ * or "(not in mGBA)", "(mgba_frameskip=0; auto not in mGBA)".
+ */
+static void log_rom_options(void)
+{
+	char line[512];
+	size_t n = 0;
+
+	line[0] = 0;
+	for (size_t i = 0; i < ARRAY_SIZE(rom_options); i++) {
+		const struct rom_option *o = &rom_options[i];
+		int v = rom_option_setting(o), keys = 0, seen = 0;
+		const char *name = o->names[v];
+
+		for (size_t j = 0; j < i; j++)
+			seen |= rom_options[j].off == o->off;
+		if (seen || n + 64 >= sizeof(line))
+			continue;
+		n += snprintf(line + n, sizeof(line) - n, "%s%s=%s (", n ? ", " : "",
+			      o->setting, name);
+		for (size_t j = i; j < ARRAY_SIZE(rom_options); j++) {
+			const struct rom_option *k = &rom_options[j];
+
+			if (k->off != o->off || k->core != c.info.core ||
+			    n + 64 >= sizeof(line))
+				continue;
+			n += snprintf(line + n, sizeof(line) - n, "%s%s=%s",
+				      keys++ ? " " : "", k->key,
+				      rom_option_value(k, v));
+		}
+		if (!keys)
+			n += snprintf(line + n, sizeof(line) - n, "not in %s)",
+				      core_labels[c.info.core]);
+		else if (!core_setting_supported((const int *)
+				((const char *)&rom_settings + o->off), c.info.core, v))
+			n += snprintf(line + n, sizeof(line) - n, "; %s not in %s)",
+				      name, core_labels[c.info.core]);
+		else
+			n += snprintf(line + n, sizeof(line) - n, ")");
+	}
+	log_msg("core: game settings for %s: %s", core_labels[c.info.core],
+		line);
+}
+
+static const char *get_variable(const char *key)
+{
+	const char *v = core_option_value(key);
+	size_t n;
+
+	/* What mGBA uses from now on (see the top of this file). */
+	if (!strcmp(key, "mgba_frameskip"))
+		c.mgba_skip = v ? atoi(v) : 0;
 	/* Record each key once for the load log line. */
 	n = strlen(c.options);
 	if (!c.loaded && !strstr(c.options, key) &&
@@ -274,8 +400,36 @@ static bool environment(unsigned cmd, void *data)
 	case RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME:
 	case RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS:
 	case RETRO_ENVIRONMENT_SET_SERIALIZATION_QUIRKS:
-	case RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY:
 		return true;
+	case RETRO_ENVIRONMENT_SET_AUDIO_BUFFER_STATUS_CALLBACK: {
+		const struct retro_audio_buffer_status_callback *cb = data;
+		retro_audio_buffer_status_callback_t f = cb ? cb->callback : NULL;
+
+		if (f && !c.audio_status)
+			log_msg("core: audio buffer status callback registered, "
+				"called before each frame (frameskip on the audio "
+				"buffer level in percent of twice the target fill, "
+				"buffer %u frames)", audio_buffer());
+		else if (!f && c.audio_status)
+			log_msg("core: audio buffer status callback removed");
+		c.audio_status = f;
+		return true;
+	}
+	case RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY: {
+		unsigned ms = data ? *(const unsigned *)data : 0;
+
+		/* gpSP asks for 6 frames (128 ms) with frameskip on; the
+		 * buffer stays as audio.c opened it. */
+		if (ms != c.min_latency_ms && ms)
+			log_msg("core: asks for at least %u ms of audio latency, "
+				"keeping the %u frame buffer (%.1f ms)", ms,
+				audio_buffer(), audio_rate() ?
+				audio_buffer() * 1000.0 / audio_rate() : 0.0);
+		else if (ms != c.min_latency_ms)
+			log_msg("core: no minimum audio latency any more");
+		c.min_latency_ms = ms;
+		return true;
+	}
 	case RETRO_ENVIRONMENT_GET_CAN_DUPE:
 		*(bool *)data = true;
 		return true;
@@ -296,6 +450,8 @@ static bool environment(unsigned cmd, void *data)
 
 static void video_refresh(const void *data, unsigned w, unsigned h, size_t pitch)
 {
+	c.refreshed = 1;
+	c.null_frame = !data;
 	if (!data)
 		return;  /* dupe: keep the previous frame */
 	c.frame = data;
@@ -748,6 +904,12 @@ int core_load(const char *rom_path, int core, char *err, size_t errlen)
 		 fe_data_dir, blen, base, c.api->name);
 	c.options[0] = 0;
 	c.options_changed = 0;
+	c.audio_status = NULL;
+	c.min_latency_ms = 0;
+	c.frames = c.skipped = c.audio_low = 0;
+	c.occ_n = c.occ_sum = 0;
+	c.occ_min = 100;
+	c.mgba_skip = c.mgba_count = 0;
 	for (size_t i = 0; i < ARRAY_SIZE(rom_options); i++)
 		rom_option_set[i] = rom_option_setting(&rom_options[i]);
 	c.in_game = 0;
@@ -818,6 +980,7 @@ int core_load(const char *rom_path, int core, char *err, size_t errlen)
 		c.have_bios ? bios : "HLE (built in)");
 	if (c.options[0])
 		log_msg("core: options %s", c.options);
+	log_rom_options();
 	save_load();
 	state_load();
 	c.in_game = 1;
@@ -834,6 +997,21 @@ void core_unload(void)
 	}
 	c.api->deinit();
 	c.api = NULL;
+	c.audio_status = NULL;
+	if (c.loaded && (c.skipped || rom_settings.frameskip != FRAMESKIP_OFF)) {
+		char st[96] = "no buffer status reported";
+
+		if (c.occ_n)
+			snprintf(st, sizeof(st), "buffer status %u times: avg %.0f%%, "
+				 "lowest %u%%, %u under one frame", c.occ_n,
+				 (double)c.occ_sum / c.occ_n, c.occ_min, c.audio_low);
+		log_msg("core: frameskip %s: %u of %u frames skipped (%.1f%%), %s",
+			frameskip_names[rom_settings.frameskip >= 0 &&
+					rom_settings.frameskip < FRAMESKIP_COUNT ?
+					rom_settings.frameskip : 0],
+			c.skipped, c.frames,
+			c.frames ? 100.0 * c.skipped / c.frames : 0.0, st);
+	}
 	if (c.dropped_lines)
 		log_msg("core: %u log lines dropped (info lines limited to %d per "
 			"game, warnings to %d)", c.dropped_lines, MAX_INFO_LINES,
@@ -883,16 +1061,45 @@ void core_reset(void)
 	core_save_sync();
 	state_remove("restart game");
 	c.api->reset();
+	c.mgba_count = 0;  /* GBAVideoReset */
 	log_msg("core: %s reset in %.1f ms", core_labels[c.info.core],
 		(now_ns() - t0) / 1e6);
 }
 
-void core_run(uint32_t buttons)
+int core_run(uint32_t buttons)
 {
+	int skipped, mgba_skipped = c.mgba_count > 0;
+
 	if (!c.loaded)
-		return;
+		return 0;
 	c.buttons = buttons;
+	if (c.audio_status) {
+		unsigned occ;
+		int low, active = audio_buffer_status(&occ, &low);
+
+		if (active) {
+			c.audio_low += low;
+			c.occ_n++;
+			c.occ_sum += occ;
+			c.occ_min = occ < c.occ_min ? occ : c.occ_min;
+		}
+		c.audio_status(active, occ, active && low);
+	}
+	c.refreshed = c.null_frame = 0;
 	c.api->run();
+	/* mGBA's counter at the frame's end (0 unless it read a frameskip). */
+	if (--c.mgba_count < 0)
+		c.mgba_count = c.mgba_skip;
+	skipped = !c.refreshed || c.null_frame || mgba_skipped;
+	c.frames++;
+	c.skipped += skipped;
+	return skipped;
+}
+
+void core_frame_counts(unsigned *frames, unsigned *skipped)
+{
+	*frames = c.frames;
+	*skipped = c.skipped;
 }
 
 void core_options_changed(void)
@@ -901,22 +1108,30 @@ void core_options_changed(void)
 		return;
 	for (size_t i = 0; i < ARRAY_SIZE(rom_options); i++) {
 		const struct rom_option *o = &rom_options[i];
-		int v = rom_option_setting(o);
+		int v = rom_option_setting(o), old = rom_option_set[i];
+		const char *val = rom_option_value(o, v);
 
-		if (v == rom_option_set[i])
+		if (v == old)
 			continue;
 		rom_option_set[i] = v;
+		/* Another value of the setting, the same for this key. */
+		if (!strcmp(val, rom_option_value(o, old)) && o->values[v])
+			continue;
 		if (o->core != c.info.core) {
 			log_msg("core: %s=%s kept for %s, %s does not have it",
-				o->key, o->values[v], core_labels[o->core],
+				o->key, val, core_labels[o->core],
 				core_labels[c.info.core]);
-		} else if (o->live) {
+			continue;
+		}
+		if (!o->values[v])
+			log_msg("core: %s=%s is not in %s, %s=%s", o->setting,
+				o->names[v], core_labels[o->core], o->key, val);
+		if (o->live) {
 			/* Read again after the next retro_run. */
 			c.options_changed = 1;
-			log_msg("core: %s=%s, applied live", o->key, o->values[v]);
+			log_msg("core: %s=%s, applied live", o->key, val);
 		} else {
-			log_msg("core: %s=%s from the next start", o->key,
-				o->values[v]);
+			log_msg("core: %s=%s from the next start", o->key, val);
 		}
 	}
 }

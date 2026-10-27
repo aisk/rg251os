@@ -29,6 +29,13 @@ void audio_set_source(double in_rate, double core_fps, double display_hz);
 void audio_push(const int16_t *samples, size_t frames);
 /* Once per video frame, after retro_run: rate control and PCM write. */
 void audio_flush(void);
+/* For a core's frame skipping, right before retro_run: how full the
+ * device buffer is now, in percent of twice the target fill (the target
+ * reads 50%, 0..100, see audio.c), and whether less than one
+ * video frame of audio is left (after an underrun: 0%, likely). Returns
+ * 0 (and 0%) when no stream runs: no PCM, before the first write of a
+ * game, after a pause until the next write. */
+int audio_buffer_status(unsigned *occupancy, int *underrun_likely);
 /* Stop output (menus); the next flush restarts it. */
 void audio_pause(void);
 /* Sleep: stop and close the PCM; reopen it and restart the rate control

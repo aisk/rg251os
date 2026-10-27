@@ -230,11 +230,38 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	grep -q 'settings: test: loaded, .*core=gpsp blend=on' $$f; \
 	grep -q 'core: options .*gpsp_frame_mixing=enabled' $$f; \
 	grep -q 'headless: 1200 frames, frame 240x160' $$f
+	# Frame skipping from the per ROM setting (core:setting:skipped): a
+	# fixed interval with gpSP (NULL frames) and mGBA (its counter
+	# followed), counted in the summary lines and perf.csv; Auto with
+	# gpSP registers the audio buffer status callback and skips nothing
+	# while the audio is steady; mGBA has no Auto.
+	set -e; for c in gpsp:2:800 mgba:1:600 gpsp:auto:0 mgba:auto:0; do \
+		core=$${c%%:*}; rest=$${c#*:}; fs=$${rest%%:*}; n=$${rest#*:}; \
+		d=$(FRONTEND_TEST_DIR)/frameskip/$$core-$$fs; \
+		mkdir -p $$d/config/roms; \
+		printf 'core=%s\nframeskip=%s\n' $$core $$fs > $$d/config/roms/test.txt; \
+		$(QEMU_AARCH64) $(FRONTEND_ELF) --headless $$d $(FRONTEND_TEST_ROM) 1200; \
+		f=$$d/log/frontend.txt; \
+		grep -q "underruns after warmup 0, skipped $$n of 1200" $$f; \
+		grep -q "core: frameskip $$fs: $$n of 1200 frames skipped" $$f; \
+		grep -q "perf summary: .*, frameskip $$fs, start" $$f; \
+		grep -q "perf summary: adaptive all: 1200 frames ($$n skipped)" $$f; \
+		grep -q ",$$n,adaptive,48000 Hz S16 512x8," $$d/log/perf.csv; \
+	done; \
+	d=$(FRONTEND_TEST_DIR)/frameskip; \
+	grep -q 'game settings for gpSP: .*frameskip=2 (gpsp_frameskip=fixed_interval gpsp_frameskip_interval=2)' $$d/gpsp-2/log/frontend.txt; \
+	grep -q 'game settings for mGBA: .*frameskip=1 (mgba_frameskip=1)' $$d/mgba-1/log/frontend.txt; \
+	grep -q 'game settings for gpSP: .*frameskip=auto (gpsp_frameskip=auto_threshold gpsp_frameskip_interval=1)' $$d/gpsp-auto/log/frontend.txt; \
+	grep -q 'core: audio buffer status callback registered' $$d/gpsp-auto/log/frontend.txt; \
+	grep -q 'core: frameskip auto: .*buffer status 1199 times' $$d/gpsp-auto/log/frontend.txt; \
+	grep -q 'game settings for mGBA: .*frameskip=auto (mgba_frameskip=0; auto not in mGBA)' $$d/mgba-auto/log/frontend.txt; \
+	! grep -q 'audio buffer status callback' $$d/mgba-auto/log/frontend.txt
 	# mGBA -> gpSP -> mGBA in one process on one save, a .srm, a reset
 	# in each core keeping the save, frame blending switched on and off
 	# in game, and the resume states (resumed, skipped when the .sav
 	# changed, truncated, damaged or rejected, removed by Restart game,
-	# kept apart per core).
+	# kept apart per core), frame skipping switched in game with both
+	# cores and mGBA's skipped frames checked against what it draws.
 	$(QEMU_AARCH64) $(FRONTEND_ELF) --core-switch $(FRONTEND_TEST_DIR)/switch 120
 	set -e; f=$(FRONTEND_TEST_DIR)/switch/log/frontend.txt; \
 	grep -q 'core switch: passed' $$f; \
@@ -250,7 +277,10 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	grep -q 'core switch: mgba reset, counter 8' $$f; \
 	grep -q 'core: gpsp_frame_mixing=enabled, applied live' $$f; \
 	grep -q 'core: gpsp_frame_mixing=disabled, applied live' $$f; \
-	grep -q 'core: gpsp_frame_mixing=enabled kept for gpSP, mGBA does not have it' $$f
+	grep -q 'core: gpsp_frame_mixing=enabled kept for gpSP, mGBA does not have it' $$f; \
+	grep -q 'core switch: gpsp frameskip done' $$f; \
+	grep -q 'core switch: mgba frameskip done' $$f; \
+	grep -q 'core switch: mgba skip check: 40 of 40 drawn with off, 0 frames counted wrong' $$f
 	# The first boot's partition grow on card images, with mtools as the
 	# file system and fsck.fat on the result (see the script).
 	$(TOP)/mk/sdgrow-test.sh $(QEMU_AARCH64) $(FRONTEND_STUB_ELF) \

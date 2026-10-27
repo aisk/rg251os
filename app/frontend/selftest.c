@@ -495,6 +495,18 @@ static void test_settings(const char *base)
 	      r.blend == 1, "blend parse range");
 	CHECK(rom_settings_parse(&r, "blend=no\n") == 1 && r.blend == 0,
 	      "blend parse no");
+	CHECK(r.frameskip == FRAMESKIP_OFF, "frameskip default off");
+	CHECK(rom_settings_parse(&r, "frameskip = Auto\r\n") == 1 &&
+	      r.frameskip == FRAMESKIP_AUTO, "frameskip parse auto");
+	CHECK(rom_settings_parse(&r, "frameskip=1\n") == 1 &&
+	      r.frameskip == FRAMESKIP_1, "frameskip parse 1");
+	CHECK(rom_settings_parse(&r, "frameskip=3\n") == 1 &&
+	      r.frameskip == FRAMESKIP_3, "frameskip parse 3");
+	CHECK(rom_settings_parse(&r, "frameskip=4\nframeskip=0\n"
+				 "frameskip=fast\n") == 0 &&
+	      r.frameskip == FRAMESKIP_3, "frameskip parse range");
+	CHECK(rom_settings_parse(&r, "frameskip=off\n") == 1 &&
+	      r.frameskip == FRAMESKIP_OFF, "frameskip parse off");
 
 	/* Files: missing, config/, per ROM. */
 	sys_make_dirs();
@@ -613,9 +625,26 @@ static void test_settings(const char *base)
 	read_file(path, buf, sizeof(buf) - 1);
 	CHECK(strstr(buf, "blend=off\n") != NULL, "blend in the file stays: %s",
 	      buf);
+	CHECK(!strstr(buf, "frameskip="), "default frameskip not written: %s",
+	      buf);
+	for (int v = FRAMESKIP_AUTO; v < FRAMESKIP_COUNT; v++) {
+		char want[32];
+
+		rom_settings.frameskip = v;
+		rom_settings_save();
+		rom_settings_load("Other.gba");
+		memset(buf, 0, sizeof(buf));
+		read_file(path, buf, sizeof(buf) - 1);
+		snprintf(want, sizeof(want), "frameskip=%s\n", frameskip_names[v]);
+		CHECK(rom_settings.frameskip == v && strstr(buf, want),
+		      "frameskip %s round trip: %s", frameskip_names[v], buf);
+	}
+	rom_settings.frameskip = FRAMESKIP_OFF;
+	rom_settings_save();
 	rom_settings_load(NULL);
 	CHECK(rom_settings.core == CORE_GPSP, "no game: default core");
 	CHECK(rom_settings.blend == 0, "no game: blend off");
+	CHECK(rom_settings.frameskip == FRAMESKIP_OFF, "no game: frameskip off");
 	settings = keep;
 	log_set_debug(1);
 }
@@ -1281,6 +1310,8 @@ struct sim {
 	double heavy_mul;
 	int burst_every, burst_len;  /* frames */
 	double burst_mul;
+	int skip;               /* frames skipped after each rendered one */
+	double skip_ms;         /* the work of a skipped frame */
 };
 
 static long sim_read_long(const char *dir, const char *name)
@@ -1301,7 +1332,9 @@ static void sim_run(const struct sim *sm, double seconds)
 
 	for (long i = 0; i < frames; i++) {
 		long f = cpu_freq_khz();
-		double w = sm->base_ms * 1296000.0 / (f > 0 ? f : 1296000);
+		int skipped = sm->skip && i % (sm->skip + 1) != 0;
+		double w = (skipped ? sm->skip_ms : sm->base_ms) * 1296000.0 /
+			   (f > 0 ? f : 1296000);
 		double period = SIM_PERIOD_NS / 1e6;
 
 		w += sm->noise_ms * ((rnd16() & 1023) / 511.5 - 1);
@@ -1317,7 +1350,7 @@ static void sim_run(const struct sim *sm, double seconds)
 			put(sim_ps, "current_avg", v);
 			last_f = f;
 		}
-		cpuctl_game_frame((int64_t)(w * 1e6), pending, sim_t);
+		cpuctl_game_frame((int64_t)(w * 1e6), pending, skipped, sim_t);
 		/* Reported with the next frame, as the flip events do. */
 		pending = w > period - 0.3 ? (unsigned)((w + 0.3) / period) : 0;
 		sim_t += SIM_PERIOD_NS * (1 + pending);
@@ -1348,11 +1381,14 @@ static void test_cpuctl(const char *base)
 	char fake[300], path[400];
 	struct cpuctl_counters k;
 	int learned, n;
-	static const struct sim light = { 6, 0.3, 200, 1.3, 0, 0, 0 };
-	static const struct sim heavy = { 11, 0.3, 0, 0, 0, 0, 0 };
-	static const struct sim bursty = { 6, 0.3, 0, 0, 900, 60, 2.0 };
-	static const struct sim mid = { 9, 0.2, 0, 0, 0, 0, 0 };
-	static const struct sim rising = { 11.6, 0.1, 0, 0, 0, 0, 0 };
+	static const struct sim light = { 6, 0.3, 200, 1.3, 0, 0, 0, 0, 0 };
+	static const struct sim heavy = { 11, 0.3, 0, 0, 0, 0, 0, 0, 0 };
+	static const struct sim bursty = { 6, 0.3, 0, 0, 900, 60, 2.0, 0, 0 };
+	static const struct sim mid = { 9, 0.2, 0, 0, 0, 0, 0, 0, 0 };
+	static const struct sim rising = { 11.6, 0.1, 0, 0, 0, 0, 0, 0, 0 };
+	/* mid, with two of every three frames skipped at a tenth of the
+	 * work (fixed interval 2). */
+	static const struct sim mid_skip = { 9, 0.2, 0, 0, 0, 0, 0, 2, 0.9 };
 
 	snprintf(fake, sizeof(fake), "%s/cpufreq", base);
 	snprintf(sim_ps, sizeof(sim_ps), "%s/power_supply/rk817-battery", base);
@@ -1444,6 +1480,21 @@ static void test_cpuctl(const char *base)
 	cpuctl_game_end();
 	cpuctl_set_mode(CPU_MODE_ADAPTIVE);
 
+	/* Skipped frames are counted but not judged: the mid load settles
+	 * where it does without skipping, the work statistics are of the
+	 * rendered frames. */
+	cpuctl_game_start("skip.gba", 1e9 / SIM_PERIOD_NS, 0, sim_t);
+	sim_run(&mid_skip, 60);
+	cpuctl_counters(&k);
+	log_msg("selftest: cpuctl skipping: %ld kHz, %u changes, %u skipped, "
+		"missed %u", cpu_freq_khz(), k.changes, k.skipped, k.missed);
+	CHECK(cpu_freq_khz() == 1008000 && k.missed == 0 && k.ups == 0,
+	      "skipping: mid load at %ld, %u missed, %u ups", cpu_freq_khz(),
+	      k.missed, k.ups);
+	CHECK(k.skipped == 2400, "skipping: %u of 3600 frames skipped",
+	      k.skipped);
+	cpuctl_game_end();
+
 	snprintf(path, sizeof(path), "%s/log/perf.csv", base);
 	n = read_file(path, csv, sizeof(csv) - 1);
 	CHECK(n > 0, "no perf.csv");
@@ -1456,15 +1507,184 @@ static void test_cpuctl(const char *base)
 		header += !strncmp(csv, "time,", 5);
 		for (char *p = csv; (p = strstr(p, ",all,")); p++)
 			all++;
-		CHECK(header == 1 && all == 5, "perf.csv: %d headers, %d summaries",
+		CHECK(header == 1 && all == 6, "perf.csv: %d headers, %d summaries",
 		      header, all);
 	}
+	/* The skipping game's 1008 MHz row: work_avg_ms (column 7) of the
+	 * rendered frames (9 ms at 1296 MHz), skipped (column 28). */
+	CHECK(fabs(csv_field(csv, "\"skip.gba\",adaptive,1008000,", 7) -
+		   9 * 1296.0 / 1008) < 0.5,
+	      "skipping: work avg %.2f ms",
+	      csv_field(csv, "\"skip.gba\",adaptive,1008000,", 7));
+	CHECK(csv_field(csv, "\"skip.gba\",adaptive,all,", 28) == 2400 &&
+	      csv_field(csv, "\"skip.gba\",adaptive,all,", 5) == 3600,
+	      "skipping: perf.csv skipped %.0f of %.0f frames",
+	      csv_field(csv, "\"skip.gba\",adaptive,all,", 28),
+	      csv_field(csv, "\"skip.gba\",adaptive,all,", 5));
 	/* avg_mA (column 16) of the 816 MHz row: 200 + 0.3 * 816. */
 	CHECK(fabs(csv_field(csv, ",adaptive,816000,", 16) - 445) < 2,
 	      "816 MHz battery current %.0f", csv_field(csv, ",adaptive,816000,",
 							16));
 	CHECK(csv_field(csv, ",max,1296000,", 5) >= 1800, "max mode row");
 	CHECK(csv_field(csv, ",fixed,816000,", 5) >= 1200, "fixed mode row");
+}
+
+/* Simulated frames of the 32768 Hz core audio, each flushed, as in game:
+ * the buffer status (core_run calls it with a core loaded), the lowest
+ * occupancy and the frames it said an underrun is likely. */
+static void fs_audio(int frames, unsigned *min_occ, int *low_frames)
+{
+	static int16_t silence[600 * 2];
+	double acc = 0;
+
+	*min_occ = 100;
+	*low_frames = 0;
+	for (int f = 0; f < frames; f++) {
+		unsigned occ;
+		int low, n;
+
+		if (audio_buffer_status(&occ, &low)) {
+			*min_occ = occ < *min_occ ? occ : *min_occ;
+			*low_frames += low;
+		}
+		acc += 32768 / 59.7275;
+		n = (int)acc;
+		acc -= n;
+		audio_push(silence, n);
+		audio_flush();
+	}
+}
+
+/* Frames of the loaded core, flushed; the frames it skipped. */
+static unsigned fs_run(int frames)
+{
+	unsigned run0, skip0, run1, skip1;
+
+	core_frame_counts(&run0, &skip0);
+	for (int f = 0; f < frames; f++) {
+		core_run(0);
+		audio_flush();
+	}
+	core_frame_counts(&run1, &skip1);
+	CHECK(run1 - run0 == (unsigned)frames, "frameskip: %u frames counted "
+	      "for %d", run1 - run0, frames);
+	return skip1 - skip0;
+}
+
+/*
+ * Frame skipping: the setting's keys and values per core, the audio
+ * buffer status on the simulated device, and through the stub core
+ * (which skips like gpSP, see stub_core.c): Auto skips only while the
+ * buffer runs low, a fixed interval set live skips exactly, Off none.
+ */
+static void test_frameskip(const char *base)
+{
+	static const struct {
+		int v;
+		const char *mode, *interval, *mgba;
+	} map[] = {
+		{ FRAMESKIP_OFF, "disabled", "1", "0" },
+		{ FRAMESKIP_AUTO, "auto_threshold", "1", "0" },
+		{ FRAMESKIP_1, "fixed_interval", "1", "1" },
+		{ FRAMESKIP_2, "fixed_interval", "2", "2" },
+		{ FRAMESKIP_3, "fixed_interval", "3", "3" },
+	};
+	const struct rom_settings keep = rom_settings;
+	const int *fs = &rom_settings.frameskip;
+	char rom[300], err[128];
+	unsigned occ, skipped;
+	int low;
+
+	for (size_t i = 0; i < ARRAY_SIZE(map); i++) {
+		const char *m, *n, *g;
+
+		rom_settings.frameskip = map[i].v;
+		m = core_option_value("gpsp_frameskip");
+		n = core_option_value("gpsp_frameskip_interval");
+		g = core_option_value("mgba_frameskip");
+		CHECK(m && n && g && !strcmp(m, map[i].mode) &&
+		      !strcmp(n, map[i].interval) && !strcmp(g, map[i].mgba),
+		      "frameskip %s: gpsp %s/%s, mgba %s", frameskip_names[map[i].v],
+		      m ? m : "-", n ? n : "-", g ? g : "-");
+	}
+	CHECK(!core_option_value("gpsp_frameskip_threshold"),
+	      "frameskip: gpSP's threshold left at its default");
+	CHECK(core_setting_supported(fs, CORE_GPSP, FRAMESKIP_AUTO) &&
+	      !core_setting_supported(fs, CORE_MGBA, FRAMESKIP_AUTO) &&
+	      core_setting_supported(fs, CORE_MGBA, FRAMESKIP_2) &&
+	      core_setting_supported(fs, CORE_MGBA, -1) &&
+	      !core_setting_supported(&rom_settings.blend, CORE_MGBA, -1) &&
+	      core_setting_supported(&rom_settings.blend, CORE_GPSP, 1) &&
+	      !core_setting_supported(&rom_settings.color, CORE_GPSP, -1),
+	      "frameskip: supported values per core");
+
+	/* The buffer status: none before the stream starts, the level near
+	 * the rate control's target (reads 50%) in steady play,
+	 * none after a pause; a device playing 30% fast drains it. */
+	settings.audio = AUDIO_ADAPTIVE;
+	audio_init_null(0);
+	audio_set_source(32768, 59.7275, 60.0186);
+	CHECK(!audio_buffer_status(&occ, &low) && occ == 0 && !low,
+	      "audio status before the stream");
+	fs_audio(600, &occ, &low);
+	CHECK(audio_buffer_status(&occ, &low), "audio status in play");
+	log_msg("selftest: audio buffer status in play: %u%%, low %d", occ, low);
+	CHECK(occ >= 45 && occ <= 55 && !low, "audio status in play: %u%% %d",
+	      occ, low);
+	audio_pause();
+	CHECK(!audio_buffer_status(&occ, &low), "audio status after a pause");
+	audio_init_null(0.3);
+	audio_set_source(32768, 59.7275, 60.0186);
+	fs_audio(600, &occ, &low);
+	log_msg("selftest: audio buffer status, device 30%% fast: lowest %u%%, "
+		"%d frames low", occ, low);
+	CHECK(occ < 20 && low > 0, "audio status draining: %u%%, %d low", occ,
+	      low);
+
+	/* Through the stub core as gpSP. */
+	snprintf(rom, sizeof(rom), "%s/fstest.gba", base);
+	write_text(rom, "not a real ROM, the stub does not care");
+	rom_settings = keep;
+	rom_settings.core = CORE_GPSP;
+	rom_settings.frameskip = FRAMESKIP_AUTO;
+	audio_init_null(0);
+	if (core_load(rom, CORE_GPSP, err, sizeof(err))) {
+		CHECK(0, "frameskip: %s", err);
+		rom_settings = keep;
+		return;
+	}
+	audio_set_source(core_info()->sample_rate, core_info()->fps, 60.0186);
+	skipped = fs_run(600);
+	CHECK(skipped == 0, "frameskip auto, steady audio: %u skipped", skipped);
+	audio_init_null(0.3);
+	audio_set_source(core_info()->sample_rate, core_info()->fps, 60.0186);
+	skipped = fs_run(600);
+	log_msg("selftest: frameskip auto, device 30%% fast: %u of 600 skipped",
+		skipped);
+	CHECK(skipped > 0 && skipped < 600,
+	      "frameskip auto, draining audio: %u skipped", skipped);
+	audio_init_null(0);
+	audio_set_source(core_info()->sample_rate, core_info()->fps, 60.0186);
+	rom_settings.frameskip = FRAMESKIP_2;
+	core_options_changed();
+	fs_run(1);  /* the stub reads the options after this run */
+	skipped = fs_run(300);
+	CHECK(skipped == 200, "frameskip 2 live: %u of 300 skipped", skipped);
+	rom_settings.frameskip = FRAMESKIP_OFF;
+	core_options_changed();
+	fs_run(1);
+	skipped = fs_run(300);
+	CHECK(skipped == 0, "frameskip off live: %u skipped", skipped);
+	/* With Off the stub removed the callback: a drained buffer does not
+	 * make it skip. */
+	audio_init_null(0.3);
+	audio_set_source(core_info()->sample_rate, core_info()->fps, 60.0186);
+	skipped = fs_run(300);
+	CHECK(skipped == 0, "frameskip off, draining audio: %u skipped",
+	      skipped);
+	core_unload();
+	audio_init_null(0);
+	rom_settings = keep;
 }
 
 /* The anti-aliased font: an 'H' on the selection bar has opaque stem
@@ -1743,18 +1963,24 @@ static void put_path(const char *base, const char *rel, const char *val)
 }
 
 /* Rows [y, y + FONT_H) from x match text drawn there on the background. */
-static int row_shows(const uint16_t *px, int x, int y, const char *text)
+static int row_shows_on(const uint16_t *px, int x, int y, const char *text,
+			uint16_t fg, uint16_t bg)
 {
 	static uint16_t ref[480 * 320];
 	struct canvas rc = { ref, 480, 320 };
 	int w = draw_text_width(text);
 
-	draw_fill(&rc, 0, 0, 480, 320, COL_BG);
-	draw_text(&rc, x, y, COL_FG, text);
+	draw_fill(&rc, 0, 0, 480, 320, bg);
+	draw_text(&rc, x, y, fg, text);
 	for (int r = y; r < y + FONT_H; r++)
 		if (memcmp(px + r * 480 + x, ref + r * 480 + x, w * 2))
 			return 0;
 	return 1;
+}
+
+static int row_shows(const uint16_t *px, int x, int y, const char *text)
+{
+	return row_shows_on(px, x, y, text, COL_FG, COL_BG);
 }
 
 /*
@@ -2066,18 +2292,49 @@ static void test_ui(const char *dir)
 	draw_page(&ingame_page, &cv, game);
 	snprintf(path, sizeof(path), "%s/ui-ingame.raw", dir);
 	write_file_atomic(path, px, sizeof(px));
-	/* With mGBA, Frame blend reads "gpSP only" and does not change. */
+	/* Frameskip (the 7th row): with mGBA, Auto is stepped over, and a
+	 * game set to Auto reads "Auto: gpSP only". */
 	rom_settings.core = CORE_MGBA;
 	for (int i = 0; i < 5; i++)
 		ig_key(JOY_BIT(DOWN));
 	ig_key(JOY_BIT(A));
+	CHECK(rom_settings.frameskip == FRAMESKIP_1,
+	      "frameskip with mGBA: off -> %d", rom_settings.frameskip);
+	ig_key(JOY_BIT(LEFT));
+	CHECK(rom_settings.frameskip == FRAMESKIP_OFF,
+	      "frameskip with mGBA: 1 -> %d", rom_settings.frameskip);
+	ig_key(JOY_BIT(LEFT));
+	CHECK(rom_settings.frameskip == FRAMESKIP_3,
+	      "frameskip with mGBA wraps: off -> %d", rom_settings.frameskip);
+	rom_settings.frameskip = FRAMESKIP_AUTO;
 	ig_key(JOY_BIT(RIGHT));
-	CHECK(rom_settings.blend == 0, "blend unchanged with mGBA");
+	CHECK(rom_settings.frameskip == FRAMESKIP_1,
+	      "frameskip with mGBA: auto -> %d", rom_settings.frameskip);
+	rom_settings.frameskip = FRAMESKIP_AUTO;
 	draw_page(&ingame_page, &cv, game);
 	snprintf(path, sizeof(path), "%s/ui-ingame-mgba.raw", dir);
 	write_file_atomic(path, px, sizeof(px));
+	CHECK(row_shows_on(px, IG_BOX_X + IG_BOX_W - FONT_W -
+			   draw_text_width("Auto: gpSP only"),
+			   IG_BOX_Y + IG_HEAD_H + 6 * IG_ROW_H, "Auto: gpSP only",
+			   COL_DIM, COL_SEL),
+	      "frameskip with mGBA: Auto reads gpSP only");
 	rom_settings.core = CORE_GPSP;
+	rom_settings.frameskip = FRAMESKIP_OFF;
 	ig_key(JOY_BIT(A));
+	CHECK(rom_settings.frameskip == FRAMESKIP_AUTO,
+	      "frameskip with gpSP: off -> %d", rom_settings.frameskip);
+	rom_settings.frameskip = FRAMESKIP_OFF;
+	/* Frame blend, the in-game settings' 2nd row: with mGBA it reads
+	 * "gpSP only" and does not change. */
+	rom_settings.core = CORE_MGBA;
+	game_settings_page.enter(NULL, 0);
+	st_key(JOY_BIT(DOWN));
+	st_key(JOY_BIT(A));
+	st_key(JOY_BIT(RIGHT));
+	CHECK(rom_settings.blend == 0, "blend unchanged with mGBA");
+	rom_settings.core = CORE_GPSP;
+	st_key(JOY_BIT(A));
 	CHECK(rom_settings.blend == 1, "blend toggled with gpSP");
 	rom_settings.blend = 0;
 
@@ -2107,10 +2364,10 @@ static void test_ui(const char *dir)
 	CHECK(st_key(JOY_BIT(A)) == UI_BACK,
 	      "settings: 9th row is Back");
 	game_settings_page.enter(NULL, 0);
-	for (int i = 0; i < 5; i++)
+	for (int i = 0; i < 6; i++)
 		st_key(JOY_BIT(DOWN));
 	CHECK(st_key(JOY_BIT(A)) == UI_BACK,
-	      "in-game settings: 6th row is Back");
+	      "in-game settings: 7th row is Back");
 
 	/* In game: a picture with detail, GBA colors and the grid. */
 	for (int y = 0; y < 160; y++)
@@ -2838,6 +3095,7 @@ int selftest(const char *dir)
 	test_sleep_sysfs(dir);
 	test_sdgrow(dir);
 	test_cpuctl(dir);
+	test_frameskip(dir);
 	test_font();
 	test_marquee();
 	test_ingame_restart(dir);
@@ -2883,6 +3141,42 @@ static void save_test_rom(const char *path)
 	rom[0xb2] = 0x96;
 	memcpy(rom + 0xc0, code, sizeof(code));
 	memcpy(rom + 0x800, "SRAM_V113", 9);
+	CHECK(write_file_atomic(path, rom, sizeof(rom)) == 0, "write %s", path);
+}
+
+/*
+ * A ROM whose picture changes every frame: display on with no layers (the
+ * backdrop, palette entry 0, everywhere), and at every vblank the
+ * backdrop color goes up by one. A frame the core draws differs from the
+ * one before.
+ */
+static void color_test_rom(const char *path)
+{
+	static const uint32_t code[] = {
+		0xe3a00301,  /* mov   r0, #0x04000000 */
+		0xe3a01000,  /* mov   r1, #0 */
+		0xe1c010b0,  /* strh  r1, [r0]          DISPCNT: mode 0 */
+		0xe3a02405,  /* mov   r2, #0x05000000   palette */
+		0xe3a03000,  /* mov   r3, #0 */
+		0xe1d040b6,  /* 1: ldrh r4, [r0, #6]    VCOUNT */
+		0xe35400a0,  /* cmp   r4, #160 */
+		0x0afffffc,  /* beq   1b */
+		0xe1d040b6,  /* 2: ldrh r4, [r0, #6] */
+		0xe35400a0,  /* cmp   r4, #160 */
+		0x1afffffc,  /* bne   2b */
+		0xe2833001,  /* add   r3, r3, #1 */
+		0xe1c230b0,  /* strh  r3, [r2] */
+		0xeafffff6,  /* b     1b */
+	};
+	static uint8_t rom[4096];
+	uint32_t b = 0xea00002e;  /* b 0xc0 */
+
+	memset(rom, 0, sizeof(rom));
+	memcpy(rom, &b, 4);
+	memcpy(rom + 0xa0, "COLORTEST", 9);
+	memcpy(rom + 0xac, "ZCLR", 4);
+	rom[0xb2] = 0x96;
+	memcpy(rom + 0xc0, code, sizeof(code));
 	CHECK(write_file_atomic(path, rom, sizeof(rom)) == 0, "write %s", path);
 }
 
@@ -2998,6 +3292,119 @@ static void blend_live(const char *rom)
 	run_frames(2);
 	core_unload();
 	rom_settings.blend = 0;
+}
+
+/* Frames skipped by the loaded core in the next n. */
+static unsigned skipped_in(long n)
+{
+	unsigned r0, s0, r1, s1;
+
+	core_frame_counts(&r0, &s0);
+	run_frames(n);
+	core_frame_counts(&r1, &s1);
+	return s1 - s0;
+}
+
+/*
+ * mGBA's skipped frames as core.c follows its counter, against what mGBA
+ * draws: with color_test_rom every drawn frame has a new backdrop color,
+ * a skipped one leaves the buffer as it was. Off first (every frame
+ * drawn: the ROM works), then 2 and 1 set live, frame by frame.
+ */
+static void mgba_skip_check(const char *data)
+{
+	static const int settings_seq[] = {
+		FRAMESKIP_OFF, FRAMESKIP_2, FRAMESKIP_1, FRAMESKIP_3,
+	};
+	char rom[300], err[128];
+	uint16_t prev = 0;
+	int w, h, p, mismatch = 0, drawn_off = 0;
+
+	snprintf(rom, sizeof(rom), "%s/colortest.gba", data);
+	color_test_rom(rom);
+	rom_settings.frameskip = FRAMESKIP_OFF;
+	if (core_load(rom, CORE_MGBA, err, sizeof(err))) {
+		CHECK(0, "mgba skip check: %s", err);
+		return;
+	}
+	audio_set_source(core_info()->sample_rate, core_info()->fps, 60.0186);
+	run_frames(5);
+	for (size_t k = 0; k < ARRAY_SIZE(settings_seq); k++) {
+		rom_settings.frameskip = settings_seq[k];
+		core_options_changed();
+		for (int i = 0; i < 40; i++) {
+			int skipped = core_run(0);
+			const uint16_t *f = core_frame(&w, &h, &p);
+			int drawn = f && f[p * 80 + 120] != prev;
+
+			audio_flush();
+			if (f)
+				prev = f[p * 80 + 120];
+			mismatch += i > 0 && drawn == skipped;
+			drawn_off += k == 0 && drawn;
+		}
+	}
+	core_unload();
+	CHECK(drawn_off == 40, "mgba skip check: %d of 40 drawn with Off",
+	      drawn_off);
+	CHECK(mismatch == 0, "mgba skip check: %d frames counted wrong",
+	      mismatch);
+	log_msg("core switch: mgba skip check: %d of 40 drawn with off, %d "
+		"frames counted wrong", drawn_off, mismatch);
+	rom_settings.frameskip = FRAMESKIP_OFF;
+}
+
+/*
+ * Frame skipping switched in game with the real cores: a fixed interval
+ * of 2 skips two of every three frames (NULL frames from gpSP, mGBA's
+ * counter followed, see mgba_skip_check), and Off stops it; Auto skips
+ * with gpSP while the audio buffer drains (a simulated device playing
+ * 30% fast), and is not in mGBA.
+ */
+static void frameskip_live(const char *rom)
+{
+	static const int cores[] = { CORE_GPSP, CORE_MGBA };
+	char err[128];
+	unsigned n;
+
+	for (size_t i = 0; i < ARRAY_SIZE(cores); i++) {
+		const char *name = core_names[cores[i]];
+
+		rom_settings.frameskip = FRAMESKIP_OFF;
+		audio_init_null(0.001);
+		if (core_load(rom, cores[i], err, sizeof(err))) {
+			CHECK(0, "frameskip: %s: %s", name, err);
+			continue;
+		}
+		audio_set_source(core_info()->sample_rate, core_info()->fps,
+				 60.0186);
+		n = skipped_in(10);
+		CHECK(n == 0, "frameskip %s off: %u skipped", name, n);
+		rom_settings.frameskip = FRAMESKIP_2;
+		core_options_changed();
+		run_frames(3);  /* read after the next run, then a cycle */
+		n = skipped_in(30);
+		CHECK(n == 20, "frameskip %s 2: %u of 30 skipped", name, n);
+		rom_settings.frameskip = FRAMESKIP_OFF;
+		core_options_changed();
+		run_frames(3);
+		n = skipped_in(30);
+		CHECK(n == 0, "frameskip %s back off: %u skipped", name, n);
+		rom_settings.frameskip = FRAMESKIP_AUTO;
+		core_options_changed();
+		audio_init_null(0.3);
+		audio_set_source(core_info()->sample_rate, core_info()->fps,
+				 60.0186);
+		n = skipped_in(300);
+		log_msg("core switch: %s frameskip auto, audio draining: %u of 300 "
+			"skipped", name, n);
+		CHECK(cores[i] == CORE_GPSP ? n > 0 : n == 0,
+		      "frameskip %s auto: %u skipped", name, n);
+		core_unload();
+		log_msg("core switch: %s frameskip done", name);
+	}
+	rom_settings.frameskip = FRAMESKIP_OFF;
+	audio_init_null(0.001);
 }
 
 /*
@@ -3171,8 +3578,9 @@ static void state_other_core(const char *data, long frames)
 /*
  * mGBA -> gpSP -> mGBA in one process on the same .sav, then a RetroArch
  * .srm picked up by gpSP when there is no .sav (and left untouched), a
- * reset in each core on that save, then frame blending switched live,
- * the in-game menu's Restart with, and the resume states with each core.
+ * reset in each core on that save, then frame blending and frame
+ * skipping switched live, the in-game menu's Restart with, and the resume
+ * states with each core.
  */
 int selftest_core_switch(const char *data, long frames)
 {
@@ -3202,6 +3610,8 @@ int selftest_core_switch(const char *data, long frames)
 	reset_round(rom, sav, CORE_GPSP, 5, frames);
 	reset_round(rom, sav, CORE_MGBA, 7, frames);
 	blend_live(rom);
+	frameskip_live(rom);
+	mgba_skip_check(data);
 	menu_restart_with(rom);
 	state_rounds(data, CORE_GPSP, frames);
 	state_rounds(data, CORE_MGBA, frames);

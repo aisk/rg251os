@@ -4,11 +4,17 @@
  * like mGBA's, and a 32KiB "SRAM" that counts A presses so the save path
  * can be exercised. Buttons are drawn as boxes at the bottom. Its save
  * state is the frame counter and the tone's phase (not the SRAM, like
- * the real cores' loads).
+ * the real cores' loads). Frame skipping as gpSP does it, from gpSP's
+ * keys (gpsp_frameskip, _threshold, _interval, read at load and after a
+ * GET_VARIABLE_UPDATE): auto_threshold registers the audio buffer status
+ * callback and skips while the occupancy is under the threshold (at most
+ * 30 in a row), fixed_interval skips that many frames after each drawn
+ * one; a skipped frame is not drawn and goes to video_refresh as NULL.
  */
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "libretro.h"
@@ -29,6 +35,60 @@ static uint8_t sram[32768];
 static unsigned frame;
 static double audio_acc, phase;
 static int prev_a;
+
+/* Frame skipping, as in gpSP. */
+enum { SKIP_OFF, SKIP_AUTO, SKIP_FIXED };
+static int skip_mode, skip_threshold, skip_interval, skip_count;
+static bool buf_active;
+static unsigned buf_occupancy;
+
+static void buffer_status(bool active, unsigned occupancy, bool underrun)
+{
+	(void)underrun;
+	buf_active = active;
+	buf_occupancy = occupancy;
+}
+
+static const char *variable(const char *key)
+{
+	struct retro_variable v = { key, NULL };
+
+	return env_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &v) ? v.value : NULL;
+}
+
+static void read_options(void)
+{
+	const char *m = variable("gpsp_frameskip");
+	const char *t = variable("gpsp_frameskip_threshold");
+	const char *i = variable("gpsp_frameskip_interval");
+	int prev = skip_mode;
+
+	skip_mode = !m ? SKIP_OFF : !strcmp(m, "auto_threshold") ? SKIP_AUTO :
+		    !strcmp(m, "fixed_interval") ? SKIP_FIXED : SKIP_OFF;
+	skip_threshold = t ? atoi(t) : 33;
+	skip_interval = i ? atoi(i) : 1;
+	if (skip_mode != prev) {
+		struct retro_audio_buffer_status_callback cb = { buffer_status };
+
+		env_cb(RETRO_ENVIRONMENT_SET_AUDIO_BUFFER_STATUS_CALLBACK,
+		       skip_mode == SKIP_AUTO ? &cb : NULL);
+		buf_active = false;
+		skip_count = 0;
+	}
+}
+
+static int skip_frame(void)
+{
+	int skip = 0;
+
+	if (skip_mode == SKIP_AUTO)
+		skip = buf_active && buf_occupancy < (unsigned)skip_threshold &&
+		       skip_count < 30;
+	else if (skip_mode == SKIP_FIXED)
+		skip = skip_count < skip_interval;
+	skip_count = skip ? skip_count + 1 : 0;
+	return skip;
+}
 
 void retro_set_environment(retro_environment_t cb) { env_cb = cb; }
 void retro_set_video_refresh(retro_video_refresh_t cb) { video_cb = cb; }
@@ -71,6 +131,8 @@ bool retro_load_game(const struct retro_game_info *game)
 	frame = 0;
 	audio_acc = phase = 0;
 	memset(sram, 0xff, sizeof(sram));
+	skip_mode = SKIP_OFF;
+	read_options();
 	return game && game->size > 0;
 }
 
@@ -92,11 +154,14 @@ void retro_run(void)
 	static int16_t audio[2048];
 	int16_t pad;
 	unsigned n;
+	bool updated = false;
+	int skip;
 
 	poll_cb();
 	pad = state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_MASK);
+	skip = skip_frame();
 
-	for (int y = 0; y < H; y++)
+	for (int y = 0; y < H && !skip; y++)
 		for (int x = 0; x < W; x++) {
 			unsigned v = (x + frame) & 0xff;
 
@@ -104,11 +169,11 @@ void retro_run(void)
 						   ((x ^ y) & 0x1f));
 		}
 	/* Orientation: white top-left, red bottom-right. */
-	for (int i = 0; i < 8; i++) {
+	for (int i = 0; i < 8 && !skip; i++) {
 		fb[i] = fb[i * W] = 0xffff;
 		fb[(H - 1) * W + W - 1 - i] = fb[(H - 1 - i) * W + W - 1] = 0xf800;
 	}
-	for (int b = 0; b < 12; b++)
+	for (int b = 0; b < 12 && !skip; b++)
 		for (int y = H - 12; y < H - 4; y++)
 			for (int x = 8 + b * 12; x < 16 + b * 12; x++)
 				fb[y * W + x] = (pad >> b) & 1 ? 0xffff : 0x0000;
@@ -119,7 +184,7 @@ void retro_run(void)
 	}
 	prev_a = pad & (1 << RETRO_DEVICE_ID_JOYPAD_A);
 
-	video_cb(fb, W, H, W * 2);
+	video_cb(skip ? NULL : fb, W, H, W * 2);
 
 	audio_acc += RATE / FPS;
 	n = (unsigned)audio_acc;
@@ -134,6 +199,8 @@ void retro_run(void)
 	}
 	batch_cb(audio, n);
 	frame++;
+	if (env_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
+		read_options();
 }
 
 void *retro_get_memory_data(unsigned id)

@@ -63,6 +63,15 @@
  * Missed vblanks are reported by the flip event of the next frame, so a
  * miss is attributed to the previous frame's work and OPP.
  *
+ * Frames the core skipped (frameskip, core.c) cost a fraction of a
+ * rendered one and say nothing about the clock the game needs: judged
+ * like the others, a game skipping every other frame would step down
+ * until the rendered frames miss, skip more and step down again. So
+ * they never enter the window, the step up count or the work
+ * statistics; they still count as game time and frames, and their
+ * misses still jump (a miss is judged by the work of the frame before
+ * it, which is small for a skipped one, so that is rare).
+ *
  * Learning: on game end the lowest OPP that ran at least LEARN_MIN_S with
  * at most 0.1% CPU misses and at most one step up per minute is stored as
  * cpu_start in the ROM's settings file; the next session starts there. If
@@ -70,7 +79,8 @@
  * top next time).
  *
  * Statistics: per (adaptive or pinned, OPP): frames, game seconds, work
- * avg/p50/p99/max (0.1 ms histogram), missed vblanks (and CPU ones),
+ * avg/p50/p99/max of the rendered frames (0.1 ms histogram), frames
+ * skipped, missed vblanks (and CPU ones),
  * audio underruns, battery current and voltage, backlight. Battery
  * samples (battery.c polls every 5 s; the RK817 driver itself refreshes
  * every 8 s) are attributed to the OPP that had at least BAT_MAJORITY of
@@ -147,7 +157,7 @@ struct fe_sched_attr {
 };
 
 struct opp_acc {
-	uint64_t frames;
+	uint64_t frames, skipped;  /* frames: all, rendered and skipped */
 	double seconds, work_sum, bl_sum;
 	float work_max;
 	unsigned missed, missed_cpu, underruns, entered, left_up;
@@ -520,9 +530,10 @@ static void window_stats(struct wstats *w)
 
 static float hist_pct(const struct opp_acc *a, double q)
 {
-	uint64_t need = (uint64_t)ceil(a->frames * q), cum = 0;
+	uint64_t rendered = a->frames - a->skipped;
+	uint64_t need = (uint64_t)ceil(rendered * q), cum = 0;
 
-	if (!a->frames)
+	if (!rendered)
 		return 0;
 	if (need < 1)
 		need = 1;
@@ -540,6 +551,7 @@ static float hist_pct(const struct opp_acc *a, double q)
 static void acc_add(struct opp_acc *t, const struct opp_acc *a)
 {
 	t->frames += a->frames;
+	t->skipped += a->skipped;
 	t->seconds += a->seconds;
 	t->work_sum += a->work_sum;
 	t->bl_sum += a->bl_sum;
@@ -631,7 +643,8 @@ static void change_opp(int to, const char *reason, const char *extra,
 	apply();
 }
 
-static void control(float ms, unsigned missed, int cpu_miss, int64_t now)
+static void control(float ms, unsigned missed, int cpu_miss, int skipped,
+		    int64_t now)
 {
 	double p = c.s.period_ms;
 	struct wstats w;
@@ -656,6 +669,9 @@ static void control(float ms, unsigned missed, int cpu_miss, int64_t now)
 		}
 		c.s.win_missed += missed;
 	}
+	/* Not a sample of the load (see the top of this file). */
+	if (skipped)
+		return;
 	if (c.s.settle > 0) {
 		c.s.settle--;
 		return;
@@ -683,7 +699,8 @@ static void control(float ms, unsigned missed, int cpu_miss, int64_t now)
 	window_reset();
 }
 
-void cpuctl_game_frame(int64_t work_ns, unsigned missed, int64_t now)
+void cpuctl_game_frame(int64_t work_ns, unsigned missed, int skipped,
+		       int64_t now)
 {
 	const struct battery *b = battery_get();
 	struct opp_acc *a;
@@ -704,11 +721,15 @@ void cpuctl_game_frame(int64_t work_ns, unsigned missed, int64_t now)
 	a = &c.s.acc[c.s.cls][c.s.opp];
 	a->frames++;
 	a->seconds += dts;
-	a->work_sum += ms;
-	if (ms > a->work_max)
-		a->work_max = ms;
-	bin = (int)(ms / HIST_BIN_MS);
-	a->hist[bin < 0 ? 0 : bin >= HIST_BINS ? HIST_BINS - 1 : bin]++;
+	if (skipped) {
+		a->skipped++;
+	} else {
+		a->work_sum += ms;
+		if (ms > a->work_max)
+			a->work_max = ms;
+		bin = (int)(ms / HIST_BIN_MS);
+		a->hist[bin < 0 ? 0 : bin >= HIST_BINS ? HIST_BINS - 1 : bin]++;
+	}
 	a->bl_sum += settings.brightness * dts;
 	x = audio_xruns_total();
 	a->underruns += x - c.s.xruns_seen;
@@ -735,7 +756,7 @@ void cpuctl_game_frame(int64_t work_ns, unsigned missed, int64_t now)
 			c.khz[c.s.opp], opp_util(c.s.opp), act_names[c.act],
 			cpu_freq_khz());
 	if (c.mode == CPU_MODE_ADAPTIVE && c.n > 1)
-		control(ms, missed, cpu_miss, now);
+		control(ms, missed, cpu_miss, skipped, now);
 }
 
 /* --------------------------------------------------------------- session */
@@ -885,7 +906,7 @@ static const char csv_header[] =
 	"work_p99_ms,work_max_ms,missed,missed_cpu,underruns,changes,"
 	"bat_samples,avg_mA,avg_mV,avg_mW,backlight_pct,grid,grid_dim,"
 	"grid_boost,color,kernel_s,kernel_trans,start_mhz,learned_mhz,"
-	"audio_mode,audio_config,audio_measured_hz,audio_fill_min,"
+	"skipped,audio_mode,audio_config,audio_measured_hz,audio_fill_min,"
 	"audio_fill_max\n";
 
 /* One CSV row and one log line. opp < 0: summary of a class. */
@@ -895,7 +916,8 @@ static size_t emit(char *buf, size_t size, const char *when, const char *qrom,
 {
 	const char *mode = cls == CLS_ADAPTIVE ? "adaptive" :
 			   opp < 0 ? "pinned" : opp == c.top ? "max" : "fixed";
-	double avg = a->frames ? a->work_sum / a->frames : 0;
+	uint64_t rendered = a->frames - a->skipped;
+	double avg = rendered ? a->work_sum / rendered : 0;
 	float p50 = hist_pct(a, 0.5), p99 = hist_pct(a, 0.99);
 	char oppk[16], bat[80] = "", batl[80] = "no samples", ks[24] = "",
 	     kt[24] = "", st[16] = "", le[16] = "", au[160];
@@ -926,18 +948,21 @@ static size_t emit(char *buf, size_t size, const char *when, const char *qrom,
 		snprintf(le, sizeof(le), "%d", learned);
 	}
 	n = snprintf(buf, size, "%s,%.1f,%s,%s,%s,%llu,%.1f,%.2f,%.2f,%.2f,%.2f,"
-		     "%u,%u,%u,%u,%u,%s,%.0f,%d,%d,%d,%s,%s,%s,%s,%s,%s\n", when,
+		     "%u,%u,%u,%u,%u,%s,%.0f,%d,%d,%d,%s,%s,%s,%s,%s,%llu,%s\n",
+		     when,
 		     boot_ms() / 1000.0, qrom, mode, oppk,
 		     (unsigned long long)a->frames, a->seconds, avg, p50, p99,
 		     a->work_max, a->missed, a->missed_cpu, a->underruns,
 		     opp < 0 ? c.s.changes : a->entered, a->bat_n, bat,
 		     a->seconds > 0 ? a->bl_sum / a->seconds : settings.brightness,
 		     settings.grid, settings.grid_dim, settings.grid_boost,
-		     color_mode_names[rom_settings_color()], ks, kt, st, le, au);
-	log_msg("perf summary: %s %s: %llu frames %.1f s, work avg/p50/p99/max "
-		"%.2f/%.2f/%.2f/%.2f ms, missed %u (cpu %u), underruns %u, "
-		"%s %u, bat %s, backlight %.0f%%", mode, oppk,
-		(unsigned long long)a->frames, a->seconds, avg, p50, p99,
+		     color_mode_names[rom_settings_color()], ks, kt, st, le,
+		     (unsigned long long)a->skipped, au);
+	log_msg("perf summary: %s %s: %llu frames (%llu skipped) %.1f s, work "
+		"avg/p50/p99/max %.2f/%.2f/%.2f/%.2f ms, missed %u (cpu %u), "
+		"underruns %u, %s %u, bat %s, backlight %.0f%%", mode, oppk,
+		(unsigned long long)a->frames, (unsigned long long)a->skipped,
+		a->seconds, avg, p50, p99,
 		a->work_max, a->missed, a->missed_cpu, a->underruns,
 		opp < 0 ? "changes" : "entered", opp < 0 ? c.s.changes : a->entered,
 		batl, a->seconds > 0 ? a->bl_sum / a->seconds : settings.brightness);
@@ -1014,9 +1039,12 @@ int cpuctl_game_end(void)
 	timestamp(when, sizeof(when));
 	csv_quote(qrom, sizeof(qrom), c.s.rom);
 	log_msg("perf summary: %s, %s, grid %s dim %d%% boost %d%%, color %s, "
-		"start %d MHz, learned %d MHz", c.s.rom, when,
+		"frameskip %s, start %d MHz, learned %d MHz", c.s.rom, when,
 		settings.grid ? "on" : "off", settings.grid_dim,
 		settings.grid_boost, color_mode_names[rom_settings_color()],
+		frameskip_names[rom_settings.frameskip >= 0 &&
+				rom_settings.frameskip < FRAMESKIP_COUNT ?
+				rom_settings.frameskip : 0],
 		c.s.start_mhz, learned);
 	for (int k = 0; k < CLS_COUNT; k++) {
 		int used = 0;
@@ -1064,13 +1092,15 @@ void cpuctl_format(char *buf, int size)
 
 void cpuctl_counters(struct cpuctl_counters *k)
 {
-	unsigned missed = 0, cpu = 0;
+	unsigned missed = 0, cpu = 0, skipped = 0;
 
 	for (int j = 0; j < CLS_COUNT; j++)
 		for (int i = 0; i < c.n; i++) {
 			missed += c.s.acc[j][i].missed;
 			cpu += c.s.acc[j][i].missed_cpu;
+			skipped += (unsigned)c.s.acc[j][i].skipped;
 		}
+	k->skipped = skipped;
 	k->changes = c.s.changes;
 	k->ups = c.s.ups;
 	k->downs = c.s.downs;

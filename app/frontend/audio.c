@@ -49,6 +49,20 @@
  * mixer controls, the ALSA hw/sw params and status (once per boot, 3 s
  * into a game) are logged and ALSA's xrun_debug reports to dmesg.
  *
+ * Buffer status for a core's frame skipping (audio_buffer_status, the
+ * libretro audio buffer status callback, see core.c): the frames queued
+ * in the device right before retro_run. That is about the lowest point
+ * of the cycle (the device has drained through the vblank wait, this
+ * frame's audio is written after the run), so it is what an underrun
+ * would come from. It is given in percent of twice the target fill, so
+ * the fill the rate control aims for reads 50%, as with RetroArch's rate
+ * control, which the cores' thresholds are made for (gpSP skips under
+ * 33%: two thirds of the target, about 23 ms here). In percent of the
+ * whole buffer the target is 40% in adaptive mode, and a little drift
+ * puts the fill under 33% for good (0.1% drift does in the headless
+ * test). Less than one video frame of audio left means the device runs
+ * dry before the next write: underrun likely.
+ *
  * A simulated device (audio_init_null) consumes a configurable rate per
  * video frame, for the selftest and headless runs.
  */
@@ -101,6 +115,7 @@ static struct {
 	int mixer_dumped, kernel_dumped;
 
 	double base_step, adj, fill_ema;
+	double frame_out;   /* device frames per video frame */
 	struct resampler rs;
 	int16_t out[OUT_MAX * 2];
 	size_t out_n;
@@ -646,6 +661,7 @@ void audio_set_source(double in_rate, double core_fps, double display_hz)
 	rs_init(&a.rs, a.base_step);
 	a.out_n = 0;
 	a.started = 0;
+	a.frame_out = a.rate / display_hz;
 	if (a.null_dev)
 		a.null_consume = a.rate * a.null_ratio / display_hz;
 	log_msg("audio: source %.0f Hz at %.4f fps, display %.4f Hz, %s mode, "
@@ -663,6 +679,31 @@ void audio_push(const int16_t *samples, size_t frames)
 		a.out_n += rs_process(&a.rs, samples, frames, a.out + 2 * a.out_n,
 				      OUT_MAX - a.out_n);
 	a.time_ns += now_ns() - t0;
+}
+
+int audio_buffer_status(unsigned *occupancy, int *underrun_likely)
+{
+	long fill;
+
+	*occupancy = 0;
+	*underrun_likely = 0;
+	if (!dev_ready() || a.base_step <= 0 || !a.started || !a.target)
+		return 0;
+	if (a.null_dev) {
+		/* Simulated time stands still between flushes: take off what
+		 * the device plays until the next write, like the vblank wait
+		 * does on the device. */
+		fill = (long)(a.null_running ? a.null_fill - a.null_consume :
+			      a.null_fill);
+	} else {
+		fill = dev_delay();
+	}
+	if (fill < 0)
+		fill = 0;  /* an underrun (EPIPE), or drained in the simulation */
+	*occupancy = (unsigned)(fill >= 2 * (long)a.target ? 100 :
+				fill * 50 / a.target);
+	*underrun_likely = fill < a.frame_out;
+	return 1;
 }
 
 /*

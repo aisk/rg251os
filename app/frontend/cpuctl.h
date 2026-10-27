@@ -28,13 +28,15 @@ int cpuctl_mode_step(int mode, int d);
 void cpuctl_mode_label(int mode, char *buf, size_t size);
 
 /* A game session: start (start_mhz: learned start OPP, 0 for the top),
- * pause/resume around menus, one call per game frame with its work time
- * and the vblanks missed since the previous call, end. */
+ * pause/resume around menus, one call per game frame with its work time,
+ * the vblanks missed since the previous call and whether the core skipped
+ * it (frameskip: counted, not judged), end. */
 void cpuctl_game_start(const char *rom_name, double refresh_hz, int start_mhz,
 		       int64_t now);
 void cpuctl_game_pause(void);
 void cpuctl_game_resume(void);
-void cpuctl_game_frame(int64_t work_ns, unsigned missed, int64_t now);
+void cpuctl_game_frame(int64_t work_ns, unsigned missed, int skipped,
+		       int64_t now);
 /* Logs the summary and appends to <data>/log/perf.csv; returns the start
  * OPP in MHz to remember for this ROM (0: the top). */
 int cpuctl_game_end(void);
@@ -49,6 +51,7 @@ void cpuctl_format(char *buf, int size);
 struct cpuctl_counters {
 	unsigned changes, ups, downs, jumps;
 	unsigned missed, missed_cpu;
+	unsigned skipped;  /* frames skipped by the core */
 	int64_t hold_ns;  /* current hold after a step up */
 };
 void cpuctl_counters(struct cpuctl_counters *k);

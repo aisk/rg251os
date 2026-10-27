@@ -24,16 +24,23 @@ const struct core_info *core_info(void);
  * file, then retro_reset: the game starts over like after the console's
  * reset, with its save RAM kept. */
 void core_reset(void);
-/* One retro_run with the given joypad bitmask. */
-void core_run(uint32_t buttons);
+/* One retro_run with the given joypad bitmask (the core's audio buffer
+ * status callback, if any, first); 1 if the core skipped the frame (no
+ * new picture, see core.c). */
+int core_run(uint32_t buttons);
+/* Frames run and skipped since the game was loaded. */
+void core_frame_counts(unsigned *frames, unsigned *skipped);
 /* A setting behind a core option changed (core.c, rom_options[]): one
  * the running core takes live is read again after the next retro_run,
  * the others wait for the next start or are kept for the other core;
  * each logged. */
 void core_options_changed(void);
-/* The core (enum core_id) that has this core option of the game's
- * settings, -1 for none. */
-int core_option_core(const char *key);
+/* Whether the core (enum core_id) has the game setting at field (a
+ * member of rom_settings behind core options, core.c's rom_options[])
+ * with value v, or at all for v < 0. */
+int core_setting_supported(const int *field, int core, int v);
+/* What a core gets for an option key now, NULL: the core's default. */
+const char *core_option_value(const char *key);
 /* Last video frame (RGB565), or NULL before the first one. */
 const uint16_t *core_frame(int *w, int *h, int *pitch_px);
 

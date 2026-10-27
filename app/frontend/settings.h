@@ -31,6 +31,19 @@ enum core_id {
 extern const char *const core_names[CORE_COUNT];   /* in files */
 extern const char *const core_labels[CORE_COUNT];  /* in menus */
 
+/* rom_settings.frameskip: Auto skips a frame when the audio buffer runs
+ * low (gpSP only), N renders one frame and skips the next N (core.c). */
+enum frameskip {
+	FRAMESKIP_OFF,
+	FRAMESKIP_AUTO,
+	FRAMESKIP_1,
+	FRAMESKIP_2,
+	FRAMESKIP_3,
+	FRAMESKIP_COUNT
+};
+extern const char *const frameskip_names[FRAMESKIP_COUNT];   /* in files */
+extern const char *const frameskip_labels[FRAMESKIP_COUNT];  /* in menus */
+
 /* settings.audio (see audio.c) */
 #define AUDIO_SIMPLE 0    /* blocking writes, fixed resampling ratio */
 #define AUDIO_ADAPTIVE 1  /* nonblocking writes, rate control */
@@ -60,6 +73,7 @@ struct rom_settings {
 	int cpu_start;   /* learned start OPP in MHz, 0: the top */
 	int core;        /* enum core_id, used when the game starts */
 	int blend;       /* gpSP frame blending (core.c), mGBA ignores it */
+	int frameskip;   /* enum frameskip (core.c), off by default */
 };
 extern struct settings settings;
 extern struct rom_settings rom_settings;  /* for the running game */
