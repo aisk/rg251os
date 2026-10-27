@@ -9,8 +9,11 @@
  * Startup: proc/sys/dev mounts, the first boot's partition grow
  * (sdgrow.c, with its messages on screen), the GBA partition mounted and
  * a new log/boot-NNNN/ opened, settings loaded, then backlight, CPU
- * control, battery, display, input and audio; the ROM list once that is
- * done. The main loop is driven by page flip events: whenever the
+ * control, battery, display, input and audio; then the ROM list, or the
+ * game that was running at the last power off (resume_boot, see
+ * resume.c: started like from the list, with the list set to that ROM
+ * underneath; holding B skips it, for which it waits up to 1.5 s for the
+ * gamepad). The main loop is driven by page flip events: whenever the
  * previous frame is on screen, the page stack runs (frame()); in game that
  * is one retro_run with the frame scaled 2x and rotated straight into the
  * back buffer, so emulation runs at the panel's 60.02 Hz and audio is
@@ -28,6 +31,8 @@
  * list, Restart with another core or power off: its save and resume state
  * are written (core_state_save) before the core is unloaded; Restart game
  * resets the core in the same session; a fatal error writes no state.
+ * Powering off in game also writes the resume record (poweroff_end_game);
+ * the other ends remove it.
  *
  * Power key (timing in input.c): a short press sleeps (do_sleep: game
  * paused, save and state written, audio closed (reopened on wake but
@@ -64,7 +69,8 @@
  *                                      sound device, DATA as GBA partition
  *                                      (core from DATA's ROM settings),
  *                                      resuming and writing the state like
- *                                      a start and a quit
+ *                                      a start and a quit; ROM "resume":
+ *                                      the game resumed on boot, if any
  *   frontend --core-switch DATA N      mGBA, gpSP, mGBA on one save in one
  *                                      process, N frames each, then the
  *                                      resume states with both cores
@@ -93,6 +99,7 @@
 #include "input.h"
 #include "menu.h"
 #include "perf.h"
+#include "resume.h"
 #include "romdb.h"
 #include "sdgrow.h"
 #include "settings.h"
@@ -110,11 +117,15 @@
 /* Frames the panel takes to show the first frame after a wake (boot-0015:
  * 340 ms), for the headless sleep test. */
 #define HEADLESS_WAKE_FLIP_FRAMES 20
+/* Resume on boot: how long to wait for the gamepad (B skips the resume),
+ * and for its first report once it is up. */
+#define RESUME_PAD_WAIT_NS 1500000000LL
+#define RESUME_PAD_SETTLE_NS 100000000LL
 
 int selftest(const char *dir);
 int selftest_core_switch(const char *data, long frames);
 
-static const struct page game_page, fatal_page, poweroff_page;
+static const struct page game_page, fatal_page, poweroff_page, boot_page;
 
 static struct {
 	uint16_t canvas_px[CANVAS_W * CANVAS_H];
@@ -125,6 +136,10 @@ static struct {
 	int led_green, led_red;
 	int dumped5, dumped20;
 	int64_t poweroff_at;
+	char poweroff_why[48];
+	int64_t start_ms;      /* CLOCK_BOOTTIME when the frontend started */
+	int resume_armed;      /* resumed on boot: the record goes after 5 s */
+	int resume_shown;      /* resumed on boot: log the first frame shown */
 	int64_t next_rescan, next_drm_try, next_blink, next_perf;
 	int blink;
 	char fatal_title[64], fatal_msg[256];
@@ -174,6 +189,7 @@ static void request_poweroff(const char *why)
 	if (m.poweroff_at)
 		return;
 	log_msg("power off: %s", why);
+	snprintf(m.poweroff_why, sizeof(m.poweroff_why), "%s", why);
 	ui_reset(&poweroff_page, now_ns());
 	/* Leave time for one frame with the message. */
 	m.poweroff_at = now_ns() + 150000000LL;
@@ -255,18 +271,71 @@ static void game_end_logs(const char *why)
 	klog_dump(name);
 }
 
-/* Stop the game if one runs: logs, save and resume state written (not
- * after a fatal error), core unloaded, game statistics out and the
- * learned start OPP into the ROM settings. */
-static void end_game(const char *why)
+/*
+ * Stop the game if one runs: logs, save and resume state written (not
+ * after a fatal error, nor when resuming on boot failed, which leaves the
+ * state as it was), core unloaded, game statistics out and the learned
+ * start OPP into the ROM settings. Returns 0 when the state was written.
+ * The resume record (resume.c) goes with every end but a fatal error
+ * (where it guards against resuming into the crash again) and power off
+ * (poweroff_end_game writes it).
+ */
+static int end_game(const char *why)
 {
+	int failed = !strcmp(why, "resume failed"), ret = -1;
+
 	game_end_logs(why);
 	audio_pause();
-	if (core_loaded() && strcmp(why, "fatal"))
-		core_state_save(why);
+	if (core_loaded() && strcmp(why, "fatal") && !failed)
+		ret = core_state_save(why);
 	core_unload();
-	if (cpuctl_in_game())
-		rom_settings.cpu_start = cpuctl_game_end();
+	if (cpuctl_in_game()) {
+		int mhz = cpuctl_game_end();
+
+		if (!failed)
+			rom_settings.cpu_start = mhz;
+	}
+	m.resume_armed = 0;
+	if (strcmp(why, "fatal") && strcmp(why, "power off"))
+		resume_clear(why);
+	return ret;
+}
+
+/* Power off: the game ended, and if one ran and its state was written,
+ * the record that resumes it on the next boot. */
+static void poweroff_end_game(void)
+{
+	struct resume_rec r = { .core = 0 };
+	int in_game = core_loaded(), rel = -1, st;
+
+	if (in_game) {
+		r.core = core_info()->core;
+		rel = resume_rom_rel(m.rom_path, r.rom, sizeof(r.rom));
+	}
+	st = end_game("power off");
+	if (!in_game) {
+		resume_clear("power off outside a game");
+		return;
+	}
+	if (st || rel) {
+		log_msg("resume: not set for the next boot: %s", st ?
+			"the state was not written" : "the ROM is not under roms/");
+		resume_clear("power off without a state");
+		return;
+	}
+	snprintf(r.why, sizeof(r.why), "%s", m.poweroff_why);
+	if (!resume_write(&r))
+		log_msg("resume: record written, the next boot resumes %s with %s "
+			"(power off: %s)", r.rom, core_names[r.core], r.why);
+}
+
+/* Resumed on boot: once the game ran RESUME_OK_S, the record goes. */
+static void resume_tick(uint64_t frames)
+{
+	if (m.resume_armed && frames >= RESUME_OK_S * 60) {
+		m.resume_armed = 0;
+		resume_clear("the resumed game ran 5 s");
+	}
 }
 
 static void fatal(const char *title, const char *msg)
@@ -285,7 +354,7 @@ static void do_poweroff(void)
 {
 	menu_stats(now_ns(), "power off");
 	led_set_red(1);
-	end_game("power off");
+	poweroff_end_game();
 	save_settings();
 	/* The save child is done (core_unload), others may still run. */
 	sys_wait_children(3000);
@@ -410,6 +479,8 @@ static void reset_game(void)
 	log_msg("restart: %s from the beginning (%s), same session",
 		m.rom_name, core_labels[core_info()->core]);
 	core_reset();
+	m.resume_armed = 0;
+	resume_clear("restart game");
 	ui_to_game();
 	resume_game();
 	log_sync();
@@ -665,7 +736,8 @@ static struct ui_result game_update(uint32_t held, int64_t now)
 		m.next_perf = now + PERF_INTERVAL_NS;
 	}
 	core_save_tick(now);
-	if (++m.game_frames == 30 * 60 && log_debug()) {
+	resume_tick(++m.game_frames);
+	if (m.game_frames == 30 * 60 && log_debug()) {
 		char name[48];
 
 		/* Early XRUN / hw_ptr reports, before the ring buffer wraps. */
@@ -694,6 +766,8 @@ static const struct page fatal_page = {
 static const struct page poweroff_page = {
 	"power off", NULL, NULL, poweroff_draw, 0,
 };
+/* Nothing on screen while startup decides between the list and a game. */
+static const struct page boot_page = { "boot", NULL, NULL, NULL, 0 };
 
 /* What the pages ask main.c for; the stack is already changed. */
 static void on_ui(enum ui_action act, const struct page *from)
@@ -816,6 +890,124 @@ static void grow_show(const char *msg)
 	}
 }
 
+/* ---------------------------------------------------- resume on boot */
+
+/*
+ * The escape from resuming: B held at boot. The gamepad is a USB device
+ * that comes up after startup (the device logs: startup done at 1.02 s,
+ * the pad at 1.14 s), so this waits for a device with B up to
+ * RESUME_PAD_WAIT_NS, then RESUME_PAD_SETTLE_NS for its first report
+ * (input.c also takes what is held when it appears). Without a pad by
+ * then the game resumes: there is no playing the list without one either.
+ * Not as PID 1 (tests): FE_HOLD_B=1 holds it.
+ */
+static int escape_held(char *how, size_t size)
+{
+	int64_t t0 = now_ns(), settle = 0, now;
+	const char *env = getenv("FE_HOLD_B");
+	uint32_t b;
+
+	if (!fe_is_init) {
+		b = env && *env == '1' ? JOY_BIT(B) : 0;
+		snprintf(how, size, "B %s (simulated)", b ? "held" : "not held");
+		return b != 0;
+	}
+	for (;;) {
+		struct pollfd pfd[MAX_POLL];
+		int64_t until;
+		int n;
+
+		now = now_ns();
+		if (!settle && input_b_ready())
+			settle = now + RESUME_PAD_SETTLE_NS;
+		until = settle ? settle : t0 + RESUME_PAD_WAIT_NS;
+		if (now >= until)
+			break;
+		n = input_pollfds(pfd, MAX_POLL);
+		if (poll(pfd, n, (int)((until - now + 999999) / 1000000)) > 0)
+			input_dispatch(pfd, n);
+	}
+	if (!settle) {
+		snprintf(how, size, "no gamepad after %lld ms, B not checked",
+			 (long long)((now - t0) / 1000000));
+		return 0;
+	}
+	b = input_buttons();
+	snprintf(how, size, "gamepad up after %lld ms, buttons 0x%x",
+		 (long long)((settle - RESUME_PAD_SETTLE_NS - t0) / 1000000), b);
+	return (b & JOY_BIT(B)) != 0;
+}
+
+/*
+ * At the end of startup (or the headless resume test): the game that was
+ * running when the device was powered off, if its record (resume.c) is
+ * usable and B is not held, started like from the list with the list set
+ * to its folder and ROM underneath. The record is marked attempted
+ * first; a game that does not start or does not resume from its state is
+ * stopped without writing one, and the list shows. Leaves boot_page on
+ * top when no game started.
+ */
+static void resume_boot(void)
+{
+	char path[ROMLIST_PATH + 300], how[96] = "";
+	const char *rom;
+	struct resume_rec r;
+	enum resume_check ck;
+	int rd = resume_read(&r);
+
+	ck = resume_check(rd, &r, settings.resume);
+	if (ck == RESUME_GO && escape_held(how, sizeof(how)))
+		ck = RESUME_ESCAPE;
+	if (ck == RESUME_GO && ui_top() != &boot_page) {
+		log_msg("resume: %s left for %s while waiting for the gamepad",
+			r.rom, ui_top()->name);
+		return;
+	}
+	if (ck == RESUME_NONE) {
+		log_msg("resume: none (%s)", resume_check_names[ck]);
+		return;
+	}
+	rom = rd == -2 ? "?" : r.rom;
+	if (ck != RESUME_GO) {
+		log_msg("resume: skipped %s with %s (power off: %s): %s%s%s", rom,
+			rd == -2 ? "?" : core_names[r.core], r.why[0] ? r.why : "?",
+			resume_check_names[ck], how[0] ? "; " : "", how);
+		if (ck != RESUME_BAD && ck != RESUME_NO_ROM)
+			romlist_menu_select(r.rom);
+		resume_clear("skipped");
+		return;
+	}
+	log_msg("resume: found %s with %s (power off: %s), %s; resuming", rom,
+		core_names[r.core], r.why[0] ? r.why : "?", how);
+	r.attempted = 1;
+	if (resume_write(&r) || resume_rom_path(&r, path, sizeof(path))) {
+		log_msg("resume: skipped, the record cannot be marked attempted");
+		resume_clear("skipped");
+		return;
+	}
+	romlist_menu_select(r.rom);
+	start_game(path);
+	if (ui_top() == &game_page && core_state_resumed()) {
+		m.resume_armed = 1;
+		m.resume_shown = 1;
+		log_msg("resume: %s started at %lld ms, %lld ms after the frontend "
+			"started", r.rom, (long long)boot_ms(),
+			(long long)(boot_ms() - m.start_ms));
+		return;
+	}
+	log_msg("resume: %s: %s (see the lines above), showing the ROM list",
+		r.rom, resume_check_names[RESUME_FAILED]);
+	if (ui_top() == &game_page) {
+		end_game("resume failed");
+		rom_settings_load(NULL);
+		m.saved_rom = rom_settings;
+		fx_update();
+		romlist_menu_message("Could not resume the last game");
+	}
+	resume_clear("resume failed");
+	ui_reset(&boot_page, now_ns());
+}
+
 static void startup(void)
 {
 	struct utsname u;
@@ -823,7 +1015,9 @@ static void startup(void)
 	unsigned boot;
 
 	m.cv.px = m.canvas_px;
+	m.start_ms = boot_ms();
 	ui_set_handler(on_ui);
+	ui_reset(&boot_page, now_ns());
 	sys_early_init();
 	led_set_red(1);
 	uname(&u);
@@ -861,7 +1055,9 @@ static void startup(void)
 		m.next_drm_try = now_ns() + 200000000LL;
 	input_init();
 	audio_init();
-	if (ui_top() != &fatal_page)
+	if (ui_top() == &boot_page)
+		resume_boot();
+	if (ui_top() == &boot_page)
 		ui_reset(&romlist_page, now_ns());
 	log_msg("startup done at %lld ms", (long long)boot_ms());
 	log_sync();
@@ -934,6 +1130,11 @@ static void timers(int64_t now)
 	}
 	if (!m.led_green && ui_top() != &fatal_page && display_frames() > 0) {
 		log_msg("up: first frame shown at %lld ms", (long long)up);
+		if (m.resume_shown && ui_top() == &game_page)
+			log_msg("resume: first game frame on screen at %lld ms, "
+				"%lld ms after the frontend started", (long long)up,
+				(long long)(up - m.start_ms));
+		m.resume_shown = 0;
 		log_sync();
 		led_set_red(0);
 		m.led_green = 1;
@@ -1043,13 +1244,18 @@ static void run(void)
  * key presses through the page stack (ui_frame). The game starts and
  * ends like on the device (start_game, end_game and the settings saved),
  * so the resume state is loaded and written like on a start and a quit.
+ * ROM "resume" plays a boot instead: resume_boot picks the game (B held
+ * with FE_HOLD_B=1), or the ROM list opens and nothing runs. FE_END says
+ * how the game ends: poweroff (the power off path with its resume
+ * record, without powering off), quit (Quit to ROM list), crash (nothing
+ * written, as if the device lost power), otherwise like a quit.
  */
 static int headless(const char *data, const char *rom, long frames)
 {
 	static uint16_t native[320 * 480];
 	static char power[320];
 	const char *sleep_env = getenv("FE_SLEEP_AT"), *mode = getenv("FE_AUDIO");
-	const char *reset_env = getenv("FE_RESET_AT");
+	const char *reset_env = getenv("FE_RESET_AT"), *end = getenv("FE_END");
 	long sleep_at = sleep_env ? strtol(sleep_env, NULL, 0) : -1;
 	long reset_at = reset_env ? strtol(reset_env, NULL, 0) : -1;
 	const struct audio_stats *as = &m.last_as;
@@ -1079,8 +1285,19 @@ static int headless(const char *data, const char *rom, long frames)
 	m.saved = settings;
 	m.cv.px = m.canvas_px;
 	m.nodisplay_hz = HEADLESS_HZ;
+	m.start_ms = boot_ms();
 	ui_set_handler(on_ui);
-	start_game(rom);
+	if (!strcmp(rom, "resume")) {
+		ui_reset(&boot_page, now_ns());
+		resume_boot();
+		if (ui_top() == &boot_page) {
+			ui_reset(&romlist_page, now_ns());
+			log_msg("headless: no game resumed, %s", ui_top()->name);
+			return 0;
+		}
+	} else {
+		start_game(rom);
+	}
 	if (ui_top() != &game_page) {
 		log_msg("headless: %s did not start", rom);
 		return 1;
@@ -1108,6 +1325,12 @@ static int headless(const char *data, const char *rom, long frames)
 		cpuctl_game_frame(now_ns() - t0, 0, skipped,
 				  t + HEADLESS_FRAME_NS);
 		core_save_tick(t);
+		resume_tick((uint64_t)i + 1);
+		if (!i && m.resume_shown) {
+			m.resume_shown = 0;
+			log_msg("resume: first frame emulated %lld ms after the "
+				"start", (long long)(boot_ms() - m.start_ms));
+		}
 		while ((pid = sys_reap(&st)) > 0)
 			core_child_exited(pid, st);
 		if (i == sleep_at) {
@@ -1157,9 +1380,22 @@ static int headless(const char *data, const char *rom, long frames)
 		"fill %d..%d, underruns after warmup %u, skipped %u of %u",
 		frames, fw, fh, fp, as->adj, as->fill_min, as->fill_max,
 		m.xrun_total, nskip, nrun);
-	/* Like a quit, without going back to the ROM list. */
-	end_game("headless end");
-	save_settings();
+	if (end && !strcmp(end, "crash")) {
+		log_msg("headless: crash, nothing written");
+		return 0;
+	}
+	if (end && !strcmp(end, "poweroff")) {
+		snprintf(m.poweroff_why, sizeof(m.poweroff_why), "headless");
+		poweroff_end_game();
+		save_settings();
+	} else if (end && !strcmp(end, "quit")) {
+		quit_game();
+		log_msg("headless: quit to %s", ui_top()->name);
+	} else {
+		/* Like a quit, without going back to the ROM list. */
+		end_game("headless end");
+		save_settings();
+	}
 	snprintf(path, sizeof(path), "%s/native.raw", fe_data_dir);
 	write_file_atomic(path, native, sizeof(native));
 	return m.xrun_total ? 2 : 0;

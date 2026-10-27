@@ -49,8 +49,14 @@ void core_save_tick(int64_t now);
 /* Write changed save data now and wait for it (quit, power off). */
 void core_save_sync(void);
 /* Write the save, then the resume state <data>/saves/<rom>.<core>.state
- * and wait for it (why goes into the log). core_load() resumes from it. */
-void core_state_save(const char *why);
+ * and wait for it (why goes into the log); 0 when the state was written.
+ * core_load() resumes from it. */
+int core_state_save(const char *why);
+/* The game loaded resumed from its state. */
+int core_state_resumed(void);
+/* The state file core_load would use for a ROM with a core (enum
+ * core_id); -1 when it does not fit. */
+int core_state_path(const char *rom_path, int core, char *buf, size_t size);
 /* Main loop reaped a child. */
 void core_child_exited(pid_t pid, int status);
 

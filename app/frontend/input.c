@@ -4,8 +4,11 @@
  * a few hundred ms after we start, as three nodes: "OpenSimHardware OSH PB
  * Controller" (buttons and axes), "... Keyboard" and "... Mouse". Every
  * device is logged when it appears (with its keys and axes in debug
- * logging). The power key and the headphone switch come from their own
- * nodes and go to the main loop's callbacks.
+ * logging). Buttons held when a device appears count as held
+ * (EVIOCGKEY), which the escape from resuming on boot relies on (main.c
+ * waits for a device with B, input_b_ready). The power key and the
+ * headphone switch come from their own nodes and go to the main loop's
+ * callbacks.
  */
 #include <dirent.h>
 #include <errno.h>
@@ -109,6 +112,7 @@ struct idev {
 	char name[80];
 	struct input_id id;
 	int is_pad_node;   /* any node of the OSH controller */
+	int has_b;         /* can report the B button */
 	uint32_t keys;     /* buttons from keys */
 	struct axis_state ax[ARRAY_SIZE(pad_axes)];
 };
@@ -203,6 +207,43 @@ static void log_caps(struct idev *dv)
 	}
 }
 
+/*
+ * Buttons already held when a device appears (the kernel reports only
+ * changes from then on), and whether it has B, which input_b_ready
+ * waits for at boot (main.c's escape from resuming).
+ */
+static void initial_keys(struct idev *dv)
+{
+	unsigned long keybits[(KEY_MAX + 1 + 63) / 64] = { 0 };
+	unsigned long state[(KEY_MAX + 1 + 63) / 64] = { 0 };
+	/* As handle_key maps them: the pad's nodes only its buttons. */
+	const struct key_map *maps[2] = { pad_keys, kbd_keys };
+	const size_t sizes[2] = { ARRAY_SIZE(pad_keys), ARRAY_SIZE(kbd_keys) };
+
+	if (ioctl(dv->fd, EVIOCGBIT(EV_KEY, sizeof(keybits)), keybits) < 0)
+		return;
+	dv->has_b = test_bit(keybits, 0x131) ||
+		    (!dv->is_pad_node && test_bit(keybits, KEY_Z));
+	if (ioctl(dv->fd, EVIOCGKEY(sizeof(state)), state) < 0)
+		return;
+	for (int m = 0; m < (dv->is_pad_node ? 1 : 2); m++)
+		for (size_t i = 0; i < sizes[m]; i++)
+			if (test_bit(keybits, maps[m][i].code) &&
+			    test_bit(state, maps[m][i].code))
+				dv->keys |= 1u << maps[m][i].id;
+	if (dv->keys)
+		log_msg("input event%d: buttons 0x%x already held", dv->num,
+			dv->keys);
+}
+
+int input_b_ready(void)
+{
+	for (int i = 0; i < ndevs; i++)
+		if (devs[i].has_b)
+			return 1;
+	return 0;
+}
+
 static void open_dev(int num)
 {
 	char path[64];
@@ -228,6 +269,7 @@ static void open_dev(int num)
 	dv->is_pad_node = dv->id.vendor == PAD_VENDOR &&
 			  dv->id.product == PAD_PRODUCT;
 	log_caps(dv);
+	initial_keys(dv);
 }
 
 void input_rescan(void)

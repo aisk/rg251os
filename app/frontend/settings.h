@@ -66,6 +66,7 @@ struct settings {
 	int cpu;         /* CPU_MODE_ADAPTIVE, CPU_MODE_MAX or MHz */
 	int audio;       /* AUDIO_SIMPLE or AUDIO_ADAPTIVE (audio.c) */
 	int debug;       /* debug logging (see log.c), off for normal play */
+	int resume;      /* resume the game powered off in on boot (resume.c) */
 };
 /* Per game, in config/roms/<rom name>.txt. */
 struct rom_settings {

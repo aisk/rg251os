@@ -19,6 +19,8 @@ void input_dispatch(const struct pollfd *p, int n);
 void input_rescan(void);
 /* Bitmask of (1 << RETRO_DEVICE_ID_JOYPAD_*) | BTN_BIT_MENU. */
 uint32_t input_buttons(void);
+/* A device that can report B is open (the gamepad is up). */
+int input_b_ready(void);
 
 /*
  * Power key: a short press (released before PWRKEY_LONG_NS) sleeps or

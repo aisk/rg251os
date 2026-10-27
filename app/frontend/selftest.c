@@ -26,6 +26,7 @@
 #include "fx.h"
 #include "input.h"
 #include "resample.h"
+#include "resume.h"
 #include "romdb.h"
 #include "romlist.h"
 #include "sdgrow.h"
@@ -433,8 +434,11 @@ static void test_settings(const char *base)
 	s.cpu = 1008;
 	s.audio = AUDIO_ADAPTIVE;
 	s.debug = 1;
+	s.resume = 0;
 	CHECK(settings_format(&s, buf, sizeof(buf)) > 0, "format");
-	CHECK(settings_parse(&t, buf) == 8, "parse back: %s", buf);
+	CHECK(settings_parse(&t, buf) == 9, "parse back: %s", buf);
+	CHECK(strstr(buf, "resume=off\n") != NULL, "resume: %s", buf);
+	CHECK(settings_defaults.resume == 1, "resume on boot on by default");
 	CHECK(strstr(buf, "debug=on\n") != NULL, "debug: %s", buf);
 	CHECK(settings_defaults.debug == 0, "debug log off by default");
 	CHECK(settings_defaults.audio == AUDIO_ADAPTIVE, "audio adaptive by default");
@@ -1474,6 +1478,104 @@ static void test_romlist_folders(const char *base)
 	      !strcmp(path, want), "folders: gone folder: %s", path);
 }
 
+/*
+ * Resume on boot (resume.c): the record's text, its file written, read,
+ * damaged and removed, every reason resume_check gives, and the ROM list
+ * opened on the resumed ROM's folder. Uses the roms/ of test_romlist.
+ */
+static void test_resume(const char *base)
+{
+	struct resume_rec r, w = { .core = CORE_GPSP, .why = "power key held 2 s" };
+	char buf[700], path[600], state[600], cfg[400];
+	enum resume_check ck;
+	struct settings keep = settings;
+
+	snprintf(w.rom, sizeof(w.rom), "action/x.gba");
+	CHECK(resume_format(&w, buf, sizeof(buf)) > 0 &&
+	      !strcmp(buf, "rom=action/x.gba\ncore=gpsp\nwhy=power key held 2 s\n"),
+	      "resume: format %s", buf);
+	CHECK(resume_parse(&r, buf) == 0 && !strcmp(r.rom, w.rom) &&
+	      r.core == CORE_GPSP && !r.attempted &&
+	      !strcmp(r.why, "power key held 2 s"), "resume: parse back");
+	w.attempted = 1;
+	resume_format(&w, buf, sizeof(buf));
+	CHECK(resume_parse(&r, buf) == 0 && r.attempted, "resume: attempted");
+	CHECK(resume_parse(&r, "rom=a b/c.gba\r\ncore=mgba\r\n") == 0 &&
+	      !strcmp(r.rom, "a b/c.gba") && r.core == CORE_MGBA,
+	      "resume: CRLF, spaces in the path");
+	CHECK(resume_parse(&r, "rom=x.gba\n") && resume_parse(&r, "core=gpsp\n") &&
+	      resume_parse(&r, "rom=x.gba\ncore=snes\n") &&
+	      resume_parse(&r, "rom=../x.gba\ncore=gpsp\n") &&
+	      resume_parse(&r, "rom=/x.gba\ncore=gpsp\n") &&
+	      resume_parse(&r, "rom=\ncore=gpsp\n") && resume_parse(&r, ""),
+	      "resume: incomplete or unsafe records rejected");
+
+	snprintf(path, sizeof(path), "%s/roms/action/x.gba", base);
+	CHECK(resume_rom_rel(path, r.rom, sizeof(r.rom)) == 0 &&
+	      !strcmp(r.rom, "action/x.gba"), "resume: relative path %s", r.rom);
+	CHECK(resume_rom_rel("/elsewhere/x.gba", r.rom, sizeof(r.rom)) == -1,
+	      "resume: a ROM outside roms/");
+
+	/* The file: none, written, read back, damaged, removed. */
+	resume_clear("selftest");
+	CHECK(resume_read(&r) == -1, "resume: no record");
+	CHECK(resume_check(resume_read(&r), &r, 1) == RESUME_NONE,
+	      "resume: check without a record");
+	w.attempted = 0;
+	CHECK(resume_write(&w) == 0 && resume_read(&r) == 0 &&
+	      !strcmp(r.rom, "action/x.gba") && !r.attempted,
+	      "resume: written and read back");
+	snprintf(cfg, sizeof(cfg), "%s/config/resume.txt", base);
+	write_text(cfg, "rom=action/x.gba\ncore=");
+	CHECK(resume_read(&r) == -2 &&
+	      resume_check(-2, &r, 1) == RESUME_BAD, "resume: damaged");
+	resume_clear("selftest");
+	CHECK(access(cfg, F_OK) && resume_read(&r) == -1, "resume: removed");
+
+	/* The reasons, in the order checked. */
+	r = w;
+	core_state_path(path, CORE_GPSP, state, sizeof(state));
+	unlink(state);
+	CHECK(resume_check(0, &r, 0) == RESUME_OFF, "resume: setting off");
+	r.attempted = 1;
+	CHECK(resume_check(0, &r, 1) == RESUME_ATTEMPTED, "resume: attempted");
+	r.attempted = 0;
+	snprintf(r.rom, sizeof(r.rom), "action/gone.gba");
+	CHECK(resume_check(0, &r, 1) == RESUME_NO_ROM, "resume: ROM gone");
+	snprintf(r.rom, sizeof(r.rom), "action");
+	CHECK(resume_check(0, &r, 1) == RESUME_NO_ROM, "resume: a folder");
+	r = w;
+	CHECK(resume_check(0, &r, 1) == RESUME_NO_STATE, "resume: no state");
+	write_text(state, "state");
+	ck = resume_check(0, &r, 1);
+	CHECK(ck == RESUME_GO, "resume: go (%s)", resume_check_names[ck]);
+	CHECK(rom_settings.core == CORE_GPSP && rom_settings.color == COLOR_AUTO,
+	      "resume: ROM settings reset after the check");
+	snprintf(cfg, sizeof(cfg), "%s/config/roms/x.txt", base);
+	write_text(cfg, "core=mgba\n");
+	CHECK(resume_check(0, &r, 1) == RESUME_CORE, "resume: core changed");
+	unlink(cfg);
+	unlink(state);
+
+	/* The list opens on the ROM, in its folder, A starts it. */
+	romlist_menu_select("action/x.gba");
+	romlist_page.enter(NULL, 0);
+	CHECK(rl_key(JOY_BIT(A), buf) == UI_START_ROM && !strcmp(buf, path),
+	      "resume: list on %s", buf);
+	romlist_menu_select("action/inner/deep.gba");
+	romlist_page.enter(NULL, 0);
+	snprintf(path, sizeof(path), "%s/roms/action/inner/deep.gba", base);
+	CHECK(rl_key(JOY_BIT(A), buf) == UI_START_ROM && !strcmp(buf, path),
+	      "resume: list on %s", buf);
+	/* Back at the top for the tests after this one. */
+	romlist_menu_select("z.Gba");
+	romlist_page.enter(NULL, 0);
+	snprintf(path, sizeof(path), "%s/roms/z.Gba", base);
+	CHECK(rl_key(JOY_BIT(A), buf) == UI_START_ROM && !strcmp(buf, path),
+	      "resume: list on %s", buf);
+	settings = keep;
+}
+
 static void test_files(const char *base)
 {
 	static uint8_t data[70000], back[80000];
@@ -2023,11 +2125,11 @@ static void test_ingame_restart(const char *dir)
 	char path[300];
 	int act, armed, plain;
 	/* The selection bars of the in-game menu's rows 1 and 10, its end;
-	 * the global settings' row 7 (Power off) and the end of the 9. */
+	 * the global settings' row 8 (Power off) and the end of the 9. */
 	const int row1 = IG_BOX_Y + IG_HEAD_H + IG_ROW_H -
 			 (IG_ROW_H - FONT_H) / 2;
 	const int last = row1 + 9 * IG_ROW_H, end = IG_BOX_Y + IG_BOX_H;
-	const int srow7 = LIST_Y - ROW_PAD + 7 * ROW_H;
+	const int srow8 = LIST_Y - ROW_PAD + 8 * ROW_H;
 	const int send = LIST_Y - ROW_PAD + 9 * ROW_H;
 
 	ig_open("Game");
@@ -2120,16 +2222,16 @@ static void test_ingame_restart(const char *dir)
 	CHECK(ig_key(JOY_BIT(A)) == UI_NONE,
 	      "power off: times out after 3 s");
 
-	/* Global settings: Power off is the row before Back. */
+	/* Global settings: Power off is the last row. */
 	settings_page.enter(NULL, 0);
-	for (int i = 0; i < 7; i++)
+	for (int i = 0; i < 8; i++)
 		st_key(JOY_BIT(DOWN));
 	draw_page(&settings_page, &cv, NULL);
-	plain = count_color(px, srow7, srow7 + ROW_H, COL_HI);
+	plain = count_color(px, srow8, srow8 + ROW_H, COL_HI);
 	CHECK(st_key(JOY_BIT(A)) == UI_NONE,
 	      "settings power off: first A arms");
 	draw_page(&settings_page, &cv, NULL);
-	armed = count_color(px, srow7, srow7 + ROW_H, COL_HI);
+	armed = count_color(px, srow8, srow8 + ROW_H, COL_HI);
 	CHECK(plain == 0 && armed > 0,
 	      "settings power off: armed row %d/%d highlighted", plain, armed);
 	CHECK(send <= FOOT_Y &&
@@ -2147,7 +2249,7 @@ static void test_ingame_restart(const char *dir)
 	CHECK(st_key(JOY_BIT(A)) == UI_NONE,
 	      "settings power off: moving away cancels");
 	settings_page.enter(NULL, 0);
-	for (int i = 0; i < 7; i++)
+	for (int i = 0; i < 8; i++)
 		st_key(JOY_BIT(DOWN));
 	st_key(JOY_BIT(A));
 	for (int i = 0; i < 179; i++)
@@ -2552,7 +2654,8 @@ static void test_ui(const char *dir)
 	snprintf(path, sizeof(path), "%s/ui-settings.raw", dir);
 	write_file_atomic(path, px, sizeof(px));
 	/* Volume, Brightness, CPU, Audio, Debug log, Date & time, System
-	 * info, Power off, Back: no grid rows outside a game. */
+	 * info, Resume on boot, Power off: no grid rows outside a game, no
+	 * Back row (a full page, B goes back). */
 	st_key(JOY_BIT(DOWN));
 	st_key(JOY_BIT(DOWN));
 	st_key(JOY_BIT(A));
@@ -2566,11 +2669,16 @@ static void test_ui(const char *dir)
 	CHECK(st_key(JOY_BIT(A)) == UI_PUSH && opened == &sysinfo_page,
 	      "settings: 7th row is System info");
 	st_key(JOY_BIT(DOWN));
-	CHECK(st_key(JOY_BIT(A)) == UI_NONE,
-	      "settings: 8th row is Power off (asks first)");
+	CHECK(st_key(JOY_BIT(A)) == UI_NONE && settings.resume == 0,
+	      "settings: 8th row is Resume on boot");
+	CHECK(st_key(JOY_BIT(RIGHT)) == UI_NONE && settings.resume == 1,
+	      "settings: Resume on boot back on");
 	st_key(JOY_BIT(DOWN));
-	CHECK(st_key(JOY_BIT(A)) == UI_BACK,
-	      "settings: 9th row is Back");
+	CHECK(st_key(JOY_BIT(A)) == UI_NONE,
+	      "settings: 9th row is Power off (asks first)");
+	st_key(JOY_BIT(DOWN));
+	CHECK(st_key(JOY_BIT(B)) == UI_BACK,
+	      "settings: wraps to Volume, B goes back");
 	game_settings_page.enter(NULL, 0);
 	for (int i = 0; i < 6; i++)
 		st_key(JOY_BIT(DOWN));
@@ -2793,7 +2901,7 @@ static void test_redraw(const char *base)
 	 * the next A only arms it again. */
 	ui_reset(&settings_page, t);
 	ui_frame(&cv, 0, t);
-	for (int i = 0; i < 7; i++)
+	for (int i = 0; i < 8; i++)
 		rd_press(&cv, &t, JOY_BIT(DOWN));
 	armed = t;
 	CHECK(rd_press(&cv, &t, JOY_BIT(A)), "redraw: armed drawn");
@@ -3308,6 +3416,7 @@ int selftest(const char *dir)
 	test_marquee();
 	test_ingame_restart(dir);
 	test_romlist_folders(dir);
+	test_resume(dir);
 	test_ui(dir);
 	test_sysinfo(dir);
 	test_clock(dir);

@@ -102,6 +102,7 @@ static struct {
 	int have_bios;
 	char save_path[400];
 	char state_path[400];
+	int state_loaded;  /* the game resumed from it */
 	uint32_t rom_size, rom_crc;  /* identify the ROM in state files */
 	uint8_t *sram;       /* the core's buffer */
 	size_t sram_cap;
@@ -707,15 +708,16 @@ static void state_remove(const char *why)
 	}
 }
 
-void core_state_save(const char *why)
+int core_state_save(const char *why)
 {
 	struct state_header *h;
 	size_t size, slen;
 	int64_t t0, t1, t2;
 	uint8_t *buf;
+	int ret = -1;
 
 	if (!c.loaded || !c.api->serialize_size)
-		return;
+		return -1;
 	/* The .sav first: it stays the primary record. */
 	core_save_sync();
 	t0 = now_ns();
@@ -723,19 +725,19 @@ void core_state_save(const char *why)
 	if (!size || size > MAX_STATE_SIZE) {
 		log_msg("state: %s gives a state size of %zu, not saving",
 			c.api->name, size);
-		return;
+		return -1;
 	}
 	buf = calloc(1, sizeof(*h) + size);
 	if (!buf) {
 		log_msg("state: no memory for %zu bytes", size);
-		return;
+		return -1;
 	}
 	if (!c.api->serialize(buf + sizeof(*h), size)) {
 		log_msg("state: %s could not serialize (%zu bytes), removing the "
 			"old state", c.api->name, size);
 		free(buf);
 		state_remove("serialize failed");
-		return;
+		return -1;
 	}
 	t1 = now_ns();
 	h = (struct state_header *)buf;
@@ -757,8 +759,15 @@ void core_state_save(const char *why)
 		log_msg("state: wrote %zu bytes to %s (%s): serialize %.1f ms, "
 			"write %.1f ms", sizeof(*h) + size, state_name(), why,
 			(t1 - t0) / 1e6, (t2 - t1) / 1e6);
+		ret = 0;
 	}
 	free(buf);
+	return ret;
+}
+
+int core_state_resumed(void)
+{
+	return c.loaded && c.state_loaded;
 }
 
 /* After save_load, before the first retro_run. Anything wrong: the game
@@ -774,6 +783,7 @@ static void state_load(void)
 	char why[96];
 	int n;
 
+	c.state_loaded = 0;
 	if (!c.api->unserialize)
 		return;
 	if (stat(c.state_path, &st)) {
@@ -841,10 +851,25 @@ static void state_load(void)
 	t1 = now_ns();
 	log_msg("state: loaded %zu bytes from %s in %.1f ms, resuming",
 		len, state_name(), (t1 - t0) / 1e6);
+	c.state_loaded = 1;
 	free(buf);
 }
 
 /* ---------------------------------------------------------------- load */
+
+int core_state_path(const char *rom_path, int core, char *buf, size_t size)
+{
+	const char *base = strrchr(rom_path, '/');
+	int n;
+
+	if (!core_available(core))
+		core = CORE_MGBA;
+	base = base ? base + 1 : rom_path;
+	/* Per core: mGBA and gpSP states are not compatible. */
+	n = snprintf(buf, size, "%s/saves/%.*s.%s.state", fe_data_dir,
+		     romdb_stem_len(base), base, core_api_get(core)->name);
+	return n > 0 && (size_t)n < size ? 0 : -1;
+}
 
 static void *read_rom(const char *path, size_t *size)
 {
@@ -899,9 +924,7 @@ int core_load(const char *rom_path, int core, char *err, size_t errlen)
 	blen = romdb_stem_len(base);
 	snprintf(c.save_path, sizeof(c.save_path), "%s/saves/%.*s.sav",
 		 fe_data_dir, blen, base);
-	/* Per core: mGBA and gpSP states are not compatible. */
-	snprintf(c.state_path, sizeof(c.state_path), "%s/saves/%.*s.%s.state",
-		 fe_data_dir, blen, base, c.api->name);
+	core_state_path(rom_path, core, c.state_path, sizeof(c.state_path));
 	c.options[0] = 0;
 	c.options_changed = 0;
 	c.audio_status = NULL;

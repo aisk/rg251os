@@ -25,7 +25,7 @@ LIBRETRO_INCLUDE := $(if $(MGBA_INCLUDE),$(MGBA_INCLUDE),$(EXTERNAL)/mgba/src/pl
 FRONTEND_SRCS := main.c log.c sys.c display.c blit.c draw.c audio.c \
 	resample.c input.c romlist.c core.c menu.c perf.c selftest.c \
 	settings.c fx.c battery.c cpuctl.c sleep.c sdgrow.c romdb.c romdb_data.c \
-	sysinfo.c clock.c font.c ui.c
+	sysinfo.c clock.c font.c ui.c resume.c
 FRONTEND_OBJS := $(addprefix $(FRONTEND_BUILD)/obj/,$(FRONTEND_SRCS:.c=.o))
 FRONTEND_STUB_OBJ := $(FRONTEND_BUILD)/obj/stub_core.o
 FRONTEND_STUB_LIB := $(FRONTEND_BUILD)/libstub_core.a
@@ -200,6 +200,58 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	grep -q 'underruns after warmup 0' $$f; \
 	grep -q 'state: wrote 426024 bytes to test.gpsp.state (headless end)' $$f; \
 	test $$(grep -c ',all,' $(FRONTEND_TEST_DIR)/reset/log/perf.csv) -eq 2
+	# Resume on boot, booting through the headless "resume" ROM (gpSP,
+	# a ROM in a subfolder of roms/): no record, then a power off in
+	# game and a boot that resumes and quits to the list on that ROM, a
+	# boot after that shows the list; B held, a resume that crashed
+	# within 5 s (attempted), the setting off and a quit within 5 s each
+	# leave the list for the next boot.
+	set -e; d=$(FRONTEND_TEST_DIR)/resume; f=$$d/log/frontend.txt; \
+	run() { $(QEMU_AARCH64) $(FRONTEND_ELF) --headless $$d "$$@"; }; \
+	mkdir -p $$d/roms/sub; cp $(FRONTEND_TEST_ROM) $$d/roms/sub/test.gba; \
+	run resume 60; \
+	grep -q 'resume: none (no record' $$f; \
+	grep -q 'headless: no game resumed, ROM list' $$f; \
+	FE_END=poweroff run $$d/roms/sub/test.gba 600; \
+	grep -q 'state: wrote 426024 bytes to test.gpsp.state (power off)' $$f; \
+	grep -q 'resume: record written, the next boot resumes sub/test.gba with gpsp (power off: headless)' $$f; \
+	grep -q '^rom=sub/test.gba$$' $$d/config/resume.txt; \
+	FE_END=quit run resume 600; \
+	grep -q 'resume: found sub/test.gba with gpsp (power off: headless), B not held (simulated); resuming' $$f; \
+	grep -q 'state: loaded 426024 bytes from test.gpsp.state' $$f; \
+	grep -q 'resume: sub/test.gba started at [0-9]* ms, [0-9]* ms after the frontend started' $$f; \
+	grep 'resume: .* after the \(frontend \)\?start' $$f; \
+	grep -q 'resume: record removed (the resumed game ran 5 s)' $$f; \
+	grep -q 'roms: folder /sub: 1 ROMs, 0 folders .*selected test.gba' $$f; \
+	grep -q 'headless: quit to ROM list' $$f; \
+	run resume 60; \
+	grep -q 'resume: none (no record' $$f; \
+	for c in hold:: crash:attempted: off:off: quit:quit:; do \
+		k=$${c%%:*}; \
+		FE_END=poweroff run $$d/roms/sub/test.gba 120; \
+		test -f $$d/config/resume.txt; \
+		case $$k in \
+		hold) FE_HOLD_B=1 run resume 60; \
+			grep -q 'resume: skipped sub/test.gba with gpsp (power off: headless): B held at boot; B held (simulated)' $$f;; \
+		crash) FE_END=crash run resume 100; \
+			grep -q 'resume: found sub/test.gba' $$f; \
+			grep -q '^attempted=1$$' $$d/config/resume.txt; \
+			run resume 60; \
+			grep -q "resume: skipped sub/test.gba with gpsp (power off: headless): the last boot's resume did not run 5 s" $$f;; \
+		off) printf 'resume=off\n' > $$d/config/settings.txt; \
+			run resume 60; rm $$d/config/settings.txt; \
+			grep -q 'resume: skipped sub/test.gba with gpsp (power off: headless): Resume on boot is off' $$f;; \
+		quit) FE_END=quit run resume 100; \
+			grep -q 'resume: record removed (quit)' $$f; \
+			run resume 60; \
+			grep -q 'resume: none (no record' $$f;; \
+		esac; \
+		test ! -f $$d/config/resume.txt; \
+		if [ $$k != quit ]; then \
+			grep -q 'resume: record removed (skipped)' $$f; \
+			grep -q 'roms: folder /sub: 1 ROMs, 0 folders .*selected test.gba' $$f; \
+		fi; \
+	done
 	# A perf.csv from an older build (other header) is moved aside.
 	mkdir -p $(FRONTEND_TEST_DIR)/core/log $(FRONTEND_TEST_DIR)/core/config/roms
 	printf 'time,old\n1,2\n' > $(FRONTEND_TEST_DIR)/core/log/perf.csv

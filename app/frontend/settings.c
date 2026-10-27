@@ -5,7 +5,9 @@
  *   config/settings.txt          global: volume, brightness, LCD grid,
  *                                CPU mode (cpu=adaptive|max|<MHz>),
  *                                audio path (audio=simple|adaptive),
- *                                debug logging (debug=on|off)
+ *                                debug logging (debug=on|off),
+ *                                resume on boot (resume=on|off, see
+ *                                resume.c)
  *   config/roms/<rom name>.txt   per game: color correction
  *                                (color=auto|off|gba|gba-light|sp101,
  *                                auto by default, see romdb.c), the
@@ -63,6 +65,7 @@ const struct settings settings_defaults = {
 	.cpu = CPU_MODE_ADAPTIVE,
 	.audio = AUDIO_ADAPTIVE,
 	.debug = 0,
+	.resume = 1,
 };
 struct settings settings = settings_defaults;
 struct rom_settings rom_settings;
@@ -101,6 +104,7 @@ static const struct field global_fields[] = {
 	FN(settings, cpu, 300, 5000, cpu_modes),
 	FN(settings, audio, 0, 1, audio_modes),
 	F(settings, debug, 0, 1, on_off),
+	F(settings, resume, 0, 1, on_off),
 };
 
 static const struct field rom_fields[] = {

@@ -19,10 +19,14 @@
  * of "GBA", cut from the left with "~" when long. The folder and the
  * selected entry are kept while a game runs, so quitting it comes back to
  * the same ROM; a folder that is gone by then falls back to its parent.
- * Nothing of this is kept across boots. SELECT opens the global settings
- * (Volume, Brightness, CPU, Audio mode Simple/Adaptive, Debug log on/off,
- * see log.c, Date & time, the page of clock.c that sets the clock and the
- * RTC, System info, the read only page of sysinfo.c, and Power off). In
+ * Nothing of this is kept across boots, but a game resumed on boot
+ * (resume.c) sets the folder and the ROM first (romlist_menu_select), as
+ * does a resume record that was skipped. SELECT opens the global
+ * settings (Volume, Brightness, CPU, Audio mode Simple/Adaptive, Debug
+ * log on/off, see log.c, Date & time, the page of clock.c that sets the
+ * clock and the RTC, System info, the read only page of sysinfo.c,
+ * Resume on boot on/off, see resume.c, and Power off; a full page, so no
+ * Back row, B goes back). In
  * game, SELECT+START opens the in-game menu: Resume, Restart game,
  * Volume, Brightness, CPU, Core, Frameskip, Settings, System info, Quit
  * to ROM list, Power off; B or SELECT+START again resumes. Restart game
@@ -105,6 +109,8 @@ static int sel, top;
 static char cur_dir[ROMLIST_PATH];
 static char message[96];
 static char start_path[ROMLIST_PATH + 256];  /* UI_START_ROM */
+/* Selected when the list opens next (romlist_menu_select), "": none. */
+static char select_next[256];
 static struct marquee list_mq = { .sel = -1 };
 
 /*
@@ -264,6 +270,19 @@ const char *romlist_menu_rom(void)
 	return start_path;
 }
 
+void romlist_menu_select(const char *rel)
+{
+	const char *slash = strrchr(rel, '/');
+	int dlen = slash ? (int)(slash - rel) : 0;
+
+	if (dlen >= (int)sizeof(cur_dir) ||
+	    strlen(slash ? slash + 1 : rel) >= sizeof(select_next))
+		return;
+	snprintf(cur_dir, sizeof(cur_dir), "%.*s", dlen, rel);
+	snprintf(select_next, sizeof(select_next), "%s", slash ? slash + 1 : rel);
+	top = 0;
+}
+
 static void romlist_menu_enter(const char *from, int64_t now)
 {
 	char name[256] = "";
@@ -271,6 +290,11 @@ static void romlist_menu_enter(const char *from, int64_t now)
 
 	(void)from;
 	(void)now;
+	if (select_next[0]) {
+		list_open(select_next, 0, 0);
+		select_next[0] = 0;
+		return;
+	}
 	/* The same folder and entry as before (a game started from it). */
 	if (roms.count) {
 		snprintf(name, sizeof(name), "%s", roms.roms[sel].file);
@@ -942,6 +966,10 @@ static const struct row
 		.flags = ROW_TOGGLE,
 	},
 	row_datetime = { "Date & time", .press = { UI_PUSH, &datetime_page } },
+	row_resume_boot = {
+		"Resume on boot", &settings.resume, 0, 1, off_on,
+		.flags = ROW_TOGGLE,
+	},
 	row_back = { "Back", .press = { UI_BACK, 0 } };
 
 /* -------------------------------------------------------- in-game menu */
@@ -1012,10 +1040,12 @@ const struct page ingame_page = {
 
 /* ------------------------------------------------------------ settings */
 
+/* A full page (LIST_ROWS): B goes back, as the footer says. */
 static const struct row *const settings_rows[] = {
 	&row_volume, &row_brightness, &row_cpu, &row_audio, &row_debug,
-	&row_datetime, &row_sysinfo, &row_poweroff, &row_back,
+	&row_datetime, &row_sysinfo, &row_resume_boot, &row_poweroff,
 };
+_Static_assert(ARRAY_SIZE(settings_rows) <= LIST_ROWS, "settings rows");
 static const struct row *const game_settings_rows[] = {
 	&row_color, &row_blend, &row_grid, &row_grid_dim, &row_grid_boost,
 	&row_debug, &row_back,

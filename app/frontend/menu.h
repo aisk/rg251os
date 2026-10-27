@@ -46,6 +46,9 @@ extern const struct page game_settings_page;
 
 /* The ROM path after UI_START_ROM from the ROM list. */
 const char *romlist_menu_rom(void);
+/* Open the list next time in the folder of rel (a ROM's path relative to
+ * roms/) with that ROM selected. */
+void romlist_menu_select(const char *rel);
 /* A message (an error) in the ROM list's footer instead of the key
  * hints until a key acts there, "" or NULL for none. */
 void romlist_menu_message(const char *msg);
