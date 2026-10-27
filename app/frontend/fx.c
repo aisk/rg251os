@@ -41,6 +41,7 @@
 
 #include "fe.h"
 #include "fx.h"
+#include "settings.h"
 
 const int grid_dim_levels[] = { 25, 50, 75 };
 const int grid_boost_levels[] = { 0, 15, 30, 50 };

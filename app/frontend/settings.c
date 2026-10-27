@@ -35,6 +35,7 @@
 
 #include "fe.h"
 #include "romdb.h"
+#include "settings.h"
 
 const char *const color_mode_names[COLOR_COUNT] = {
 	"off", "gba", "gba-light", "sp101", "auto",

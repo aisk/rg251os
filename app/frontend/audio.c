@@ -66,6 +66,7 @@ int pcm_avail_update(struct pcm *pcm);
 #include "audio.h"
 #include "fe.h"
 #include "resample.h"
+#include "settings.h"
 
 #define CARD 0
 #define DEVICE 0

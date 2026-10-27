@@ -8,6 +8,7 @@
 
 #include "core_api.h"
 #include "fe.h"
+#include "settings.h"
 
 #define CORE_PROTOS(p) \
 	void p##_retro_set_environment(retro_environment_t); \

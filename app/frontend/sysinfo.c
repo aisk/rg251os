@@ -26,6 +26,7 @@
 #include "fe.h"
 #include "input.h"
 #include "menu.h"
+#include "settings.h"
 #include "sysinfo.h"
 
 #define REFRESH_NS 1000000000LL

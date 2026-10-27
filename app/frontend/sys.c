@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include "fe.h"
+#include "settings.h"
 
 #define DATA_DEV "/dev/mmcblk0p3"
 #define DATA_FLAGS (MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_NOATIME)

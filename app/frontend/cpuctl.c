@@ -97,6 +97,7 @@
 #include "battery.h"
 #include "cpuctl.h"
 #include "fe.h"
+#include "settings.h"
 
 #define NS 1000000000LL
 #define CPUFREQ_SYSFS "/sys/devices/system/cpu/cpu0/cpufreq"

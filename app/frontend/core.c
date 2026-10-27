@@ -57,6 +57,7 @@
 #include "fe.h"
 #include "libretro.h"
 #include "romdb.h"
+#include "settings.h"
 
 #define SAVE_TICK_NS 1000000000LL    /* how often save RAM is compared */
 #define SAVE_SETTLE_NS 1000000000LL  /* unchanged this long before a write */

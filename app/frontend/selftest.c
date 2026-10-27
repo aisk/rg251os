@@ -29,6 +29,7 @@
 #include "romdb.h"
 #include "romlist.h"
 #include "sdgrow.h"
+#include "settings.h"
 #include "sleep.h"
 #include "sysinfo.h"
 

@@ -55,6 +55,7 @@
 #include "input.h"
 #include "menu.h"
 #include "romlist.h"
+#include "settings.h"
 
 #define ROW_H 18
 #define LIST_Y 40

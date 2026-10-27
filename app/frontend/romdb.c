@@ -50,6 +50,7 @@
 
 #include "fe.h"
 #include "romdb.h"
+#include "settings.h"
 
 #define BACKLIT_YEAR 2005
 

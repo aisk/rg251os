@@ -107,6 +107,7 @@
 #include "perf.h"
 #include "romdb.h"
 #include "sdgrow.h"
+#include "settings.h"
 #include "sleep.h"
 #include "sysinfo.h"
 
