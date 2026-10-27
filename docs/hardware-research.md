@@ -238,7 +238,8 @@ GBA 分区（下面写作 `<data>`）里的文件
 | `saves/<rom>.sav` | 存档，两个核心通用，只按文件名（不含文件夹）；没有 `.sav` 时会读同名的 RetroArch `.srm`，之后写回 `.sav` |
 | `saves/<rom>.<core>.state` | 即时存档，退出游戏时自动写，下次启动同一个 ROM 用同一个核心时恢复（见下面的默认行为）。和 `.sav` 一样只按文件名，按核心分开（`gpsp`、`mgba`），因为两个核心的格式不通用。mGBA 约 420 到 520KiB（随存档类型变），gpSP 固定约 416KiB |
 | `bios/gba_bios.bin` | 可选的 GBA BIOS。没有的话 gpSP 用内置 BIOS，mGBA 用 HLE |
-| `config/settings.txt` | 全局设置：音量、亮度、LCD 网格、CPU 模式、音频模式、调试日志 |
+| `config/settings.txt` | 全局设置：音量、亮度、LCD 网格、CPU 模式、音频模式、调试日志、开机恢复（`resume`） |
+| `config/resume.txt` | 开机恢复的记录：游戏中关机时写，下次开机用掉就删（见下面的默认行为）。`rom=` 是相对 `roms/` 的路径，`core=` 是写即时存档的核心，`why=` 是怎么关的机，开机开始恢复前加一行 `attempted=1` |
 | `config/roms/<rom>.txt` | 单个游戏的设置：`color`（auto、off、gba、gba-light、sp101）、`core`、`blend`（gpSP 的帧混合）、`frameskip`（off、auto、1、2、3）、学到的起始频率 `cpu_start`。只写和默认值不同的项。和存档一样只按文件名，不同文件夹里的同名 ROM 共用 |
 | `config/romdb-cache.txt` | ROM 识别时算过的 CRC32 缓存，按相对 `roms/` 的路径（顶层的 ROM 就是文件名）、大小和 mtime |
 | `mixer.txt` | 可选，开机时应用的 ALSA mixer 设置，行前可加 `speaker:` 或 `headphones:` |
@@ -262,12 +263,13 @@ GBA 分区（下面写作 `<data>`）里的文件
 - Frameskip（跳帧）按游戏设置，默认 Off，在游戏菜单里改，切换下一帧生效，两个核心都不用重启。1、2、3 是每画一帧跳过几帧（30、20、15fps），gpSP 是 `gpsp_frameskip=fixed_interval` 加 `gpsp_frameskip_interval`，mGBA 是 `mgba_frameskip`。Auto 只有 gpSP 有（`auto_threshold`，阈值用 gpSP 默认的 33%）：前端每帧 retro_run 之前通过 libretro 的 audio buffer status callback 告诉核心音频缓冲的占用，低于阈值就跳。占用是 retro_run 之前设备里排队的帧数，按目标填充量的两倍算百分比，所以平时在 50% 左右（和 RetroArch 的速率控制一样），33% 大约是还剩 23ms 的声音。mGBA 下菜单跳过 Auto，以前在 gpSP 下设成 Auto 的游戏显示 "Auto: gpSP only"，按不跳帧跑。gpSP 开跳帧时会要求至少 128ms 的音频延迟，前端只记日志，缓冲保持 85ms。跳过的帧不参与 CPU 调频的判断（gpSP 给 NULL 帧，mGBA 的跳帧计数在前端照着它的规则算，selftest 用一个每帧换背景色的 ROM 逐帧核对过）。
 - LCD 网格效果每次开机随机选 2x2 里的一个像素当亮点。
 - 音量键和菜单里的音量一样每次 3dB，低于 -60dB 就静音。亮度最低 25%，再低屏幕就看不见了。
-- ROM 列表支持子文件夹：文件夹排在 ROM 前面，名字后面带 `/`，黄色显示。A 进入，B 回上一层并选中刚才的文件夹，顶层按 B 没有反应。标题栏在文件夹里显示相对 `roms/` 的路径，太长时从左边截掉。每次进入文件夹只扫描这一层。退出游戏回到原来的文件夹和 ROM，但当前文件夹和选中项不跨开机保存。
+- ROM 列表支持子文件夹：文件夹排在 ROM 前面，名字后面带 `/`，黄色显示。A 进入，B 回上一层并选中刚才的文件夹，顶层按 B 没有反应。标题栏在文件夹里显示相对 `roms/` 的路径，太长时从左边截掉。每次进入文件夹只扫描这一层。退出游戏回到原来的文件夹和 ROM，但当前文件夹和选中项不跨开机保存（开机恢复游戏时例外，见下）。
 - 按键：ROM 列表里按 SELECT 进设置，游戏中 SELECT+START 打开菜单。设置和游戏菜单里都有只读的 System info 页（`sysinfo.c`），每秒刷新 CPU 占用和频率、内存、温度、电池、日期时间、开机时长和 GBA 分区剩余空间。
 - 日期和时间：ROM 列表设置里的 Date & time（`clock.c`）可以设 年-月-日 时:分，左右选字段，上下改数值（月份和闰年会限制日期），A 保存，B 取消。保存时先 `settimeofday` 再用 `RTC_SET_TIME` 写 RK817 的 RTC（秒归零），写 RTC 失败时页面上显示红色提示。没有时区，输入的时间按 UTC 存，`localtime()` 等于 `gmtime()`，所以核心给游戏卡带 RTC 的就是输入的时间。系统信息页显示当前日期时间，ROM 列表标题栏在时钟设过以后显示 HH:MM。开机日志记 `clock: system ..., RTC ...`，RTC 早于 2024 年会标 `looks never set`；每次设置记旧时间、新时间、每一步的结果和 RTC 读回的值。
 - 界面文字用 JetBrains Mono Regular 2.304（SIL OFL 1.1），20px，灰度抗锯齿，只有 ASCII，每个字 12x24 的格子，按原生分辨率画在 480x320 的逻辑画布上，一行 40 列，ROM 列表一页 9 行。字形在 `app/frontend/font.c`，是 `mk/font-gen.py` 用 FreeType 从 TTF 渲染出的 4 位透明度，画的时候和底色按 RGB565 各通道混合，布局尺寸都从字体大小算出来（`menu.h`）。
 - 会中断游戏的菜单项都要按两次 A：游戏菜单里的 Restart game、换了核心后的 Restart with 和 Power off，以及 ROM 列表设置里的 Power off。第一次按 A 该行变成黄色的 "Press A to restart" 或 "Press A to power off"，3 秒内再按一次才执行，移到别的行、超时或者再换核心就取消。
 - 退出游戏时自动保存即时存档，下次启动接着玩。退回 ROM 列表、关机（游戏菜单、设置、长按电源键）、Restart with 换核心（存在旧核心名下，换回来时还能接上）和休眠时，先写 `.sav`，再把 `retro_serialize` 的结果原子地写到 `saves/<rom>.<core>.state` 并 fsync。启动游戏时在读完 `.sav` 之后、第一帧之前读回来。`.sav` 仍然是主记录：文件被截断或损坏（头里有 CRC）、ROM 换了（大小和 ROM 头 CRC 对不上）、或者存档内容和写即时存档时不一样（比如从电脑换了 `.sav`）就跳过，正常开机，什么都不删。没有用文件时间比较，因为从电脑拷过来的文件可能保留旧时间，RTC 没设过时每次开机的时钟也是从同一个点开始。游戏菜单的 Restart game 会删掉当前核心的即时存档，出错退出（fatal）不写。日志都以 `state:` 开头，记文件名、大小、耗时和跳过的原因。
+- 开机恢复（`resume.c`）：在游戏中关机（游戏菜单的 Power off、长按电源键）并且即时存档写成功了，就写 `config/resume.txt`，下次开机直接进这个游戏，从即时存档接着玩，像休眠一样。走的是和从列表启动一样的 `start_game`，ROM 列表提前定位到这个 ROM 所在的文件夹和这个 ROM，所以 Quit to ROM list 回到那里。退回列表、Restart game、Restart with 换核心、在列表里关机都会删掉记录，所以下次开机是列表。开机时跳过恢复的情况：设置里 Resume on boot 关了（默认开）、ROM 或者对应核心的即时存档没了、这个游戏的核心设置在关机后改过、即时存档没通过 `state:` 的检查、开机时按住 B。跳过时也删记录，ROM 还在的话列表同样定位到它。B 的检测：手柄是 USB 设备，比前端启动晚约 120 ms 才出现（日志里 startup done 在 1.02 s，手柄在 1.14 s），所以有记录时先等手柄最多 1.5 s，出现后再等 100 ms 收它的第一个报告，打开设备时也读一次当前按住的键（EVIOCGKEY）；1.5 s 内没有手柄就不查 B，照常恢复（没有手柄也玩不了列表）。防止死循环：开始恢复前先把记录改成 `attempted=1`，游戏跑满 5 秒才删；开机时发现 `attempted=1` 说明上次恢复后没跑到 5 秒（崩溃或者断电），这次不恢复，显示列表。日志都以 `resume:` 开头。
 - 电源键短按休眠，先尝试挂起到内存，内核挂不起来就退回浅睡眠（关背光和屏幕，CPU 降到最低频率），再按一次唤醒。长按 2 秒保存并关机，关机前先卸载 GBA 分区（卸载不了就重新挂成只读），让 FAT 的脏标记清掉。下次开机挂载时日志会记这个标记是否还在。
 - 指示灯：内核阶段是 heartbeat 闪烁，前端启动时变红，第一帧出来后变绿，低电量时绿灯里隔 2 秒闪一下红，出错时红绿交替。
 - 菜单只在有变化时重绘（`ui.c`）：按键（包括方向键的连发）、换页、走马灯移动、确认超时、ROM 算完 CRC 改名、电量显示变化、音量键、标题栏时钟跳分钟、Date & time 和 System info 的秒数。没有变化时不翻页，主循环在 `poll()` 里睡到下一次输入或者页面和定时器要的时间（最长 1 秒）。走马灯、两次确认的 3 秒和按键连发都按时间算，不再按帧数算。游戏中还是每个 vblank 跑一帧，没有变化。

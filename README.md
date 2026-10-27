@@ -2,7 +2,7 @@
 
 A tiny Linux distribution for the Anbernic RG351P that only plays Game Boy Advance games, built to boot fast.
 
-There is no userland in the usual sense. A trimmed mainline kernel with every driver built in boots without an initramfs straight into our own PID 1, which is the whole system: a ROM list, an in-game menu and two GBA emulators (gpSP and mGBA), all statically linked into one binary. No shell, no services, no GPU stack.
+There is no userland in the usual sense. A trimmed mainline kernel with every driver built in boots without an initramfs straight into our own PID 1, which is the whole system: a ROM list, an in-game menu and two GBA emulators (gpSP and mGBA), all statically linked into one binary. No shell, no services, no GPU stack. Powering off during a game works like sleep: its state is saved and the next boot goes straight back into it (hold B while booting for the ROM list).
 
 On real hardware the ROM list is on screen about 2.5 s after the kernel starts (measured with debug logging on, not tuned yet). The bootloader is still Rockchip's closed DDR init plus the ROCKNIX fork of U-Boot 2017.09, which adds its own delay on top. That stage has not been optimized and is where most of the remaining gain is.
 

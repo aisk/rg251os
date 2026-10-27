@@ -7,7 +7,7 @@
 - 没有串口线。每次迭代是烧卡、上机、把 GBA 分区里的 `log/` 拷回来分析。所以前端的日志和 dmesg 转存一定要保留，新功能也要带上足够的日志，尽量做到一次上机就能定位问题。
 - 卡上的 Debug log 开关默认关。排查问题前先在设置里打开。
 - 重新烧镜像会把 GBA 分区恢复成 64MiB 的空分区，烧之前要先备份 `saves/`。
-- 主机上的验证：`make image` 和 `make frontend-test`（qemu-user 跑 selftest、headless 游戏、核心切换、休眠的浅睡眠路径、分区扩展的断电恢复）。要求零 warning。
+- 主机上的验证：`make image` 和 `make frontend-test`（qemu-user 跑 selftest、headless 游戏、核心切换、休眠的浅睡眠路径、开机恢复的几次连续开机、分区扩展的断电恢复）。要求零 warning。
 - 开机速度暂时不优化，先把功能做完。
 
 ## 已在真机验证
@@ -37,6 +37,7 @@
 - 跳帧（游戏菜单的 Frameskip，按游戏）：先用 mGBA 跑龙珠大冒险（Dragon Ball Advanced Adventure），在屏幕上有敌人时试 1 和 2，再切到 gpSP 试 Auto。日志里开局有一行 `core: game settings for <核心>: ... frameskip=<值> (<发给核心的键>)`，菜单里改时有 `core: <键>=<值>, applied live`，gpSP 的 Auto 会有 `core: audio buffer status callback registered` 和 `core: asks for at least 128 ms of audio latency`。每局结束有 `core: frameskip <值>: N of M frames skipped (X%), buffer status ...: avg A%, lowest L%, U under one frame`，`perf summary` 和 perf.csv 的 `skipped` 列也有跳帧数，帧耗时 `work_avg` 只算画出来的帧。要看：Auto 在平时（不卡的场景）跳帧数是否接近 0、平均占用是否在 50% 左右（低于 33% 就会一直跳，说明换算不合适），重负载时跳了多少、是否还有 `audio: underrun`；固定间隔下跳帧比例是否正好是 1/2、2/3、3/4；跳帧时 CPU 频率（perf.csv 各频率的行）是否没有因为跳帧被拉低；画面看起来是否比卡顿时顺，声音是否不再断；mGBA 下 Auto 是否显示 "Auto: gpSP only" 并且左右切换时跳过 Auto。Frame blend 挪进了游戏菜单的 Settings 面板（第 2 行），确认在那里能开关，mGBA 下显示 gpSP only。
 - 充电诊断（`battery.c`，不用开 Debug log）：开机日志里应该有 `charger: PMIC registers from /sys/kernel/debug/regmap/<设备>/registers, 7 bytes per line, ...`（如果是 `charger: no ...`，说明 debugfs 或 regmap 没找到，寄存器就不记了），然后是 `charger: start: ...` 和 `charger: start: regs ...` 两行。测试步骤：先用电池开机，打开 System info；插上充电器，等 30 秒，记下屏幕上电池一行显示什么（Charging 还是 Not charging，电流正负）；拔掉等 10 秒再插上，重复 5 次，每次记下有没有充上；再在关机状态下插上充电器后开机一次；最后把 `log/` 拷回来，连同每次的结果一起发给我。要看的日志：每次插拔后有一行 `charger: change (<变了什么>): ...`，紧跟一行 `charger: change (...): regs e4=... e5=... e6=... eb=... f0=... (PLUG_IN_STS N, CHRG_STS ..., BAT_EXS N, CHRG_EN N, in: VLIM on 4.5 V ILIM on 1.50 A, out: 4.20 V 2.00 A), read in X ms`，之后 30 行 `charger: +N s: ...` 和一行 `charger: samples done, 30 in 30 s, read time avg ...`（每次读的耗时，游戏里应该远低于 1 ms）。没充上的那几次重点看 PLUG_IN_STS 是 0 还是 1，CHRG_STS 是不是 CHRG_OFF，e5 的 VLIM 和 ILIM 是否还是 on 4.5 V 和 1.50 A，`IRQs plug_in N plug_out M` 有没有加一，以及 online 有没有变。PLUG_IN_STS=0 是第一种情况，PLUG_IN_STS=1 而 e5 变了是第二种。插拔会把休眠唤醒，休眠前后还各有一组 `charger: sleep #N before: ...` 和 `charger: sleep #N after: ...`。
 - 菜单只在有变化时重绘：以前 ROM 列表和菜单每个 vblank 都整屏重绘（约 60 次每秒），现在停着不动时不重绘，主循环睡在 `poll()` 里。打开 Debug log 后，在菜单里每 60 秒和离开菜单（进游戏、休眠、关机）时有一行 `ui: menus for X s (...): N redraws (R/s), M updates, P% asleep in poll; bat ...`。要看：停在 ROM 列表、设置或游戏菜单不动时 R 应该接近 0（选中的名字太长在滚动时，滚动期间约 60，两端各停 1 秒；System info 每秒最多 3 次，Date & time 每秒 1 次），P 应该接近 100%；菜单按键、方向键按住连发是否和以前一样跟手；走马灯速度是否和以前一样（每秒 60 像素，开头和结尾各停 1 秒）；两次确认的 "Press A to ..." 是否 3 秒后恢复；标题栏时间是否按分钟跳；电量变化、插拔充电线、按音量键时菜单上的电量和 Volume 是否马上更新；ROM 列表里有 ROM 在算 CRC 时名字是否还会改过来。省电效果：同一行里的 `bat` 有功率（mW），和以前版本 Debug log 里 ROM 列表停着时的 `battery:` 行（每分钟一行）比较，同样亮度下看功率差多少。selftest 里模拟的结果是：菜单静止 10 秒 0 次重绘，滚动时 0.5 秒 30 次，System info 3 秒 9 次。
+- 开机恢复（`resume.c`，ROM 列表设置里的 Resume on boot，默认开）：设置页现在正好一页 9 行，去掉了 Back 行（按 B 返回），Resume on boot 在 Power off 上面，确认一下。测试步骤：一、玩一个子文件夹里的游戏，长按电源键关机，再开机，应该直接进游戏、接着上次的位置，Quit to ROM list 回到那个文件夹并选中这个 ROM。关机时的日志是 `state: wrote ... (power off)` 和 `resume: record written, the next boot resumes <路径> with <核心> (power off: power key held 2 s)`；开机是 `resume: found ... gamepad up after N ms, buttons 0x0; resuming`、`state: loaded ...`、`resume: <路径> started at X ms, Y ms after the frontend started`、`resume: first game frame on screen at X ms, Y ms after the frontend started`，5 秒后 `resume: record removed (the resumed game ran 5 s)`。要看从前端启动到游戏第一帧多久（qemu 里从决定到读完即时存档约 30 ms，真机主要是等手柄，预计 1.2 到 1.4 s 出画面，比现在出列表的约 1.06 s 晚一点），以及 N 是不是一直在 100 到 200 ms 左右。二、用游戏菜单的 Power off 再试一次，日志里是 `(power off: in-game menu)`。三、游戏中关机后按住 B 开机，应该显示列表并选中那个游戏，日志 `resume: skipped ...: B held at boot; gamepad up after N ms, buttons 0x1`。如果按住 B 还是进了游戏，看 buttons 是不是 0x0，以及有没有 `input event5: buttons 0x1 already held`，那说明手柄的第一个报告比 100 ms 来得晚，要加长 `RESUME_PAD_SETTLE_NS`。四、退出到列表再从设置里关机，开机应该是列表，日志 `resume: none (no record, ...)`。五、把 Resume on boot 关掉，游戏中关机再开，是列表，日志 `Resume on boot is off`。出问题时看 `resume: skipped` 一行后面的原因。
 
 ## 已知问题
 
@@ -56,7 +57,7 @@
 - 跳帧时前端还是每帧把上一帧画面重新缩放旋转一遍（blit），这部分开销没有省下来。
 - 前端自己实现帧间混合（smart 模式只混合闪烁的像素，以及 mGBA 下也能用）。
 - 中文文件名：GBA 分区已经用 utf8 挂载，还缺一套 CJK 字体。
-- 记住上次所在的文件夹和选中的 ROM，跨开机恢复。现在只在本次开机内保留。
+- 记住上次所在的文件夹和选中的 ROM，跨开机恢复。现在只在本次开机内保留，只有开机恢复（以及跳过恢复）时会定位到关机时的那个游戏。开机恢复的记录退回列表时就删了，用不上，要做的话另存一个文件。
 - zip 格式 ROM。
 - 震动卡带（`gpsp_rumble`），需要前端驱动 pwm-vibrator。
 - mGBA 的性能：多线程视频、LTO、PGO。
