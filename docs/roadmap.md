@@ -27,13 +27,14 @@
 - 系统信息页（ROM 列表的设置里和游戏菜单里的 System info）：打开时日志里有 `sysinfo:` 开头的几行，看找到了哪些温度传感器。2026-10-19 实机上 tsadc 的两个 thermal zone（`soc-thermal`、`gpu-thermal`）都能看到，GPU 节点关掉了 `gpu-thermal` 也照样注册。没有 hwmon（没开 `CONFIG_HWMON`），RK817 的驱动不报电池温度。还要确认 CPU 占用、频率、内存和剩余空间的数字是否合理。
 - 菜单里的两次确认：游戏菜单的 Restart with、Power off 和 ROM 列表设置里新加的 Power off 现在和 Restart game 一样要 3 秒内按两次 A。从设置关机时日志里是 `power off: settings`，看看保存和关机流程是否和长按电源键一样。
 - 退出时的即时存档：退出、关机、长按电源键关机、换核心、休眠后再开同一个游戏，日志里应该有 `state: wrote N bytes to <rom>.<core>.state (原因): serialize X ms, write Y ms` 和下次的 `state: loaded ... resuming`，画面接着上次的位置。qemu 下（PC 硬盘）序列化 0.3 到 3 ms，写 416 到 520KiB 约 9 到 27 ms，真卡上的写入时间要看日志，关机路径上它在 "Saving..." 画面之后、`dmesg-poweroff.txt` 之前。还要看 Restart game 后的 `state: removed`，以及用电脑换掉 `.sav` 后是否显示 `skipped: the save data changed`。另外看看从即时存档恢复时游戏内的 RTC（宝可梦等）是否正常。
+- 日期和时间（ROM 列表设置里的 Date & time，`clock.c`）：开机日志里的 `clock: system ..., RTC ...` 是否读到了 RTC（内核新开了 `CONFIG_RTC_INTF_DEV`，要有 `/dev/rtc0`），没设过时是否带 `looks never set`。设置一次后看 `clock: setting`、`clock: settimeofday(...)`、`clock: RTC_SET_TIME on /dev/rtc0` 和 `clock: RTC reads back` 几行是否都是 ok，系统信息页的 Clock 和 ROM 列表标题栏的时间是否跟着变。然后关机再开、隔一段时间再开，看时间有没有走对；再试一次电池完全耗尽后充电开机，看 RTC 是否还保持（RK817 的 RTC 应该和 PMIC 一起由电池供电，没有单独的纽扣电池）。rk808 驱动里有 Rockchip 日历 11 月 31 日的换算，跨 11 月底设时间时留意 read back 的结果。最后用宝可梦宝石系列确认游戏里的时间。
 
 ## 已知问题
 
 - 声音还有轻微的爆音。还没定位。先看每局游戏结束时的摘要行里 underrun 次数。如果是 0，最可能是重采样，现在 32768Hz 到 48000Hz 用的是线性插值（`resample.c`），可以换成多相 FIR。另外 gpSP 的音频模拟本身比 mGBA 粗糙，可以拿同一个游戏两个核心对比。
 - 界面字体只有 ASCII（`app/hwtest/font8x8.h`），中文文件名显示不了。
 - 不支持 zip 格式的 ROM。
-- 硬件时钟可能从来没设过，用到 RTC 的游戏（宝可梦宝石系列的树果和潮汐等）时间不对。
+- 硬件时钟出厂时可能没设过，用到 RTC 的游戏（宝可梦宝石系列的树果和潮汐等）时间会不对，要先在设置的 Date & time 里设一次，开机日志会标出没设过的情况。没有时区，输入的时间按 UTC 存进系统时钟和 RTC，游戏看到的就是输入的时间，日志和 perf.csv 里写的 UTC 其实是这个时间。
 - 插拔充电线也会把机器从休眠唤醒（PMIC 中断），现在唤醒后一律亮屏。
 - 卡上旧版本只在显式选了非默认核心时才写 `core=`，默认核心改成 gpSP 以后，当初手动选过 mGBA 但文件里没记下来的 ROM 会变成 gpSP。
 
@@ -43,7 +44,6 @@
 
 - 跳帧（`gpsp_frameskip` 自动模式加阈值，`mgba_frameskip`），按 ROM 设置，给重负载的游戏用。
 - 太阳传感器亮度（`mgba_solar_sensor_level`），Boktai 系列需要，只有 mGBA 支持。
-- 设置时间的菜单项，配合 RTC 游戏。
 - 前端自己实现帧间混合（smart 模式只混合闪烁的像素，以及 mGBA 下也能用）。
 - 中文文件名：vfat 挂载用 utf8，再加一套 CJK 字体。
 - 记住上次所在的文件夹和选中的 ROM，跨开机恢复。现在只在本次开机内保留。

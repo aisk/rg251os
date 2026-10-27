@@ -7,8 +7,9 @@
  * each cpufreq policy and the CPU mode (cpuctl.c), memory used of total
  * (MemTotal - MemAvailable), every thermal zone (the PX30 tsadc gives
  * soc-thermal and gpu-thermal) and hwmon temperature, the battery
- * (battery.c), uptime (CLOCK_BOOTTIME), free of total space on the GBA
- * partition and the kernel release.
+ * (battery.c), the date and time (the system clock as UTC, "Not set"
+ * before 2024, see clock.c), uptime (CLOCK_BOOTTIME), free of total space
+ * on the GBA partition and the kernel release.
  *
  * Log: when the page opens, "sysinfo: ..." lines with all the values and
  * which sensors were found, so one run on the device shows them.
@@ -260,8 +261,10 @@ static void sample(void)
 
 static void log_values(const char *from)
 {
-	char cpu[160], temps[300], bat[96], mode[16];
+	char cpu[160], temps[300], bat[96], mode[16], when[24];
 	size_t n = 0;
+	struct tm tm;
+	int valid;
 
 	n += snprintf(cpu + n, sizeof(cpu) - n, "total %d%%",
 		      si.ncpu ? si.usage[0] : -1);
@@ -287,8 +290,11 @@ static void log_values(const char *from)
 	log_msg("sysinfo: %d temperature sensors (thermal zones, hwmon): %s",
 		si.ntemps, si.ntemps ? temps : "none");
 	battery_format(&si.bat, bat, sizeof(bat));
-	log_msg("sysinfo: battery %s; uptime %lld s; data %llu of %llu MiB "
-		"free; kernel %s", bat, (long long)(boot_ms() / 1000),
+	valid = realtime_utc(&tm);
+	strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", &tm);
+	log_msg("sysinfo: battery %s; clock %s UTC%s; uptime %lld s; data %llu "
+		"of %llu MiB free; kernel %s", bat, when, valid ? "" : " (not set)",
+		(long long)(boot_ms() / 1000),
 		si.data_free >> 20, si.data_size >> 20, si.kernel);
 }
 
@@ -359,6 +365,7 @@ void sysinfo_draw(struct canvas *c)
 				    MAX_TEMPS : SYSINFO_MAX_CPUS][28];
 	int y = ROW_Y, n = 0;
 	int64_t up = boot_ms() / 1000;
+	struct tm tm;
 
 	draw_fill(c, 0, 0, c->w, c->h, COL_BG);
 	draw_text(c, 8, 8, 2, COL_HI, "System info");
@@ -414,6 +421,13 @@ void sysinfo_draw(struct canvas *c)
 	} else {
 		row(c, &y, "Battery", "-");
 	}
+	if (realtime_utc(&tm))
+		snprintf(v, sizeof(v), "%04d-%02d-%02d %02d:%02d:%02d",
+			 tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour,
+			 tm.tm_min, tm.tm_sec);
+	else
+		snprintf(v, sizeof(v), "Not set");
+	row(c, &y, "Clock", v);
 	snprintf(v, sizeof(v), "%lld:%02lld:%02lld", (long long)(up / 3600),
 		 (long long)(up / 60 % 60), (long long)(up % 60));
 	row(c, &y, "Uptime", v);

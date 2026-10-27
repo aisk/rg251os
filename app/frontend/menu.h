@@ -17,6 +17,7 @@ enum ui_action {
 	UI_RESTART,   /* restart the game with rom_settings.core (confirmed) */
 	UI_RESET,     /* start the game over (confirmed) */
 	UI_SYSINFO,   /* open the system info page (sysinfo.c) */
+	UI_DATETIME,  /* open the Date & time page (clock.c) */
 };
 
 /* Button edges with key repeat for the d-pad. */

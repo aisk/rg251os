@@ -14,32 +14,34 @@
  * the same ROM; a folder that is gone by then falls back to its parent.
  * Nothing of this is kept across boots. SELECT opens the global settings
  * (Volume, Brightness, CPU, Audio mode Simple/Adaptive, Debug log on/off,
- * see log.c, System info, the read only page of sysinfo.c, and Power
- * off). In game, SELECT+START opens the in-game menu: Resume, Restart
- * game, Volume, Brightness, CPU, Core, Frame blend, Settings, System
- * info, Quit to ROM list, Power off; B or SELECT+START again resumes.
- * Restart game starts the game over like the console's reset button (its
- * save written first, its resume state removed). Restart game, Restart
- * with (below) and Power off, here and in the global settings, ask first:
- * the first A only turns the row into "Press A to restart" or "Press A to
- * power off", a second A within 3 s does it, moving away or waiting
- * cancels (see struct confirm). CPU is the global CPU mode (Adaptive, Max
- * or a fixed frequency, see cpuctl.c); changed in game it applies as soon
- * as the game resumes. Core (this game: mGBA or gpSP) shows the running
- * core; left/right pick another one, the row then reads "Restart with"
- * and A (confirmed, changing the core again cancels) saves (the resume
- * state under the old core's name, so switching back resumes there) and
- * starts the game with it (resuming instead keeps it for the next start).
- * Frame blend (this game, gpSP's 50:50 mix of the current and the
- * previous frame for games that rely on LCD ghosting) applies on the next
- * frame; mGBA has none, so with mGBA the row reads "gpSP only" and cannot
- * be changed, the setting is kept for gpSP. The in-game Settings screen
+ * see log.c, Date & time, the page of clock.c that sets the clock and the
+ * RTC, System info, the read only page of sysinfo.c, and Power off). In
+ * game, SELECT+START opens the in-game menu: Resume, Restart game,
+ * Volume, Brightness, CPU, Core, Frame blend, Settings, System info, Quit
+ * to ROM list, Power off; B or SELECT+START again resumes. Restart game
+ * starts the game over like the console's reset button (its save written
+ * first, its resume state removed). Restart game, Restart with (below)
+ * and Power off, here and in the global settings, ask first: the first A
+ * only turns the row into "Press A to restart" or "Press A to power off",
+ * a second A within 3 s does it, moving away or waiting cancels (see
+ * struct confirm). CPU is the global CPU mode (Adaptive, Max or a fixed
+ * frequency, see cpuctl.c); changed in game it applies as soon as the
+ * game resumes. Core (this game: mGBA or gpSP) shows the running core;
+ * left/right pick another one, the row then reads "Restart with" and A
+ * (confirmed, changing the core again cancels) saves (the resume state
+ * under the old core's name, so switching back resumes there) and starts
+ * the game with it (resuming instead keeps it for the next start). Frame
+ * blend (this game, gpSP's 50:50 mix of the current and the previous
+ * frame for games that rely on LCD ghosting) applies on the next frame;
+ * mGBA has none, so with mGBA the row reads "gpSP only" and cannot be
+ * changed, the setting is kept for gpSP. The in-game Settings screen
  * shows the game with the effects applied (live preview) under a panel
  * with Color (this game: Auto, showing what it resolved to as "Auto
  * (GBA)", Off, GBA, GBA light or SP101), LCD grid, Grid darkness, Dot
  * boost and Debug log. In menus, up/down select, left/right change a
  * value, A activates, B goes back. The battery level is shown in the ROM
- * list header and above the in-game menus.
+ * list header and above the in-game menus; the ROM list header also has
+ * the time (HH:MM, UTC as entered, see clock.c) once the clock is set.
  */
 #include <stdio.h>
 #include <string.h>
@@ -428,13 +430,21 @@ void draw_rom_name(struct canvas *c, int x, int y, uint16_t col,
 }
 
 /* "GBA" at the top, else the folder's path, its start cut with "~" to
- * keep the innermost folder in view; then the position. */
+ * keep the innermost folder in view; then the position. The time left of
+ * the battery, only when the clock was set (realtime_utc). */
 static void list_header(struct canvas *c)
 {
 	const char *head = cur_dir[0] ? cur_dir : "GBA";
 	char pos[24] = "", buf[32];
 	int right = draw_battery(c, c->w - 8, 8);
 	int cols, n = strlen(head);
+	struct tm tm;
+
+	if (realtime_utc(&tm)) {
+		right -= 16 * 6;
+		draw_textf(c, right, 8, 2, COL_DIM, "%02d:%02d", tm.tm_hour,
+			   tm.tm_min);
+	}
 
 	if (roms.count)
 		snprintf(pos, sizeof(pos), "%d/%d", sel + 1, roms.count);
@@ -706,17 +716,19 @@ void ingame_menu_draw(struct canvas *c, const uint16_t *frame, int pitch,
 
 enum {
 	SI_VOLUME, SI_BRIGHTNESS, SI_CPU, SI_COLOR, SI_GRID, SI_GRID_DIM,
-	SI_GRID_BOOST, SI_AUDIO, SI_DEBUG, SI_SYSINFO, SI_POWEROFF, SI_BACK,
+	SI_GRID_BOOST, SI_AUDIO, SI_DEBUG, SI_DATETIME, SI_SYSINFO, SI_POWEROFF,
+	SI_BACK,
 };
 
 static const char *const si_names[] = {
 	"Volume", "Brightness", "CPU", "Color", "LCD grid", "Grid darkness",
-	"Dot boost", "Audio", "Debug log", "System info", "Power off", "Back",
+	"Dot boost", "Audio", "Debug log", "Date & time", "System info",
+	"Power off", "Back",
 };
 
 static const uint8_t si_romlist[] = {
-	SI_VOLUME, SI_BRIGHTNESS, SI_CPU, SI_AUDIO, SI_DEBUG, SI_SYSINFO,
-	SI_POWEROFF, SI_BACK,
+	SI_VOLUME, SI_BRIGHTNESS, SI_CPU, SI_AUDIO, SI_DEBUG, SI_DATETIME,
+	SI_SYSINFO, SI_POWEROFF, SI_BACK,
 };
 static const uint8_t si_ingame[] = {
 	SI_COLOR, SI_GRID, SI_GRID_DIM, SI_GRID_BOOST, SI_DEBUG, SI_BACK,
@@ -798,6 +810,8 @@ int settings_menu_update(uint32_t pressed)
 			return UI_BACK;
 		if (item == SI_SYSINFO)
 			return UI_SYSINFO;
+		if (item == SI_DATETIME)
+			return UI_DATETIME;
 		if (item == SI_POWEROFF && confirm_press(&st.confirm, item))
 			return UI_POWEROFF;
 		if (item == SI_GRID || item == SI_COLOR || item == SI_AUDIO ||

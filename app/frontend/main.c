@@ -34,6 +34,10 @@
  * CPU frequency: schedutil throughout; in game cpuctl.c sets a floor from
  * the frame times (CPU mode setting: adaptive, max or a fixed OPP).
  *
+ * Clock (clock.c): the kernel sets the system clock from the RK817 RTC at
+ * boot, startup logs both ("clock: ..."); Date & time in the ROM list's
+ * settings sets the two. No time zones: what the user enters is UTC.
+ *
  * Keys: SELECT+START in game opens the in-game menu (the RG351P has no
  * menu/function button; SELECT is also the hotkey enabler in AmberELEC
  * and ROCKNIX). SELECT in the ROM list opens the settings. See menu.c for
@@ -91,6 +95,7 @@
 #include "audio.h"
 #include "battery.h"
 #include "blit.h"
+#include "clock.h"
 #include "core.h"
 #include "cpuctl.h"
 #include "display.h"
@@ -116,7 +121,7 @@ int selftest_core_switch(const char *data, long frames);
 
 enum state {
 	ST_ROMLIST, ST_GAME, ST_MENU, ST_SETTINGS, ST_FATAL, ST_POWEROFF,
-	ST_SYSINFO
+	ST_SYSINFO, ST_DATETIME
 };
 
 static struct {
@@ -426,7 +431,7 @@ static void perf_report(void);
 
 static const char *const state_names[] = {
 	"ROM list", "game", "in-game menu", "settings", "error screen",
-	"power off", "system info",
+	"power off", "system info", "date & time",
 };
 
 /* From the ROM list's settings or the in-game menu (the game stays
@@ -766,6 +771,12 @@ static void frame(int64_t now)
 		case UI_SYSINFO:
 			open_sysinfo(buttons, now);
 			break;
+		case UI_DATETIME:
+			/* Only in the ROM list's settings: no game behind. */
+			datetime_enter();
+			m.suppress = buttons;
+			m.st = ST_DATETIME;
+			break;
 		case UI_POWEROFF:
 			request_poweroff("settings");
 			break;
@@ -778,6 +789,8 @@ static void frame(int64_t now)
 			fr = core_frame(&fw, &fh, &fp);
 		if (m.st == ST_SYSINFO)
 			sysinfo_draw(&m.cv);
+		else if (m.st == ST_DATETIME)
+			datetime_draw(&m.cv);
 		else if (m.st == ST_SETTINGS)
 			settings_menu_draw(&m.cv, fr, fp, fw, fh);
 		else if (m.st == ST_MENU)
@@ -806,6 +819,17 @@ static void frame(int64_t now)
 		}
 		blit_canvas();
 		break;
+	case ST_DATETIME:
+		pressed = ui_repeat(buttons & ~m.suppress, now);
+		if (datetime_update(pressed) == UI_BACK) {
+			m.suppress = buttons;
+			m.st = ST_SETTINGS;
+			settings_menu_draw(&m.cv, NULL, 0, 0, 0);
+		} else {
+			datetime_draw(&m.cv);
+		}
+		blit_canvas();
+		break;
 	case ST_FATAL:
 		message_draw(&m.cv, m.fatal_title, m.fatal_msg, COL_ERR);
 		blit_canvas();
@@ -819,18 +843,6 @@ static void frame(int64_t now)
 }
 
 /* --------------------------------------------------------------- setup */
-
-/* CLOCK_REALTIME comes from the RK817 RTC (RTC_HCTOSYS) if it was set. */
-static void clock_log(void)
-{
-	struct tm tm;
-	char buf[32];
-	int valid = realtime_utc(&tm);
-
-	strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S UTC", &tm);
-	log_msg("clock: realtime %s%s", buf,
-		valid ? "" : " (RTC not set, perf.csv uses boot time)");
-}
 
 /*
  * The first boot's partition grow (sdgrow.c) runs before anything else
@@ -905,7 +917,7 @@ static void startup(void)
 	cpu_info_log();
 	cpuctl_init(NULL);
 	cpuctl_set_mode(settings.cpu);
-	clock_log();
+	clock_boot_log();
 	battery_init("/sys/class/power_supply");
 	if (!display_ready() && display_init())
 		m.next_drm_try = now_ns() + 200000000LL;

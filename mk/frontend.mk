@@ -25,7 +25,7 @@ LIBRETRO_INCLUDE := $(if $(MGBA_INCLUDE),$(MGBA_INCLUDE),$(EXTERNAL)/mgba/src/pl
 FRONTEND_SRCS := main.c log.c sys.c display.c blit.c draw.c audio.c \
 	resample.c input.c romlist.c core.c menu.c perf.c selftest.c \
 	settings.c fx.c battery.c cpuctl.c sleep.c sdgrow.c romdb.c romdb_data.c \
-	sysinfo.c
+	sysinfo.c clock.c
 FRONTEND_OBJS := $(addprefix $(FRONTEND_BUILD)/obj/,$(FRONTEND_SRCS:.c=.o))
 FRONTEND_STUB_OBJ := $(FRONTEND_BUILD)/obj/stub_core.o
 FRONTEND_STUB_LIB := $(FRONTEND_BUILD)/libstub_core.a

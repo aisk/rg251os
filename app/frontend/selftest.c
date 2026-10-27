@@ -16,6 +16,7 @@
 #include "audio.h"
 #include "battery.h"
 #include "blit.h"
+#include "clock.h"
 #include "core.h"
 #include "core_api.h"
 #include "cpuctl.h"
@@ -1576,15 +1577,15 @@ static void test_ingame_restart(const char *dir)
 
 	/* Global settings: Power off is the row before Back. */
 	settings_menu_enter(0);
-	for (int i = 0; i < 6; i++)
+	for (int i = 0; i < 7; i++)
 		settings_menu_update(JOY_BIT(DOWN));
 	settings_menu_draw(&cv, NULL, 0, 0, 0);
-	/* Row 6 at y 46 + 6 * 26 = 202. */
-	plain = count_color(px, 197, 223, COL_HI);
+	/* Row 7 at y 46 + 7 * 26 = 228. */
+	plain = count_color(px, 223, 249, COL_HI);
 	CHECK(settings_menu_update(JOY_BIT(A)) == UI_NONE,
 	      "settings power off: first A arms");
 	settings_menu_draw(&cv, NULL, 0, 0, 0);
-	armed = count_color(px, 197, 223, COL_HI);
+	armed = count_color(px, 223, 249, COL_HI);
 	CHECK(plain == 0 && armed > 0,
 	      "settings power off: armed row %d/%d highlighted", plain, armed);
 	CHECK(count_color(px, 280, 300, COL_SEL) == 0 &&
@@ -1601,7 +1602,7 @@ static void test_ingame_restart(const char *dir)
 	CHECK(settings_menu_update(JOY_BIT(A)) == UI_NONE,
 	      "settings power off: moving away cancels");
 	settings_menu_enter(0);
-	for (int i = 0; i < 6; i++)
+	for (int i = 0; i < 7; i++)
 		settings_menu_update(JOY_BIT(DOWN));
 	settings_menu_update(JOY_BIT(A));
 	for (int i = 0; i < 179; i++)
@@ -1726,6 +1727,204 @@ static void test_sysinfo(const char *dir)
 	sysinfo_set_root(NULL);
 }
 
+/* The system clock setter for test_clock: records, fails with fake_err. */
+static struct timeval fake_tv;
+static int fake_calls, fake_err;
+
+static int fake_settime(const struct timeval *tv)
+{
+	fake_calls++;
+	fake_tv = *tv;
+	if (fake_err) {
+		errno = fake_err;
+		return -1;
+	}
+	return 0;
+}
+
+/* Date & time page: the field (0 year .. 4 minute) to value by up. */
+static void dt_set(int field, int value)
+{
+	struct tm tm;
+
+	for (int i = 0; i < 5 && datetime_field() != field; i++)
+		datetime_update(JOY_BIT(RIGHT));
+	for (int i = 0; i < 100; i++) {
+		int v;
+
+		datetime_value(&tm);
+		v = field == 0 ? tm.tm_year + 1900 : field == 1 ? tm.tm_mon + 1 :
+		    field == 2 ? tm.tm_mday : field == 3 ? tm.tm_hour : tm.tm_min;
+		if (v == value)
+			return;
+		datetime_update(JOY_BIT(UP));
+	}
+	CHECK(0, "clock: field %d never reached %d", field, value);
+}
+
+static int dt_is(int y, int mo, int d, int h, int mi)
+{
+	struct tm tm;
+
+	datetime_value(&tm);
+	return tm.tm_year + 1900 == y && tm.tm_mon + 1 == mo && tm.tm_mday == d &&
+	       tm.tm_hour == h && tm.tm_min == mi;
+}
+
+/*
+ * Date & time (clock.c) with a regular file as /dev/rtc0 and a fake
+ * settimeofday, so the build host's clock is never touched: month
+ * lengths, field navigation, wrapping and day clamping, cancel, and saves
+ * where the RTC ioctl (ENOTTY on a file), a missing RTC or the system
+ * clock fail, each logged and shown on the page.
+ */
+static void test_clock(const char *dir)
+{
+	static uint16_t px[480 * 320];
+	static char log[65536];
+	struct stat sb;
+	struct canvas cv = { px, 480, 320 };
+	char rtc[300], logp[300], missing[300], msg[400];
+	struct tm tm;
+	time_t want;
+	int n, red = 0, start;
+
+	CHECK(clock_days_in_month(2024, 2) == 29 &&
+	      clock_days_in_month(2000, 2) == 29 &&
+	      clock_days_in_month(2100, 2) == 28 &&
+	      clock_days_in_month(2026, 2) == 28 &&
+	      clock_days_in_month(2026, 4) == 30 &&
+	      clock_days_in_month(2026, 12) == 31, "clock: month lengths");
+
+	/* Everything from here on also goes to clock-log.txt, after the
+	 * lines kept in memory so far. */
+	snprintf(logp, sizeof(logp), "%s/clock-log.txt", dir);
+	log_open_file(logp);
+	start = stat(logp, &sb) ? 0 : (int)sb.st_size;
+	snprintf(rtc, sizeof(rtc), "%s/rtc0", dir);
+	write_file_atomic(rtc, "", 0);
+	snprintf(missing, sizeof(missing), "%s/no-rtc", dir);
+	clock_set_backend(rtc, fake_settime);
+	clock_boot_log();
+
+	datetime_enter();
+	CHECK(datetime_field() == 0 && !datetime_message()[0], "clock: enter");
+	datetime_update(JOY_BIT(LEFT));
+	CHECK(datetime_field() == 4, "clock: left wraps to the minute");
+	datetime_update(JOY_BIT(RIGHT));
+	CHECK(datetime_field() == 0, "clock: right wraps to the year");
+	dt_set(0, 2024);
+	dt_set(1, 1);
+	dt_set(2, 31);
+	dt_set(3, 23);
+	dt_set(4, 0);
+	CHECK(dt_is(2024, 1, 31, 23, 0), "clock: fields set");
+	/* Jan 31 -> Feb 29 in a leap year -> Feb 28 the year after. */
+	datetime_update(JOY_BIT(LEFT));
+	datetime_update(JOY_BIT(LEFT));
+	datetime_update(JOY_BIT(LEFT));
+	CHECK(datetime_field() == 1, "clock: on the month");
+	datetime_update(JOY_BIT(UP));
+	CHECK(dt_is(2024, 2, 29, 23, 0), "clock: Feb 29 clamped in 2024");
+	datetime_update(JOY_BIT(LEFT));
+	datetime_update(JOY_BIT(UP));
+	CHECK(dt_is(2025, 2, 28, 23, 0), "clock: Feb 28 in 2025");
+	/* Wrapping: year, month, day in its month, hour, minute. */
+	datetime_update(JOY_BIT(DOWN));
+	datetime_update(JOY_BIT(DOWN));
+	CHECK(dt_is(2099, 2, 28, 23, 0), "clock: year wraps down");
+	datetime_update(JOY_BIT(UP));
+	CHECK(dt_is(2024, 2, 28, 23, 0), "clock: year wraps up");
+	dt_set(2, 29);
+	datetime_update(JOY_BIT(UP));
+	CHECK(dt_is(2024, 2, 1, 23, 0), "clock: day wraps after the 29th");
+	datetime_update(JOY_BIT(DOWN));
+	CHECK(dt_is(2024, 2, 29, 23, 0), "clock: day wraps down");
+	datetime_update(JOY_BIT(LEFT));
+	datetime_update(JOY_BIT(DOWN));
+	CHECK(dt_is(2024, 1, 29, 23, 0), "clock: month down");
+	datetime_update(JOY_BIT(DOWN));
+	CHECK(dt_is(2024, 12, 29, 23, 0), "clock: month wraps down");
+	datetime_update(JOY_BIT(UP));
+	CHECK(dt_is(2024, 1, 29, 23, 0), "clock: month wraps up");
+	datetime_update(JOY_BIT(RIGHT));
+	datetime_update(JOY_BIT(RIGHT));
+	datetime_update(JOY_BIT(UP));
+	CHECK(dt_is(2024, 1, 29, 0, 0), "clock: hour wraps");
+	datetime_update(JOY_BIT(RIGHT));
+	datetime_update(JOY_BIT(DOWN));
+	CHECK(dt_is(2024, 1, 29, 0, 59), "clock: minute wraps");
+	/* B cancels: nothing set. */
+	CHECK(datetime_update(JOY_BIT(B)) == UI_BACK && fake_calls == 0,
+	      "clock: cancel sets nothing");
+
+	/* A saves: the system clock gets the time with 0 seconds, the RTC
+	 * ioctl fails on a regular file, the page stays with the message. */
+	datetime_enter();
+	dt_set(0, 2028);
+	dt_set(1, 2);
+	dt_set(2, 29);
+	dt_set(3, 13);
+	dt_set(4, 45);
+	CHECK(datetime_update(JOY_BIT(A)) == UI_NONE, "clock: failed save stays");
+	memset(&tm, 0, sizeof(tm));
+	tm.tm_year = 2028 - 1900;
+	tm.tm_mon = 1;
+	tm.tm_mday = 29;
+	tm.tm_hour = 13;
+	tm.tm_min = 45;
+	want = timegm(&tm);
+	CHECK(fake_calls == 1 && fake_tv.tv_sec == want && fake_tv.tv_usec == 0,
+	      "clock: settimeofday got %lld, want %lld (%d calls)",
+	      (long long)fake_tv.tv_sec, (long long)want, fake_calls);
+	CHECK(!strncmp(datetime_message(), "Not saved to the RTC:\n", 22),
+	      "clock: message %s", datetime_message());
+	datetime_draw(&cv);
+	for (int y = cv.h - 76; y < cv.h - 36; y++)
+		for (int x = 0; x < cv.w; x++)
+			red += px[y * cv.w + x] == COL_ERR;
+	CHECK(red > 100, "clock: message not drawn (%d red pixels)", red);
+	snprintf(msg, sizeof(msg), "%s/ui-datetime.raw", dir);
+	write_file_atomic(msg, px, sizeof(px));
+	datetime_update(JOY_BIT(UP));
+	CHECK(!datetime_message()[0], "clock: an edit clears the message");
+	CHECK(datetime_update(JOY_BIT(B)) == UI_BACK, "clock: B after a failure");
+
+	/* No RTC device, then the system clock failing too. */
+	clock_set_backend(missing, fake_settime);
+	CHECK(clock_set(&tm, msg, sizeof(msg)) == ENOENT &&
+	      !strncmp(msg, "Not saved to the RTC:\n", 22), "clock: no RTC: %s",
+	      msg);
+	fake_err = EPERM;
+	CHECK(clock_set(&tm, msg, sizeof(msg)) == EPERM &&
+	      !strncmp(msg, "Clock and RTC not set:\n", 23),
+	      "clock: both failing: %s", msg);
+	fake_err = 0;
+
+	n = read_file(logp, log, sizeof(log) - 1);
+	log[n > 0 ? n : 0] = 0;
+	CHECK(n > start, "clock: log %d bytes, %d before the test", n, start);
+	memmove(log, log + (n > start ? start : 0),
+		(size_t)(n > start ? n - start + 1 : 1));
+	CHECK(strstr(log, "clock: system ") && strstr(log, ", RTC unreadable ("),
+	      "clock: boot line");
+	CHECK(strstr(log, "clock: setting 2028-02-29 13:45:00 UTC; system clock "
+		     "was ") != NULL, "clock: set line");
+	snprintf(msg, sizeof(msg), "clock: settimeofday(%lld): ok", (long long)want);
+	CHECK(strstr(log, msg) != NULL, "clock: settimeofday line");
+	CHECK(strstr(log, "clock: settimeofday(") &&
+	      strstr(log, strerror(EPERM)), "clock: settimeofday failure logged");
+	snprintf(msg, sizeof(msg), "clock: RTC_SET_TIME on %s: %s", rtc,
+		 strerror(ENOTTY));
+	CHECK(strstr(log, msg) != NULL, "clock: RTC failure logged");
+	snprintf(msg, sizeof(msg), "clock: RTC_SET_TIME on %s: %s", missing,
+		 strerror(ENOENT));
+	CHECK(strstr(log, msg) != NULL, "clock: missing RTC logged");
+	CHECK(strstr(log, "clock: date & time page closed without saving") != NULL,
+	      "clock: cancel logged");
+	clock_set_backend(NULL, NULL);
+}
+
 /* Render the menus to <dir>/ui-*.raw (480x320 RGB565) for a visual check. */
 static void test_ui(const char *dir)
 {
@@ -1765,8 +1964,8 @@ static void test_ui(const char *dir)
 	settings_menu_draw(&cv, NULL, 0, 0, 0);
 	snprintf(path, sizeof(path), "%s/ui-settings.raw", dir);
 	write_file_atomic(path, px, sizeof(px));
-	/* Volume, Brightness, CPU, Audio, Debug log, System info, Power off,
-	 * Back: no grid rows outside a game. */
+	/* Volume, Brightness, CPU, Audio, Debug log, Date & time, System
+	 * info, Power off, Back: no grid rows outside a game. */
 	settings_menu_update(JOY_BIT(DOWN));
 	settings_menu_update(JOY_BIT(DOWN));
 	settings_menu_update(JOY_BIT(A));
@@ -1774,14 +1973,17 @@ static void test_ui(const char *dir)
 	settings.audio = settings_defaults.audio;
 	settings_menu_update(JOY_BIT(DOWN));
 	settings_menu_update(JOY_BIT(DOWN));
+	CHECK(settings_menu_update(JOY_BIT(A)) == UI_DATETIME,
+	      "settings: 6th row is Date & time");
+	settings_menu_update(JOY_BIT(DOWN));
 	CHECK(settings_menu_update(JOY_BIT(A)) == UI_SYSINFO,
-	      "settings: 6th row is System info");
+	      "settings: 7th row is System info");
 	settings_menu_update(JOY_BIT(DOWN));
 	CHECK(settings_menu_update(JOY_BIT(A)) == UI_NONE,
-	      "settings: 7th row is Power off (asks first)");
+	      "settings: 8th row is Power off (asks first)");
 	settings_menu_update(JOY_BIT(DOWN));
 	CHECK(settings_menu_update(JOY_BIT(A)) == UI_BACK,
-	      "settings: 8th row is Back");
+	      "settings: 9th row is Back");
 	settings_menu_enter(1);
 	for (int i = 0; i < 5; i++)
 		settings_menu_update(JOY_BIT(DOWN));
@@ -2219,6 +2421,7 @@ int selftest(const char *dir)
 	test_romlist_folders(dir);
 	test_ui(dir);
 	test_sysinfo(dir);
+	test_clock(dir);
 	log_msg("selftest: %s (%d failures)", failures ? "FAILED" : "passed",
 		failures);
 	return failures ? 1 : 0;
