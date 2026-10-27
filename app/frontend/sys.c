@@ -1,8 +1,9 @@
 /*
- * PID 1 duties and small system helpers: mounts, per boot log
- * directories, status LED, kernel log dumps, child reaping, power off
- * (with the GBA partition unmounted first), file and sysfs access, atomic
- * file writes, backlight, CPU info and temperature.
+ * PID 1 duties and small system helpers: mounts (proc, sysfs, devtmpfs,
+ * tmpfs, debugfs, the GBA partition), per boot log directories, status
+ * LED, kernel log dumps, child reaping, power off (with the GBA partition
+ * unmounted first), file and sysfs access, atomic file writes, backlight,
+ * CPU info and temperature.
  */
 #include <dirent.h>
 #include <errno.h>
@@ -56,6 +57,10 @@ void sys_early_init(void)
 	/* Normally already mounted by CONFIG_DEVTMPFS_MOUNT (EBUSY). */
 	mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID, "mode=0755");
 	mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777");
+	/* The PMIC registers for battery.c's charger lines (debug.config
+	 * kernels only; it logs what is missing). */
+	mount("debugfs", "/sys/kernel/debug", "debugfs",
+	      MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
 
 	/* Make sure fds 0..2 are valid so no device fd ends up as stderr. */
 	do

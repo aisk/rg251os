@@ -79,7 +79,7 @@ GBA 原生分辨率 240×160，正好按 2 倍整数放大铺满 480×320 的屏
 - 屏幕时序是 320×480，像素时钟 17MHz，物理尺寸 42mm×82mm，屏驱 `elida,kd35t133`，和主线一致。
 - 没有 gpio-keys 或 ADC 摇杆节点，再次确认按键和摇杆全部走机内 USB 手柄，只有电源键由 RK817 的 `pwrkey` 提供。
 - 电池参数写的是 3450mAh（`design_capacity`），`sample_res = <10>`，即 10mΩ 采样电阻，并且用的是 BSP 带库仑计的 `rk817,battery` 驱动。这和主线 commit 里“没有电流检测电阻”的说法矛盾。BSP DTS 有可能是从 Odroid Go Advance 照抄的，要实机读一下 RK817 的电流寄存器才能确定。
-- 充电器检测 GPIO 是 gpio0 PB3（`dc_det_gpio`）。
+- 充电器检测 GPIO 是 gpio0 PB3（`dc_det_gpio`）。主线驱动和我们的 DTS 都没用它，插拔只靠 RK817 自己的中断。
 - `sdio` 控制器在 BSP DTS 里是开着的，但没有挂任何设备。RG351P 早期批次的 WiFi 和社区的加装方案都是 USB 网卡（AmberELEC 休眠脚本里提到的 esp8089 应该是从 Odroid Go Advance 照抄来的注释），所以这个控制器大概率可以直接关掉。
 - 串口是 UART2 的 m1 引脚组，波特率 115200。
 
@@ -256,6 +256,7 @@ GBA 分区（下面写作 `<data>`）里的文件
 - 音频默认 adaptive，48kHz 非阻塞写入加动态速率控制，跟屏幕的 60.02Hz 对齐。`audio=simple` 是固定比例加阻塞写入的简单路径。
 - CPU 调频用 schedutil，游戏中前端根据帧耗时通过 uclamp 设频率下限（`cpu=adaptive`，也可以选 `max` 或固定频率）。
 - 调试日志默认关闭。打开后（设置里的 debug，或 `debug=on`）会多记周期性的 perf 行、mixer、`/proc/asound`、ALSA xrun 报告、内核日志和休眠调试信息。这些依赖内核的 `debug.config`。
+- 充电诊断不受调试日志开关影响（`battery.c`）：充电器 online、电池 status 和 charge_type、RK817 插拔中断次数（`/proc/interrupts`）、PMIC 的 CHRG_STS 和 SYS_STS 任何一个变化都记一组 `charger: change (...)`，带 0xe4 到 0xf0 里几个充电寄存器的解码，之后 30 秒每秒一行，再回到每 5 秒检查一次。开机和休眠前后也各记一组。寄存器通过 debugfs 的 regmap 文件读（前端挂载 `/sys/kernel/debug`，内核要 `debug.config` 里的 `CONFIG_DEBUG_FS`），没有时只记 sysfs 的值。
 - ROM 列表显示 No-Intro 标准名称（`romdb.c`，数据由 `make romdb` 从 libretro-database 的固定 commit 生成到 `romdb_data.c`）。先按 ROM 头的游戏代码查，同一代码有多条时用 CRC32 区分，代码对上但 CRC 对不上的名字后面加 `*`，查不到显示文件名。
 - 色彩校正默认 `auto`，按首次发行年份选：2004 年及以前 `gba`，2005 年以后 `sp101`，年份未知 `off`。
 - Frame blend（gpSP 的 50:50 帧混合）默认关，按游戏在游戏菜单的 Settings 里开（和 Color 一样标着 (game)），切换立即生效。mGBA 的 libretro 接口没有这个功能。

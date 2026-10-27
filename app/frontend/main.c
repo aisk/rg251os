@@ -33,7 +33,8 @@
  * paused, save and state written, audio closed, backlight and panel off,
  * suspend to RAM via sleep.c, or a light sleep blocked in poll() on the
  * input devices with the CPU at its lowest OPP if the kernel does not
- * suspend; every step logged as "sleep #N: ..."); holding it 2 s, Power
+ * suspend; every step logged as "sleep #N: ...", the charger's state as
+ * "charger: sleep #N before/after: ..."); holding it 2 s, Power
  * off in the menus or the power key on the error screen power off
  * (do_poweroff: game ended, settings saved, children waited for,
  * dmesg-poweroff.txt written, then sys_poweroff closes the log, unmounts
@@ -458,7 +459,7 @@ static void light_sleep(void)
 
 static void do_sleep(void)
 {
-	char bat[96], marker[48];
+	char bat[96], marker[48], why[32];
 	struct sleep_result r;
 	struct battery b;
 	int in_game = ui_top() == &game_page, light;
@@ -488,6 +489,8 @@ static void do_sleep(void)
 	battery_read(&b);
 	battery_format(&b, bat, sizeof(bat));
 	log_msg("sleep #%u: battery before: %s", m.sleeps, bat);
+	snprintf(why, sizeof(why), "sleep #%u before", m.sleeps);
+	battery_charger_log(why);
 	log_msg("sleep #%u: prepared in %lld ms", m.sleeps,
 		(long long)(boot_ms() - t0));
 
@@ -506,6 +509,8 @@ static void do_sleep(void)
 	battery_read(&b);
 	battery_format(&b, bat, sizeof(bat));
 	log_msg("sleep #%u: battery after: %s", m.sleeps, bat);
+	snprintf(why, sizeof(why), "sleep #%u after", m.sleeps);
+	battery_charger_log(why);
 	if (log_debug()) {
 		char name[48];
 

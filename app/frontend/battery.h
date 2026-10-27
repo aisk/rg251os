@@ -28,9 +28,15 @@ struct battery {
  * their properties once. Safe to call again (rescans).
  */
 void battery_init(const char *dir);
-/* Rereads every few seconds; rescans while nothing was found. Returns
- * when it is due again. */
+/* Rereads every 5 s (every 1 s for 30 s after a charger change, see
+ * battery.c); rescans while nothing was found. Returns when it is due
+ * again. */
 int64_t battery_poll(int64_t now);
+/* The charger diagnostics' full state as "charger: <why>: ..." lines
+ * (for sleep entry and exit). */
+void battery_charger_log(const char *why);
+/* For the selftest: other /proc/interrupts and regmap debugfs roots. */
+void battery_diag_paths(const char *interrupts, const char *regmap_root);
 /* Reads now; returns 0 when a battery was read. */
 int battery_read(struct battery *b);
 const struct battery *battery_get(void);

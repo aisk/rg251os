@@ -657,6 +657,210 @@ static void put(const char *dir, const char *name, const char *val)
 	write_text(path, val);
 }
 
+/* A fake regmap debugfs registers file, "rr: vv" for 0..0xfe without
+ * the registers from skip_from to skip_to (as regmap leaves out the
+ * unreadable ones), RK817 charger values in 0xe4..0xf0. */
+static void fake_regs(const char *dir, int skip_from, int skip_to, int sts,
+		      int sys)
+{
+	char buf[256 * 8], path[400];
+	size_t n = 0;
+	FILE *f;
+
+	mkdir(dir, 0755);
+	put(dir, "name", "rk8xx-i2c\n");
+	for (int r = 0; r <= 0xfe; r++) {
+		int v = r == 0xe4 ? 0x22 : r == 0xe5 ? 0xdb : r == 0xe6 ? 0x44 :
+			r == 0xeb ? sts : r == 0xf0 ? sys : r & 0x0f;
+
+		if (r >= skip_from && r <= skip_to)
+			continue;
+		n += (size_t)snprintf(buf + n, sizeof(buf) - n, "%02x: %02x\n", r,
+				      v);
+	}
+	/* In place: battery.c keeps the file open, as on debugfs. */
+	snprintf(path, sizeof(path), "%s/registers", dir);
+	f = fopen(path, "w");
+	CHECK(f && fwrite(buf, 1, n, f) == n && !fclose(f), "write %s", path);
+}
+
+static void fake_irqs(const char *path, int in, int out)
+{
+	char buf[512];
+
+	snprintf(buf, sizeof(buf),
+		 "           CPU0       CPU1       CPU2       CPU3\n"
+		 " 11:      12345      23456      34567      45678     GICv2  30 "
+		 "Level     arch_timer\n"
+		 " 76:          %d          0          %d          0     rk817   8 "
+		 "Edge      rk817_plug_in\n"
+		 " 77:          0          %d          0          0     rk817   9 "
+		 "Edge      rk817_plug_out\n"
+		 " 78:          9          0          0          0     rk817  10 "
+		 "Edge      rk817_plug_in_extra\n"
+		 "IPI0:       100        200        300        400  Rescheduling "
+		 "interrupts\n", in - in / 2, in / 2, out);
+	write_text(path, buf);
+}
+
+static char fake_irq_path[300], fake_regmap[300];
+
+/* /proc/interrupts and the regmap debugfs for battery.c, with a decoy
+ * regmap in front. */
+static void charger_fakes(const char *base)
+{
+	char dir[400];
+
+	snprintf(fake_irq_path, sizeof(fake_irq_path), "%s/interrupts", base);
+	snprintf(fake_regmap, sizeof(fake_regmap), "%s/regmap", base);
+	mkdir(fake_regmap, 0755);
+	snprintf(dir, sizeof(dir), "%s/dummy0", fake_regmap);
+	mkdir(dir, 0755);
+	put(dir, "name", "nodev\n");
+	snprintf(dir, sizeof(dir), "%s/0-0020", fake_regmap);
+	fake_regs(dir, -1, -1, 0x80, 0x00);
+	fake_irqs(fake_irq_path, 0, 1);
+	battery_diag_paths(fake_irq_path, fake_regmap);
+}
+
+/*
+ * The charger diagnostics: a plug-in the driver misses (online stays 0,
+ * the PMIC sees the cable, CHRG_OFF), the 30 one-second samples after
+ * it, a change in the middle of them, the registers file with lines
+ * missing, and the full lines at sleep.
+ */
+static void test_charger_diag(const char *base, const char *ps)
+{
+	static char log[65536];
+	char logp[300], bat[350], chg[350], dir[400];
+	int64_t t = 6000000000000000LL, next;
+	int samples = 0, n;
+	struct stat sb;
+	long start;
+
+	snprintf(bat, sizeof(bat), "%s/rk817-battery", ps);
+	snprintf(chg, sizeof(chg), "%s/rk817-charger", ps);
+	snprintf(logp, sizeof(logp), "%s/battery-log.txt", base);
+	log_open_file(logp);
+	start = stat(logp, &sb) ? 0 : (long)sb.st_size;
+	snprintf(dir, sizeof(dir), "%s/0-0020", fake_regmap);
+	put(bat, "capacity", "65\n");
+	put(bat, "status", "Discharging\n");
+	put(bat, "charge_type", "N/A\n");
+	put(bat, "current_avg", "-300000\n");
+	put(bat, "charge_now", "2229980\n");
+	put(bat, "charge_full", "3450000\n");
+	put(bat, "constant_charge_current_max", "2000000\n");
+	put(bat, "constant_charge_voltage_max", "4200000\n");
+	put(chg, "online", "0\n");
+	battery_diag_paths(fake_irq_path, fake_regmap);
+	battery_init(ps);
+
+	CHECK(battery_poll(t) == t + 5000000000LL, "charger: steady: 5 s");
+	t += 5000000000LL;
+	/* Plugged in: the PMIC sees it, the driver does not. */
+	fake_irqs(fake_irq_path, 3, 1);
+	fake_regs(dir, -1, -1, 0x80, 0x40);
+	put(bat, "status", "Not charging\n");
+	put(bat, "current_avg", "148000\n");
+	put(chg, "voltage_avg", "4950000\n");
+	next = battery_poll(t);
+	CHECK(next == t + 1000000000LL, "charger: change: next in %lld ms",
+	      (long long)((next - t) / 1000000));
+	while (next - t < 5000000000LL && samples < 40) {
+		t = next;
+		next = battery_poll(t);
+		samples++;
+	}
+	CHECK(samples == 30 && next == t + 5000000000LL,
+	      "charger: %d samples, then %lld ms", samples,
+	      (long long)((next - t) / 1000000));
+	CHECK(battery_poll(next) == next + 5000000000LL, "charger: steady again");
+	t = next;
+
+	/* A change in the middle of the samples starts them over. */
+	put(chg, "online", "1\n");
+	next = battery_poll(t += 5000000000LL);
+	for (int i = 0; i < 10; i++)
+		next = battery_poll(t = next);
+	fake_regs(dir, -1, -1, 0xb0, 0x40);
+	put(bat, "status", "Charging\n");
+	put(bat, "charge_type", "Standard\n");
+	next = battery_poll(t = next);
+	samples = 0;
+	while (next - t < 5000000000LL && samples < 40) {
+		next = battery_poll(t = next);
+		samples++;
+	}
+	CHECK(samples == 30, "charger: restarted, %d samples", samples);
+
+	battery_charger_log("sleep #9 before");
+
+	/* Registers 0x10..0x1f not listed: e4 is found by reading. */
+	snprintf(dir, sizeof(dir), "%s/regmap2", base);
+	mkdir(dir, 0755);
+	snprintf(logp, sizeof(logp), "%s/regmap2/1-0020", base);
+	fake_regs(logp, 0x10, 0x1f, 0x90, 0x40);
+	battery_diag_paths(fake_irq_path, dir);
+	battery_charger_log("located");
+	/* None at all. */
+	snprintf(dir, sizeof(dir), "%s/no-regmap", base);
+	battery_diag_paths(fake_irq_path, dir);
+	battery_charger_log("no regmap");
+	battery_diag_paths(fake_irq_path, fake_regmap);
+
+	snprintf(logp, sizeof(logp), "%s/battery-log.txt", base);
+	n = read_file(logp, log, sizeof(log) - 1);
+	log[n > 0 ? n : 0] = 0;
+	CHECK(n > start, "charger: log %d bytes", n);
+	memmove(log, log + (n > start ? start : 0),
+		(size_t)(n > start ? n - start + 1 : 1));
+	CHECK(strstr(log, "/0-0020/registers, 7 bytes per line, 0xe4 at offset "
+		     "1596") != NULL, "charger: regmap found");
+	CHECK(strstr(log, "charger: start: online 0, Discharging, charge_type "
+		     "N/A, 65% ") && strstr(log, "IRQs plug_in 0 plug_out 1\n"),
+	      "charger: start line");
+	CHECK(strstr(log, "charger: start: regs e4=0x22 e5=0xdb e6=0x44 eb=0x80 "
+		     "f0=0x00 (PLUG_IN_STS 0, CHRG_STS CHRG_OFF, BAT_EXS 1, "
+		     "CHRG_EN 1, in: VLIM on 4.5 V ILIM on 1.50 A, out: 4.20 V "
+		     "2.00 A), read in ") != NULL, "charger: start regs");
+	CHECK(strstr(log, "charger: change (status Discharging->Not charging, "
+		     "IRQs plug_in 0->3 plug_out 1->1, PLUG_IN_STS 0->1): "
+		     "online 0, Not charging, charge_type N/A, 65% 3.912 V "
+		     "+0.148 A, input 4.950 V, charge 2229 of 3450 mAh, max "
+		     "2.000 A 4.200 V; IRQs plug_in 3 plug_out 1\n") != NULL,
+	      "charger: change line");
+	CHECK(strstr(log, "charger: +1 s: online 0, Not charging, N/A, 65% "
+		     "3.912 V +0.148 A, input 4.950 V; IRQs 3/1; e5=0xdb "
+		     "eb=0x80 f0=0x40 (PLUG_IN_STS 1, CHRG_OFF); read in ") &&
+	      strstr(log, "charger: +30 s: ") && !strstr(log, "charger: +31 s"),
+	      "charger: sample lines");
+	CHECK(strstr(log, "charger: samples done, 30 in 30 s, read time avg ") !=
+	      NULL, "charger: samples done");
+	CHECK(strstr(log, "charger: change (online 0->1): ") &&
+	      strstr(log, "charger: change (status Not charging->Charging, "
+		     "charge_type N/A->Standard, CHRG_STS "
+		     "CHRG_OFF->CC_OR_CV_CHRG): online 1, Charging, "),
+	      "charger: change in the samples");
+	CHECK(strstr(log, "charger: sleep #9 before: online 1, Charging, ") &&
+	      strstr(log, "charger: sleep #9 before: regs e4=0x22 "),
+	      "charger: sleep lines");
+	CHECK(strstr(log, "/1-0020/registers, 7 bytes per line, 0xe4 at offset "
+		     "1484") &&
+	      strstr(log, "charger: located: regs e4=0x22 e5=0xdb e6=0x44 "
+		     "eb=0x90 f0=0x40 (PLUG_IN_STS 1, CHRG_STS DEAD_CHRG"),
+	      "charger: registers located by reading");
+	CHECK(strstr(log, "/no-regmap (No such file or directory), PMIC "
+		     "registers not logged") &&
+	      strstr(log, "charger: no regmap: online 1, ") &&
+	      !strstr(log, "charger: no regmap: regs"),
+	      "charger: no regmap");
+	put(bat, "capacity", "64\n");
+	put(bat, "status", "Discharging\n");
+	put(bat, "current_avg", "-412000\n");
+	put(chg, "online", "0\n");
+}
+
 /* A fake /sys/class/power_supply as the RK817 driver lays it out. */
 static void test_battery(const char *base)
 {
@@ -678,6 +882,8 @@ static void test_battery(const char *base)
 	    "POWER_SUPPLY_TYPE=Battery\nPOWER_SUPPLY_CAPACITY=87\n");
 	put(chg, "type", "USB\n");
 	put(chg, "online", "0\n");
+	put(chg, "voltage_avg", "0\n");
+	charger_fakes(base);
 
 	battery_init(ps);
 	CHECK(battery_read(&b) == 0, "battery read");
@@ -710,10 +916,12 @@ static void test_battery(const char *base)
 	put(chg, "online", "0\n");
 	battery_poll(4000000000000000LL);
 
+	test_charger_diag(base, ps);
+
 	battery_init("/nonexistent/power_supply");
 	CHECK(battery_read(&b) != 0 && !b.valid, "no battery");
 	battery_init(ps);  /* back, for the UI renders */
-	battery_poll(5000000000000000LL);
+	battery_poll(7000000000000000LL);
 }
 
 /* The simple path: fixed ratio, blocking writes, half a buffer. */

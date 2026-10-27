@@ -82,8 +82,8 @@
  * avg/p50/p99/max of the rendered frames (0.1 ms histogram), frames
  * skipped, missed vblanks (and CPU ones),
  * audio underruns, battery current and voltage, backlight. Battery
- * samples (battery.c polls every 5 s; the RK817 driver itself refreshes
- * every 8 s) are attributed to the OPP that had at least BAT_MAJORITY of
+ * samples (battery.c polls every 5 s, every 1 s for 30 s after a charger
+ * change; the RK817 driver itself refreshes every 8 s) are attributed to the OPP that had at least BAT_MAJORITY of
  * the game time since the previous sample, and skipped when there was
  * less than BAT_MIN_GAME_S of game time (menus) or a charger is on. Menu
  * time is not game time. On game end one CSV row per OPP plus a summary
