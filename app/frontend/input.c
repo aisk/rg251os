@@ -4,11 +4,13 @@
  * a few hundred ms after we start, as three nodes: "OpenSimHardware OSH PB
  * Controller" (buttons and axes), "... Keyboard" and "... Mouse". Every
  * device is logged when it appears (with its keys and axes in debug
- * logging). Buttons held when a device appears count as held
- * (EVIOCGKEY), which the escape from resuming on boot relies on (main.c
- * waits for a device with B, input_b_ready). The power key and the
- * headphone switch come from their own nodes and go to the main loop's
- * callbacks.
+ * logging). The pad drops off and re-enumerates on wake, often with the
+ * same event numbers, so removals are handled before inotify creates and
+ * followed by a rescan to open the new nodes at once. Buttons held when a
+ * device appears count as held (EVIOCGKEY), which the escape from
+ * resuming on boot relies on (main.c waits for a device with B,
+ * input_b_ready). The power key and the headphone switch come from their
+ * own nodes and go to the main loop's callbacks.
  */
 #include <dirent.h>
 #include <errno.h>
@@ -367,7 +369,8 @@ static void handle_abs(struct idev *dv, unsigned code, int value)
 	}
 }
 
-static void read_dev(int idx)
+/* Returns 1 if the device went away and was dropped. */
+static int read_dev(int idx)
 {
 	struct idev *dv = &devs[idx];
 	struct input_event ev[64];
@@ -377,7 +380,7 @@ static void read_dev(int idx)
 		log_msg("input event%d removed", dv->num);
 		close(dv->fd);
 		devs[idx] = devs[--ndevs];
-		return;
+		return 1;
 	}
 	for (ssize_t i = 0; i < n / (ssize_t)sizeof(ev[0]); i++) {
 		switch (ev[i].type) {
@@ -393,6 +396,7 @@ static void read_dev(int idx)
 			break;
 		}
 	}
+	return 0;
 }
 
 static void read_inotify(void)
@@ -412,19 +416,22 @@ static void read_inotify(void)
 
 void input_dispatch(const struct pollfd *p, int n)
 {
-	int k = 0, nd = ndevs;
+	int k = ino_fd >= 0 ? 1 : 0, nd = ndevs, removed = 0;
 
-	if (ino_fd >= 0 && k < n) {
-		if (p[k].revents & POLLIN)
-			read_inotify();
-		k++;
-	}
-	/* Backwards: read_dev() may drop entries. New devices are at the end
-	 * and have no pollfd yet. */
+	/* Devices first, backwards: read_dev() may drop entries. Removals
+	 * have to come before the inotify creates: after a wake the USB pad
+	 * is often gone and back (same event numbers) before we poll again,
+	 * and open_dev() skips a number that is still in devs[]. */
 	for (int i = nd - 1; i >= 0; i--)
 		if (k + i < n && i < ndevs &&
 		    (p[k + i].revents & (POLLIN | POLLERR | POLLHUP)))
-			read_dev(i);
+			removed |= read_dev(i);
+	if (k && k <= n && (p[0].revents & POLLIN))
+		read_inotify();
+	/* A node may have been recreated while the old fd was still open
+	 * (its IN_CREATE read in an earlier round), so look again now. */
+	if (removed)
+		input_rescan();
 }
 
 /* ------------------------------------------------------------ power key */
