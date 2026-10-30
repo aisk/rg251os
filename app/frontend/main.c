@@ -424,7 +424,8 @@ static void start_game(const char *path)
 			  m.game_start_ns);
 	ui_reset(&game_page, now_ns());
 	ui_suppress(input_buttons());
-	display_take_missed();
+	/* The ROM list idled without flips: its gap is not missed frames. */
+	display_resync();
 	m.next_perf = now_ns() + PERF_INTERVAL_NS;
 	log_sync();
 }
@@ -473,7 +474,8 @@ static struct ui_result open_menu(void)
 static void resume_game(void)
 {
 	save_settings();
-	display_take_missed();
+	/* Same for the time spent in the menu. */
+	display_resync();
 	cpuctl_game_resume();
 }
 
