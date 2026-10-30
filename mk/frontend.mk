@@ -36,8 +36,8 @@ FRONTEND_STUB_CORES_OBJ := $(FRONTEND_BUILD)/obj/cores-stub.o
 
 FRONTEND_CFLAGS := -std=c11 -O2 -Wall -Wextra -Wshadow -D_GNU_SOURCE \
 	-mcpu=cortex-a35 -isystem $(LIBRETRO_INCLUDE) -isystem $(TINYALSA_INCLUDE) \
-	-isystem $(EXTERNAL)/pl_mpeg -MMD -MP
-FRONTEND_LDFLAGS := -static
+	-isystem $(EXTERNAL)/pl_mpeg -pthread -MMD -MP
+FRONTEND_LDFLAGS := -static -pthread
 
 ifeq ($(FRONTEND_CORE),stub)
 FRONTEND_CORE_LIBS := $(FRONTEND_STUB_LIB)
@@ -57,7 +57,11 @@ $(FRONTEND_BUILD)/.core-%:
 
 $(FRONTEND_BUILD)/obj/%.o: $(FRONTEND_DIR)/%.c $(TOP)/mk/frontend.mk | $(TOOLCHAIN_STAMP)
 	mkdir -p $(@D)
-	$(CROSS_COMPILE)gcc $(FRONTEND_CFLAGS) -c -o $@ $<
+	$(CROSS_COMPILE)gcc $(FRONTEND_CFLAGS) $(FRONTEND_OBJ_CFLAGS) -c -o $@ $<
+
+# pl_mpeg's decoders at -O3 (the video player's worker thread): under
+# qemu a 480x270 picture decodes in 1.3 ms instead of 2.1 ms at -O2.
+$(FRONTEND_BUILD)/obj/plm.o: FRONTEND_OBJ_CFLAGS := -O3
 
 # The core tables, built per core set: -DHAVE_CORE_MGBA etc.
 $(FRONTEND_CORES_OBJ) $(FRONTEND_STUB_CORES_OBJ): $(FRONTEND_BUILD)/obj/cores-%.o: \
@@ -287,6 +291,10 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	grep -q 'starting .*clip.mpg with video' $$f; \
 	grep -q 'video: clip.mpg: 480x270 at 30.000 fps (pixel aspect 1.000), MP2 stereo, duration 30.0 s' $$f; \
 	grep -q 'video: start: fit, 480x270 scaled to 480x270, crop 0,0, picture 480x270' $$f; \
+	grep -q 'settings: clip.mpg: loaded, cpu_start=0$$' $$f; \
+	grep -q 'core: pl_mpeg video loaded clip.mpg (.*) in [0-9]* ms: 480x270, 60.0000 fps, 44100 Hz audio$$' $$f; \
+	grep -q 'video: decoding in a worker thread: 4 picture slots' $$f; \
+	grep -q 'cpufreq: game start, mode adaptive, 600000 kHz (util_min 474, lowest start' $$f; \
 	grep -q 'save: core has no save memory' $$f; \
 	grep -q 'video: seek (+10 s) from 2.00 s to 12.00 s: at 1[12].[0-9]* s' $$f; \
 	grep -q 'video: seek (-10 s) from ' $$f; \
@@ -294,6 +302,7 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	grep -q 'video: playing at ' $$f; \
 	grep -q 'headless: 900 frames, frame 480x270 pitch 480, .*underruns after warmup 0' $$f; \
 	grep -q 'video: stats (unload): [0-9]* pictures decoded, decode+convert avg' $$f; \
+	grep -q 'video: worker (unload): CPU [0-9.]* s of [0-9.]* s wall' $$f; \
 	grep -q 'state: wrote [0-9]* bytes to clip.mpg.video.state (headless end)' $$f; \
 	! test -e $$d/saves/clip.mpg.sav; \
 	grep -q ',all,' $$d/log/perf.csv; \

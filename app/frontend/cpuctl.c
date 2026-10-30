@@ -28,7 +28,11 @@
  * lands exactly on that OPP: 474, 644, 796, 948 and 1024 for 600, 816,
  * 1008, 1200 and 1296 MHz. The observed scaling_cur_freq is logged after
  * every change. If sched_setattr fails (no uclamp in the kernel) the floor
- * is written to scaling_min_freq instead, once logged.
+ * is written to scaling_min_freq instead, once logged. A thread created
+ * from the emulation thread inherits its clamp, so a helper thread (the
+ * video player's decoder) clears its own with cpuctl_thread_uclamp_min;
+ * as the four cores share one clock, the floor still holds for it
+ * through the emulation thread's CPU (an idle rq keeps the last clamp).
  *
  * Modes (settings.cpu, "cpu=" in settings.txt):
  *   adaptive   the controller below (default)
@@ -71,6 +75,13 @@
  * statistics; they still count as game time and frames, and their
  * misses still jump (a miss is judged by the work of the frame before
  * it, which is small for a skipped one, so that is rare).
+ *
+ * The video player (start CPU_START_LOWEST) decodes in its own thread, so
+ * retro_run and the blit are a few ms: the floor starts at the lowest OPP
+ * and the controller only steps up if that small work misses vblanks;
+ * the decoder's clock is schedutil's answer to its load (a decoder that
+ * falls behind runs without pause, its util rises and so does the clock).
+ * Nothing is learned for it.
  *
  * Learning: on game end the lowest OPP that ran at least LEARN_MIN_S with
  * at most 0.1% CPU misses and at most one step up per minute is stored as
@@ -195,7 +206,7 @@ static struct {
 		int prev_cls, prev_opp;
 		unsigned xruns_seen, bat_seq;
 		double bat_t[CLS_COUNT][CPU_MAX_OPPS];
-		int start_mhz, start_failed;
+		int start_mhz, start_failed, no_learn;
 		int64_t probation_until;
 		unsigned changes, ups, downs, jumps;
 		int have_kstats;
@@ -342,6 +353,13 @@ static int set_uclamp_min(unsigned u)
 	};
 
 	return (int)syscall(SYS_sched_setattr, 0, &a, 0);
+}
+
+int cpuctl_thread_uclamp_min(unsigned util_min)
+{
+	if (c.act != ACT_UCLAMP)
+		return -1;
+	return set_uclamp_min(util_min) ? errno : 0;
 }
 
 /* Floor at OPP opp, or none for opp < 0. */
@@ -772,8 +790,12 @@ void cpuctl_game_start(const char *rom_name, double refresh_hz, int start_mhz,
 	c.s.period_ms = 1000.0 / (refresh_hz > 1 ? refresh_hz : 60);
 	c.s.cls = c.mode == CPU_MODE_ADAPTIVE ? CLS_ADAPTIVE : CLS_PINNED;
 	c.s.opp = mode_opp(c.mode);
-	c.s.start_mhz = start_mhz;
-	if (c.mode == CPU_MODE_ADAPTIVE && start_mhz > 0) {
+	c.s.start_mhz = start_mhz < 0 ? 0 : start_mhz;
+	if (c.mode == CPU_MODE_ADAPTIVE && start_mhz == CPU_START_LOWEST) {
+		c.s.opp = 0;
+		c.s.no_learn = 1;
+		c.s.start_mhz = (int)(c.khz[0] / 1000);
+	} else if (c.mode == CPU_MODE_ADAPTIVE && start_mhz > 0) {
 		c.s.opp = mode_opp(start_mhz);
 		if (c.s.opp < c.top)
 			c.s.probation_until = now + PROBATION_NS;
@@ -792,7 +814,9 @@ void cpuctl_game_start(const char *rom_name, double refresh_hz, int start_mhz,
 	mode_name(c.mode, mode, sizeof(mode));
 	log_msg("cpufreq: game start, mode %s, %ld kHz (util_min %u%s), "
 		"actuator %s, governor stays schedutil", mode, c.khz[c.s.opp],
-		opp_util(c.s.opp), c.s.probation_until ? ", learned start" : "",
+		opp_util(c.s.opp), c.s.no_learn ? ", lowest start: the work "
+		"runs in another thread, not learned" : c.s.probation_until ?
+		", learned start" : "",
 		act_names[c.act]);
 	log_msg("cpufreq stats at game start: %s", ks);
 	apply();
@@ -854,6 +878,8 @@ static int learn(void)
 {
 	int found = -1, mhz;
 
+	if (c.s.no_learn)
+		return 0;
 	if (c.mode != CPU_MODE_ADAPTIVE || c.n < 2)
 		return c.s.start_mhz;
 	if (c.s.start_failed)

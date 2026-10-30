@@ -27,7 +27,13 @@ int cpuctl_mode_step(int mode, int d);
 /* "Adaptive", "Max", "816MHz" */
 void cpuctl_mode_label(int mode, char *buf, size_t size);
 
-/* A game session: start (start_mhz: learned start OPP, 0 for the top),
+/* start_mhz for a session whose heavy work runs in another thread (the
+ * video player's decoder, video_core.c): the floor starts at the lowest
+ * OPP, no probation, nothing learned (cpuctl_game_end returns 0). */
+#define CPU_START_LOWEST (-1)
+
+/* A game session: start (start_mhz: learned start OPP, 0 for the top,
+ * or CPU_START_LOWEST),
  * pause/resume around menus, one call per game frame with its work time,
  * the vblanks missed since the previous call and whether the core skipped
  * it (frameskip: counted, not judged), end. */
@@ -41,6 +47,11 @@ void cpuctl_game_frame(int64_t work_ns, unsigned missed, int skipped,
  * OPP in MHz to remember for this ROM (0: the top). */
 int cpuctl_game_end(void);
 int cpuctl_in_game(void);
+/* uclamp_min of the calling thread, for a thread other than the one the
+ * controller drives (it inherits that one's clamp when created): 0 clears
+ * it. Returns 0 when set, -1 when the actuator is not uclamp (nothing
+ * done; simulated in tests), else an errno value. Thread safe. */
+int cpuctl_thread_uclamp_min(unsigned util_min);
 /* Light sleep: clock capped at the lowest OPP until called with 0. */
 void cpuctl_sleep(int on);
 

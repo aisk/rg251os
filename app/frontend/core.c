@@ -8,7 +8,8 @@
  *
  * The video player has no save RAM: no .sav is read or written for it
  * (save_load logs that), and its resume state is the playback position,
- * checked like the others (the save part of the header is empty).
+ * checked like the others (the save part of the header is empty). Its
+ * load line leaves out the BIOS, which only the GBA cores use.
  *
  * Saves: neither core writes save files itself (no use of the save
  * directory). Both keep battery saves (SRAM, flash, EEPROM) in a 128KiB
@@ -1012,12 +1013,14 @@ int core_load(const char *rom_path, int core, char *err, size_t errlen)
 	c.loaded = 1;
 	c.save_pid = 0;
 	c.next_tick_ns = 0;
+	/* No BIOS for a video. */
 	log_msg("core: %s %s loaded %s (%zu KiB) in %lld ms: %ux%u, %.4f fps, "
-		"%.0f Hz audio, BIOS %s", si.library_name, si.library_version,
+		"%.0f Hz audio%s%s", si.library_name, si.library_version,
 		base, size >> 10, (long long)((now_ns() - t0) / 1000000),
 		av.geometry.base_width, av.geometry.base_height, c.info.fps,
-		c.info.sample_rate,
-		c.have_bios ? bios : "HLE (built in)");
+		c.info.sample_rate, c.info.core == CORE_VIDEO ? "" : ", BIOS ",
+		c.info.core == CORE_VIDEO ? "" : c.have_bios ? bios :
+		"HLE (built in)");
 	if (c.options[0])
 		log_msg("core: options %s", c.options);
 	log_rom_options();

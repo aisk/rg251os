@@ -20,7 +20,9 @@
  * fits, 2x for the GBA, centered with black bars) and rotated straight
  * into the back buffer (a video without the grid and color effects),
  * so emulation runs at the panel's 60.02 Hz and audio is resampled to
- * match (audio.c). The menus are drawn only when something
+ * match (audio.c). A video decodes in video_core.c's own thread, so its
+ * game session starts cpuctl's floor at the lowest OPP (CPU_START_LOWEST)
+ * and schedutil clocks the decoder. The menus are drawn only when something
  * changed (ui.c); when one was not, nothing is flipped and the loop sleeps
  * in poll() until input or the earliest of the times the page and the
  * timers here need (idle_timeout, at most IDLE_MAX_MS).
@@ -420,7 +422,10 @@ static void start_game(const char *path)
 	m.game_frames = 0;
 	fx_update();
 	m.game_start_ns = now_ns();
-	cpuctl_game_start(m.rom_name, hz, rom_settings.cpu_start,
+	/* A video decodes in its own thread (video_core.c): the floor of
+	 * this one starts at the bottom, schedutil follows the decoder. */
+	cpuctl_game_start(m.rom_name, hz, core_info()->core == CORE_VIDEO ?
+			  CPU_START_LOWEST : rom_settings.cpu_start,
 			  m.game_start_ns);
 	ui_reset(&game_page, now_ns());
 	ui_suppress(input_buttons());

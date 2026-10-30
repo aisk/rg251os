@@ -1,6 +1,8 @@
 /*
  * Unit tests for the parts that do not need the device; run with
- * `frontend --selftest DIR`, e.g. under qemu-aarch64.
+ * `frontend --selftest DIR`, e.g. under qemu-aarch64. The video player
+ * is tested on ffmpeg clips (FE_TEST_VIDEOS), in lockstep with its
+ * decoder thread and with the thread running free.
  */
 #include <dirent.h>
 #include <errno.h>
@@ -3418,11 +3420,182 @@ static int video_runs(int n, uint32_t first)
 	return pics;
 }
 
+/* n runs paced like vblanks of ms each; new pictures among them. */
+static int video_runs_paced(int n, uint32_t first, int ms)
+{
+	struct timespec ts = { 0, ms * 1000000L };
+	int pics = 0;
+
+	for (int i = 0; i < n; i++) {
+		pics += !core_run(i ? 0 : first);
+		audio_flush();
+		nanosleep(&ts, NULL);
+	}
+	return pics;
+}
+
+/* Paced runs until one shows a new picture, at most n; the number of
+ * runs it took or -1. */
+static int video_runs_until_picture(int n)
+{
+	for (int i = 0; i < n; i++)
+		if (video_runs_paced(1, 0, 5))
+			return i + 1;
+	return -1;
+}
+
 static int video_load(const char *path, char *err, size_t errlen)
 {
 	if (core_load(path, CORE_VIDEO, err, errlen))
 		return -1;
 	audio_set_source(core_info()->sample_rate, core_info()->fps, 60.0186);
+	return 0;
+}
+
+/*
+ * The video player with its decoder thread running free, runs paced
+ * like vblanks or back to back: playing, a decoder too slow for the
+ * clock (late pictures and dry audio counted, retro_run not held up),
+ * a seek, a mapping change and resume while it runs, the worker blocked
+ * while paused with Fit and Crop still shown at once, unload while it
+ * is blocked, and the end of a clip. Returns -1 when a clip does not
+ * load.
+ */
+static int test_video_threaded(const char *clip, const char *silent)
+{
+	const struct core_api *api = core_api_get(CORE_VIDEO);
+	struct video_counters k;
+	uint8_t st[64];
+	double pos, d;
+	int64_t t0, worst = 0;
+	int pics, w, h, pitch, n;
+	char err[128], path[400];
+
+	/* From the start, not from the lockstep part's resume state. */
+	core_state_path(clip, CORE_VIDEO, path, sizeof(path));
+	unlink(path);
+	if (video_load(clip, err, sizeof(err))) {
+		CHECK(0, "video threaded: %s", err);
+		return -1;
+	}
+	/* Paced: the worker keeps up (qemu is slower than the device here
+	 * only for the frontend's own code, so allow a few late ones). */
+	pics = video_runs_paced(120, 0, 16);
+	video_core_counters(&k);
+	CHECK(pics >= 50 && k.decoded >= 55 && fabs(video_pos() - 2.0) < 0.02,
+	      "video threaded: %d pictures shown, %u decoded, at %.3f s, %u "
+	      "late, %u dry", pics, k.decoded, video_pos(), k.late_runs,
+	      k.dry_runs);
+	/* Too slow a decoder: the clock goes on, the picture repeats and
+	 * the audio plays silence, each run stays short. */
+	video_core_test(0, 300);
+	pos = video_pos();
+	video_core_counters(&k);
+	n = (int)k.late_runs;
+	for (int i = 0; i < 30; i++) {
+		t0 = now_ns();
+		core_run(0);
+		audio_flush();
+		t0 = now_ns() - t0;
+		worst = t0 > worst ? t0 : worst;
+	}
+	video_core_counters(&k);
+	CHECK(fabs(video_pos() - pos - 0.5) < 0.02 && (int)k.late_runs > n &&
+	      worst < 100 * 1000000LL,
+	      "video slow decoder: %.3f -> %.3f s, %u late runs, worst run "
+	      "%.1f ms", pos, video_pos(), k.late_runs, worst / 1e6);
+	video_core_test(0, 0);
+	/* A seek while the worker runs: the old picture stays until the
+	 * seek's is there, then the clock jumps. */
+	video_runs_paced(30, 0, 16);
+	pos = video_pos();
+	CHECK(video_runs_paced(1, JOY_BIT(RIGHT), 0) == 0,
+	      "video threaded: the seek's run keeps the old picture");
+	n = video_runs_until_picture(400);
+	d = video_pos() - pos;
+	CHECK(n > 0 && d > 9 && d < 10.05, "video threaded: +10 s shown after "
+	      "%d more runs, %.2f -> %.2f s", n, pos, video_pos());
+	video_runs_paced(30, 0, 16);
+	/* Crop while playing: the queued pictures converted with Fit are
+	 * converted again when they come up. */
+	video_core_counters(&k);
+	n = (int)k.reconverted;
+	settings.video_scale = VIDEO_CROP;
+	core_options_changed();
+	CHECK(!core_run(0), "video threaded: crop shows a new picture");
+	audio_flush();
+	video_runs_paced(8, 0, 16);
+	core_frame(&w, &h, &pitch);
+	video_core_counters(&k);
+	CHECK(w == 480 && h == 320 && (int)k.reconverted > n,
+	      "video threaded: crop %dx%d, %u converted again", w, h,
+	      k.reconverted);
+	/* Paused: the worker fills up and blocks; Fit still shows at
+	 * once. */
+	video_runs_paced(1, JOY_BIT(A), 16);
+	pos = video_pos();
+	for (int i = 0; i < 200; i++) {
+		video_core_counters(&k);
+		if (k.waiting)
+			break;
+		video_runs_paced(1, 0, 10);
+	}
+	CHECK(k.waiting && fabs(video_pos() - pos) < 1e-9,
+	      "video threaded: paused, worker blocked %d, %.3f -> %.3f s",
+	      k.waiting, pos, video_pos());
+	settings.video_scale = VIDEO_FIT;
+	core_options_changed();
+	CHECK(!core_run(0), "video threaded: fit while paused shows a new "
+	      "picture");
+	audio_flush();
+	core_frame(&w, &h, &pitch);
+	CHECK(w == 480 && h == 270, "video threaded: fit while paused %dx%d",
+	      w, h);
+	/* Resume (retro_unserialize) while it runs: at 5 s, playing. */
+	video_runs_paced(1, JOY_BIT(A), 16);
+	video_runs_paced(10, 0, 16);
+	CHECK(api->serialize(st, api->serialize_size()), "video: serialize");
+	d = 5.0;
+	memcpy(st + 8, &d, sizeof(d));
+	memset(st + 16, 0, 4);
+	CHECK(api->unserialize(st, api->serialize_size()),
+	      "video threaded: unserialize");
+	video_runs_paced(4, 0, 16);
+	pos = video_pos();
+	CHECK(pos > 4.4 && pos < 5.2, "video threaded: resumed at %.2f s", pos);
+	pics = video_runs_paced(30, 0, 16);
+	CHECK(pics >= 10 && video_pos() > pos + 0.45, "video threaded: plays on "
+	      "after the resume, %d pictures, at %.2f s", pics, video_pos());
+	/* Unload while the worker is blocked (paused, full). */
+	video_runs_paced(1, JOY_BIT(A), 16);
+	for (int i = 0; i < 200; i++) {
+		video_core_counters(&k);
+		if (k.waiting)
+			break;
+		video_runs_paced(1, 0, 10);
+	}
+	t0 = now_ns();
+	core_unload();
+	t0 = now_ns() - t0;
+	CHECK(k.waiting && t0 < 500 * 1000000LL, "video threaded: unload of a "
+	      "blocked worker in %.1f ms", t0 / 1e6);
+
+	/* The end, the worker running free. */
+	if (video_load(silent, err, sizeof(err))) {
+		CHECK(0, "video threaded silent: %s", err);
+		return -1;
+	}
+	video_runs_paced(30, 0, 5);
+	for (n = 30; n < 600 && video_pos() != 0; n++)
+		video_runs_paced(1, 0, 5);
+	video_core_counters(&k);
+	CHECK(n > 100 && n < 600 && k.decoded >= 59, "video threaded: ended "
+	      "after %d runs, %u pictures decoded", n, k.decoded);
+	CHECK(video_runs_paced(30, 0, 5) == 0 && video_pos() == 0,
+	      "video threaded: stays at the end");
+	CHECK(video_runs_paced(20, JOY_BIT(A), 5) >= 2,
+	      "video threaded: A plays again");
+	core_unload();
 	return 0;
 }
 
@@ -3434,7 +3607,9 @@ static int video_load(const char *path, char *err, size_t errlen)
  * list, names and file names, the core picked by extension, timing,
  * Fit and Crop switched live (also while paused, and from the in-game
  * menu, which has Picture and no Core for a video), seeking, the resume
- * state, the end and playing again, the downscale and the silence.
+ * state, the end and playing again, the downscale and the silence; all
+ * of that in lockstep with the decoder thread (video_core_test), then
+ * the same with the thread running free (test_video_threaded).
  */
 static void test_video(const char *base)
 {
@@ -3498,6 +3673,7 @@ static void test_video(const char *base)
 	 * run, at 1x with Fit. */
 	settings.video_scale = VIDEO_FIT;
 	audio_init_null(0.001);
+	video_core_test(1, 0);
 	if (video_load(clip, err, sizeof(err))) {
 		CHECK(0, "video: %s", err);
 		goto out;
@@ -3618,9 +3794,13 @@ static void test_video(const char *base)
 	audio_take_stats(&as);
 	CHECK(as.xruns == 0, "video silent: %u underruns", as.xruns);
 	core_unload();
+	video_core_test(0, 0);
+	if (test_video_threaded(clip, silent))
+		goto out;
 	log_msg("selftest: video core done");
 out:
 	core_unload();
+	video_core_test(0, 0);
 	audio_init_null(0);
 	rom_settings = keep;
 	settings.video_scale = keep_scale;

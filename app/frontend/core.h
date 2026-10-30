@@ -64,4 +64,16 @@ int core_state_path(const char *rom_path, int core, char *buf, size_t size);
 /* Main loop reaped a child. */
 void core_child_exited(pid_t pid, int status);
 
+/* The video player's decoder thread (video_core.c), for tests: lockstep
+ * makes retro_run wait (up to 5 s) for what it is about to show and play,
+ * so runs back to back give the same result as paced ones; delay_ms
+ * slows every picture the worker decodes. Kept across loads. */
+void video_core_test(int lockstep, int delay_ms);
+struct video_counters {
+	unsigned decoded, shown, dropped, late_pics, late_runs, dry_runs;
+	unsigned reconverted, discarded;
+	int waiting;  /* the worker is blocked on its condition variable */
+};
+void video_core_counters(struct video_counters *k);
+
 #endif

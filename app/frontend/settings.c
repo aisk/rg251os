@@ -22,9 +22,11 @@
  * roms/ it is in: moving a ROM to another folder keeps its settings (and
  * its save, core.c), and two ROMs with the same file name in different
  * folders share them. A video keeps its ".mpg" (x.mpg.txt), so it never
- * shares a file with x.gba; of its settings only cpu_start is used. Unknown keys, bad values, comments (#), blank lines
- * and CRLF line ends are ignored, so a missing or damaged file just leaves
- * the defaults. Files are replaced atomically.
+ * shares a file with x.gba; the GBA settings do not apply to it, so its
+ * load line shows only cpu_start (which cpuctl.c does not use for a video
+ * either: it starts at the lowest OPP). Unknown keys, bad values,
+ * comments (#), blank lines and CRLF line ends are ignored, so a missing
+ * or damaged file just leaves the defaults. Files are replaced atomically.
  *
  * A per ROM file is only written once something was changed for that
  * game, and only with the fields that were in the file or differ from the
@@ -337,8 +339,13 @@ void rom_settings_load(const char *rom_name)
 	rom_path(path, sizeof(path));
 	n = load_file(path, &rom_settings, rom_fields, ARRAY_SIZE(rom_fields),
 		      &rom_in_file);
-	fields_line(&rom_settings, rom_fields, ARRAY_SIZE(rom_fields), line,
-		    sizeof(line));
+	/* A video uses only cpu_start: the GBA settings stay out of its line. */
+	if (romdb_is_video(rom_name))
+		snprintf(line, sizeof(line), "cpu_start=%d",
+			 rom_settings.cpu_start);
+	else
+		fields_line(&rom_settings, rom_fields, ARRAY_SIZE(rom_fields),
+			    line, sizeof(line));
 	log_msg("settings: %s: %s, %s", rom_base,
 		n < 0 ? "defaults (no file)" : "loaded", line);
 }
