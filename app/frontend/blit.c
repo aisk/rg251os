@@ -11,6 +11,11 @@
  * per source pixel. The LCD grid needs two line buffers per source line:
  * one for the native row through the lit pixels of the cells and one for
  * the remaining rows, which are all dark.
+ *
+ * blit_rows copies a band of logical rows at 1x over a buffer already
+ * filled (the video OSD's strips, osd.c): with rotation a logical row
+ * is a native column, so each native row gets one span of the band's
+ * height, gathered down the band's column and written with one memcpy.
  */
 #include <string.h>
 
@@ -169,6 +174,40 @@ void blit_rotate(uint16_t *dst, int dpitch, int nw, int nh, int rot,
 		}
 		o = l - s * scale;
 		memcpy(row, grid && o != across ? dline : line, (size_t)nw * 2);
+	}
+}
+
+void blit_rows(uint16_t *dst, int dpitch, int nw, int nh, int rot,
+	       const uint16_t *src, int spitch, int y0, int rows)
+{
+	uint16_t line[MAX_LINE];
+	int lw = rot == 0 ? nw : nh, lh = rot == 0 ? nh : nw;
+
+	if (y0 < 0 || rows <= 0 || y0 + rows > lh || rows > MAX_LINE)
+		return;
+	if (rot == 0) {
+		for (int i = 0; i < rows; i++)
+			memcpy(dst + (long)(y0 + i) * dpitch,
+			       src + (long)i * spitch, (size_t)nw * 2);
+		return;
+	}
+	for (int ny = 0; ny < nh; ny++) {
+		/* 270: native (nx, ny) shows logical (lw-1-ny, nx); 90:
+		 * (ny, lh-1-nx), the band's rows in reverse. */
+		int lx = rot == 270 ? lw - 1 - ny : ny;
+		const uint16_t *s = src + lx;
+
+		if (rot == 270) {
+			for (int i = 0; i < rows; i++)
+				line[i] = s[(long)i * spitch];
+			memcpy(dst + (long)ny * dpitch + y0, line,
+			       (size_t)rows * 2);
+		} else {
+			for (int i = 0; i < rows; i++)
+				line[rows - 1 - i] = s[(long)i * spitch];
+			memcpy(dst + (long)ny * dpitch + (lh - y0 - rows), line,
+			       (size_t)rows * 2);
+		}
 	}
 }
 

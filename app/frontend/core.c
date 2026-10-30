@@ -45,6 +45,8 @@
  * when the state was written (see struct state_header). Neither core
  * restores save RAM from a state (mGBA stores it but loads without it,
  * gpSP does not store it). core_reset() removes the state.
+ * core_state_peek reads a state's payload with the checks that need no
+ * loaded game, for the ROM list to show where a video resumes.
  *
  * Frame skipping (rom_settings.frameskip, rom_options[]): a fixed
  * interval with either core, Auto (skip while the audio buffer is low)
@@ -885,6 +887,35 @@ int core_state_path(const char *rom_path, int core, char *buf, size_t size)
 	n = snprintf(buf, size, "%s/saves/%.*s.%s.state", fe_data_dir,
 		     romdb_stem_len(base), base, core_api_get(core)->name);
 	return n > 0 && (size_t)n < size ? 0 : -1;
+}
+
+int core_state_peek(const char *rom_path, int core, void *buf, size_t size)
+{
+	const struct core_api *api = core_api_get(core);
+	struct state_header h;
+	char path[400];
+	struct stat st;
+	uint8_t *data;
+	int n, ok;
+
+	if (!api || core_state_path(rom_path, core, path, sizeof(path)) ||
+	    stat(rom_path, &st) || size > MAX_STATE_SIZE)
+		return -1;
+	data = malloc(sizeof(h) + size + 1);
+	if (!data)
+		return -1;
+	n = read_file(path, data, sizeof(h) + size + 1);
+	memcpy(&h, data, n >= (int)sizeof(h) ? sizeof(h) : 0);
+	ok = n >= (int)sizeof(h) &&
+	     !memcmp(h.magic, STATE_MAGIC, sizeof(h.magic)) &&
+	     !strncmp(h.core, api->name, sizeof(h.core)) &&
+	     h.payload_len <= size && n == (int)(sizeof(h) + h.payload_len) &&
+	     romdb_crc32(0, data + sizeof(h), h.payload_len) == h.payload_crc &&
+	     h.rom_size == (uint32_t)st.st_size;
+	if (ok)
+		memcpy(buf, data + sizeof(h), h.payload_len);
+	free(data);
+	return ok ? (int)h.payload_len : -1;
 }
 
 static void *read_rom(const char *path, size_t *size)

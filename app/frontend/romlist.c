@@ -9,7 +9,9 @@
  * keyed by the path relative to roms/ and pruned per folder: a scan
  * drops only the entries of its own folder that are gone. Up to MAX_ROMS
  * entries per folder, paths up to ROMLIST_PATH bytes (longer ones are
- * skipped and counted in the log).
+ * skipped and counted in the log). romlist_video_neighbor lists only the
+ * videos of a folder, in the same order, for the player's previous and
+ * next video (main.c), without touching the cache or the log.
  */
 #include <dirent.h>
 #include <errno.h>
@@ -248,4 +250,64 @@ void romlist_free(struct romlist *rl)
 	rl->pending = 0;
 	rl->job = 0;
 	rl->crc_ns = 0;
+}
+
+int romlist_video_neighbor(const char *path, int d, char *out, size_t size,
+			   int *index, int *count)
+{
+	const char *slash = strrchr(path, '/'), *file = slash ? slash + 1 : path;
+	char dir[ROMLIST_PATH];
+	struct rom_entry *v = NULL;
+	struct dirent *e;
+	int n = 0, cap = 0, at = -1, ret = -1;
+	DIR *dd;
+
+	*index = *count = 0;
+	snprintf(dir, sizeof(dir), "%.*s", slash ? (int)(slash - path) : 1,
+		 slash ? path : ".");
+	dd = opendir(dir);
+	if (!dd)
+		return -1;
+	while ((e = readdir(dd))) {
+		struct rom_entry *nv;
+
+		if (e->d_name[0] == '.' || !romdb_is_video(e->d_name) ||
+		    (e->d_type != DT_REG && e->d_type != DT_UNKNOWN))
+			continue;
+		if (n == cap) {
+			cap = cap ? cap * 2 : 16;
+			nv = realloc(v, cap * sizeof(*v));
+			if (!nv)
+				break;
+			v = nv;
+		}
+		memset(&v[n], 0, sizeof(v[n]));
+		v[n].file = strdup(e->d_name);
+		if (!v[n].file)
+			continue;
+		/* The title a video gets (romdb_identify): no ".mpg". */
+		snprintf(v[n].id.title, sizeof(v[n].id.title), "%.*s",
+			 (int)strlen(e->d_name) - 4, e->d_name);
+		n++;
+	}
+	closedir(dd);
+	if (n)
+		qsort(v, n, sizeof(*v), cmp_roms);
+	for (int i = 0; i < n; i++)
+		if (!strcmp(v[i].file, file))
+			at = i;
+	if (at >= 0) {
+		int j = at + (d < 0 ? -1 : 1);
+
+		*index = at + 1;
+		*count = n;
+		ret = 1;
+		if (j >= 0 && j < n)
+			ret = snprintf(out, size, "%s/%s", dir, v[j].file) <
+			      (int)size ? 0 : -1;
+	}
+	for (int i = 0; i < n; i++)
+		free(v[i].file);
+	free(v);
+	return ret;
 }

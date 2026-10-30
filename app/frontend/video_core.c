@@ -73,15 +73,25 @@
  * clock that fits it with schedutil's 25% headroom, and running without
  * pause (so a rising clock) when it falls behind.
  *
- * Controls (joypad edges; SELECT+START is still the frontend's in-game
- * menu): A pauses and resumes (after the end: plays again from the
- * start), Left/Right seek 10 s back/forward, L/R 60 s. A seek goes to
- * the intra frame at or before the target (fast, plm_seek without
- * seek_exact). While paused the picture stays and silence plays.
+ * Controls (the joypad as retro_run sees it; SELECT+START is still the
+ * frontend's in-game menu, B its OSD, see osd.c): A pauses and resumes
+ * (after the end: plays again from the start), Left/Right seek 10 s
+ * back/forward, Down/Up 60 s; a seek key held repeats its seek after
+ * REPEAT_FIRST_RUNS runs (400 ms), then every REPEAT_NEXT_RUNS (250 ms),
+ * each a real seek from where the last one aimed, so the picture follows.
+ * Runs are counted rather than time so the tests are exact; one run is a
+ * vblank. A seek goes to the intra frame at or before the target (fast,
+ * plm_seek without seek_exact). While paused the picture stays and
+ * silence plays. L/R ask the frontend for the previous/next video of the
+ * folder (video_core_take_request, main.c switches); the end of the file
+ * asks it too, for the next video if there is one. Every control bumps a
+ * counter the frontend's OSD watches (video_core_status), along with the
+ * position, the duration and whether it is paused or ended.
  *
  * End of the file: once the worker found no more pictures and the last
- * one was shown, it stays, paused, until A plays it again from the start
- * or the menu quits. No save RAM (memory size 0). The save state is the
+ * one was shown, it stays, paused, until A plays it again from the start,
+ * a seek goes back, the menu quits or the frontend starts the next video.
+ * No save RAM (memory size 0). The save state is the
  * play position (0 after the end; the seek target while a seek is under
  * way) and whether it was paused, so the frontend's resume state brings
  * the video back where it was after a quit, a power off or the battery
@@ -90,8 +100,9 @@
  * Log lines "video: ...": at load the stream (size, frame rate, pixel
  * aspect, audio rate and channels, duration), the mapping and the worker
  * (slots, FIFO, its uclamp_min), every mapping change (mode, scaled size,
- * crop offsets), every seek (target, where it landed, the worker's time
- * for it, runs until shown), the end; with debug logging every 600
+ * crop offsets), every seek (why: the key and its repeat count, or
+ * resume, restart, replay; target, where it landed, the worker's time
+ * for it, runs until shown), pause and play, the end; with debug logging every 600
  * played runs a line for those 10 s (pictures, decode avg/max, ring
  * occupancy, late, dry, worker CPU share, cpu0 clock); at the end and at
  * unload the statistics: pictures decoded, decode+convert avg and max per
@@ -128,6 +139,8 @@
 #define SYNC_SLACK 0.02           /* s between the FIFO head and the clock */
 #define SEEK_SHORT 10.0
 #define SEEK_LONG 60.0
+#define REPEAT_FIRST_RUNS 24      /* a held seek key repeats: 400 ms */
+#define REPEAT_NEXT_RUNS 15       /* then every 250 ms */
 #define BUFFER_MAX_RUNS 30        /* runs a seek's picture waits for audio */
 #define RESUME_WAIT_NS (500 * 1000000LL)
 #define LOCKSTEP_WAIT_NS (5000 * 1000000LL)
@@ -210,9 +223,12 @@ static struct {
 	double clock;            /* play position of this run */
 	double next_pic;         /* time of the next picture */
 	int paused, ended, dirty, buffering, buf_runs;
-	const char *seek_why;
+	char seek_why[48];
 	double seek_from, seek_to;
 	uint16_t prev_pad;
+	int rep_key, rep_runs, rep_count;  /* held seek key, -1 none */
+	int request;             /* enum video_request for the frontend */
+	unsigned events;         /* controls acted on, for the OSD */
 	double audio_acc;
 	/* Debug window. */
 	struct counters wk;
@@ -231,6 +247,13 @@ static struct {
 	plm_frame_t *seek_frame;
 	int16_t abuf[PLM_AUDIO_SAMPLES_PER_FRAME * 2];
 } w;
+
+/* The save state: the play position and whether it was paused. */
+struct video_state {
+	char magic[8];
+	double pos;
+	int paused;
+};
 
 /* ------------------------------------------------------------ picture */
 
@@ -710,7 +733,8 @@ static void log_seek(int what)
 		log_end("no picture after the seek");
 }
 
-/* To target (clamped), at the intra frame before it, by the worker. */
+/* To target (clamped), at the intra frame before it, by the worker; why
+ * goes into the log line once it is shown. */
 static void request_seek(double target, const char *why)
 {
 	if (target < 0)
@@ -727,7 +751,7 @@ static void request_seek(double target, const char *why)
 	v.k.seeks++;
 	pthread_cond_signal(&v.wcond);
 	unlock();
-	v.seek_why = why;
+	snprintf(v.seek_why, sizeof(v.seek_why), "%s", why);
 	v.seek_from = v.clock;
 	v.seek_to = target;
 	v.buffering = 1;
@@ -837,6 +861,8 @@ static void log_end(const char *how)
 	log_msg("video: %s ended at %.2f s (%s), paused on the last picture; "
 		"A plays it again", v.name, v.clock, how);
 	log_stats("end");
+	/* The frontend starts the next video of the folder, if any. */
+	v.request = VIDEO_REQ_END;
 }
 
 /* ------------------------------------------------------------ control */
@@ -872,6 +898,43 @@ void video_core_test(int on, int delay_ms)
 	test_delay_ms = delay_ms;
 }
 
+void video_core_status(struct video_status *s)
+{
+	memset(s, 0, sizeof(*s));
+	if (!v.plm)
+		return;
+	s->loaded = 1;
+	s->duration = v.duration;
+	s->pos = v.buffering ? v.seek_to : v.clock;
+	if (s->pos < 0)
+		s->pos = 0;
+	if (v.duration > 0 && s->pos > v.duration)
+		s->pos = v.duration;
+	s->paused = v.paused;
+	s->ended = v.ended;
+	s->buffering = v.buffering;
+	s->events = v.events;
+}
+
+int video_core_take_request(void)
+{
+	int r = v.plm ? v.request : VIDEO_REQ_NONE;
+
+	v.request = VIDEO_REQ_NONE;
+	return r;
+}
+
+double video_core_saved_pos(const char *path)
+{
+	struct video_state st;
+
+	if (core_state_peek(path, CORE_VIDEO, &st, sizeof(st)) !=
+	    (int)sizeof(st) || memcmp(st.magic, STATE_MAGIC, 8) ||
+	    !(st.pos >= 0))
+		return -1;
+	return st.pos;
+}
+
 void video_core_counters(struct video_counters *c)
 {
 	memset(c, 0, sizeof(*c));
@@ -886,6 +949,7 @@ void video_core_counters(struct video_counters *c)
 	c->dry_runs = v.k.dry_runs;
 	c->reconverted = v.k.reconverted;
 	c->discarded = v.k.discarded;
+	c->seeks = v.k.seeks;
 	c->waiting = v.waiting;
 	unlock();
 }
@@ -1025,7 +1089,12 @@ bool video_retro_load_game(const struct retro_game_info *game)
 	plm_frame_t *f;
 
 	memset(&v, 0, sizeof(v));
+	/* The worker's own too: its mapping is matched by generation,
+	 * which starts over with every video (another size: out of
+	 * bounds with the last one's mapping). */
+	memset(&w, 0, sizeof(w));
 	v.shown = -1;
+	v.rep_key = -1;
 	pthread_mutex_init(&v.mu, NULL);
 	pthread_cond_init(&v.wcond, NULL);
 	pthread_cond_init(&v.mcond, NULL);
@@ -1113,6 +1182,7 @@ void video_retro_reset(void)
 	if (!v.plm)
 		return;
 	v.paused = 0;
+	v.events++;
 	request_seek(0, "restart");
 }
 
@@ -1150,6 +1220,85 @@ static int take_picture(void)
 	return 0;
 }
 
+/* The seek keys, in the order a press is looked for. */
+static const struct {
+	int id;
+	double d;
+	const char *key;
+} seek_keys[] = {
+	{ RETRO_DEVICE_ID_JOYPAD_LEFT, -SEEK_SHORT, "Left" },
+	{ RETRO_DEVICE_ID_JOYPAD_RIGHT, SEEK_SHORT, "Right" },
+	{ RETRO_DEVICE_ID_JOYPAD_DOWN, -SEEK_LONG, "Down" },
+	{ RETRO_DEVICE_ID_JOYPAD_UP, SEEK_LONG, "Up" },
+};
+
+/* A seek by seek_keys[i], from where the last one aimed while one is
+ * under way; repeat counts the repeats of a held key (0: the press). */
+static void key_seek(int i, int repeat)
+{
+	char why[48];
+
+	if (repeat)
+		snprintf(why, sizeof(why), "%+.0f s, %s repeat %d",
+			 seek_keys[i].d, seek_keys[i].key, repeat);
+	else
+		snprintf(why, sizeof(why), "%+.0f s, %s", seek_keys[i].d,
+			 seek_keys[i].key);
+	v.events++;
+	request_seek((v.buffering ? v.seek_to : v.clock) + seek_keys[i].d, why);
+}
+
+/*
+ * The buttons of this run: A, the seek keys with their hold repeat (a
+ * newly pressed one takes over from one held), L/R for the frontend.
+ * Seeking also works after the end (back into the video).
+ */
+static void controls(uint16_t pad, uint16_t pressed)
+{
+	int seeked = 0;
+
+	if (pressed & (1 << RETRO_DEVICE_ID_JOYPAD_A)) {
+		v.events++;
+		if (v.ended) {
+			log_msg("video: A after the end: playing from the start");
+			v.paused = 0;
+			request_seek(0, "replay");
+		} else {
+			v.paused = !v.paused;
+			log_msg("video: %s at %.2f s", v.paused ? "paused" :
+				"playing", v.clock);
+		}
+	}
+	for (int i = 0; i < (int)ARRAY_SIZE(seek_keys); i++)
+		if (pressed & (1 << seek_keys[i].id)) {
+			v.rep_key = i;
+			v.rep_runs = v.rep_count = 0;
+			key_seek(i, 0);
+			seeked = 1;
+			break;
+		}
+	if (!seeked && v.rep_key >= 0) {
+		if (!(pad & (1 << seek_keys[v.rep_key].id))) {
+			v.rep_key = -1;
+		} else {
+			/* Runs held since the press. */
+			int r = ++v.rep_runs;
+
+			if (r == REPEAT_FIRST_RUNS || (r > REPEAT_FIRST_RUNS &&
+			    (r - REPEAT_FIRST_RUNS) % REPEAT_NEXT_RUNS == 0))
+				key_seek(v.rep_key, ++v.rep_count);
+		}
+	}
+	if (pressed & (1 << RETRO_DEVICE_ID_JOYPAD_L)) {
+		v.events++;
+		v.request = VIDEO_REQ_PREV;
+	}
+	if (pressed & (1 << RETRO_DEVICE_ID_JOYPAD_R)) {
+		v.events++;
+		v.request = VIDEO_REQ_NEXT;
+	}
+}
+
 void video_retro_run(void)
 {
 	static int16_t out[2 * 2048];
@@ -1166,35 +1315,7 @@ void video_retro_run(void)
 				 RETRO_DEVICE_ID_JOYPAD_MASK);
 	pressed = (uint16_t)(pad & ~v.prev_pad);
 	v.prev_pad = pad;
-	if (pressed & (1 << RETRO_DEVICE_ID_JOYPAD_A)) {
-		if (v.ended) {
-			log_msg("video: A after the end: playing from the start");
-			v.paused = 0;
-			request_seek(0, "replay");
-		} else {
-			v.paused = !v.paused;
-			log_msg("video: %s at %.2f s", v.paused ? "paused" :
-				"playing", v.clock);
-		}
-	}
-	if (!v.ended) {
-		static const struct { int id; double d; } keys[] = {
-			{ RETRO_DEVICE_ID_JOYPAD_LEFT, -SEEK_SHORT },
-			{ RETRO_DEVICE_ID_JOYPAD_RIGHT, SEEK_SHORT },
-			{ RETRO_DEVICE_ID_JOYPAD_L, -SEEK_LONG },
-			{ RETRO_DEVICE_ID_JOYPAD_R, SEEK_LONG },
-		};
-		static const char *const names[] = {
-			"-10 s", "+10 s", "-60 s", "+60 s",
-		};
-
-		for (size_t i = 0; i < ARRAY_SIZE(keys); i++)
-			if (pressed & (1 << keys[i].id)) {
-				request_seek((v.buffering ? v.seek_to : v.clock) +
-					     keys[i].d, names[i]);
-				break;
-			}
-	}
+	controls(pad, pressed);
 
 	n = run_frames();
 	if (n > 2048)
@@ -1256,12 +1377,6 @@ size_t video_retro_get_memory_size(unsigned id)
 	(void)id;
 	return 0;
 }
-
-struct video_state {
-	char magic[8];
-	double pos;
-	int paused;
-};
 
 size_t video_retro_serialize_size(void)
 {

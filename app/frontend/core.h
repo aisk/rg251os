@@ -56,6 +56,11 @@ void core_save_sync(void);
  * and wait for it (why goes into the log); 0 when the state was written.
  * core_load() resumes from it. */
 int core_state_save(const char *why);
+/* The payload of the state file core_load would resume a ROM from with
+ * a core, into buf when it is at most size bytes and passes the checks
+ * that do not need the game loaded (magic, core, length, payload CRC, the
+ * ROM's size); returns its length or -1. */
+int core_state_peek(const char *rom_path, int core, void *buf, size_t size);
 /* The game loaded resumed from its state. */
 int core_state_resumed(void);
 /* The state file core_load would use for a ROM with a core (enum
@@ -71,9 +76,31 @@ void core_child_exited(pid_t pid, int status);
 void video_core_test(int lockstep, int delay_ms);
 struct video_counters {
 	unsigned decoded, shown, dropped, late_pics, late_runs, dry_runs;
-	unsigned reconverted, discarded;
+	unsigned reconverted, discarded, seeks;
 	int waiting;  /* the worker is blocked on its condition variable */
 };
 void video_core_counters(struct video_counters *k);
+
+/* The video player as the frontend's OSD shows it (all 0 when no video
+ * is loaded): the position (where a seek under way goes), the duration
+ * (0: unknown), paused, ended, a seek under way, and a count of the
+ * controls acted on (A, seeks with their repeats, L/R, restart) that
+ * changes whenever the OSD should show. */
+struct video_status {
+	int loaded;
+	double pos, duration;
+	int paused, ended, buffering;
+	unsigned events;
+};
+void video_core_status(struct video_status *s);
+/* What the player asks the frontend for, taken once: L, R, or the end of
+ * the video (main.c starts the previous/next video of the folder). */
+enum video_request {
+	VIDEO_REQ_NONE, VIDEO_REQ_PREV, VIDEO_REQ_NEXT, VIDEO_REQ_END,
+};
+int video_core_take_request(void);
+/* The play position a video's resume state holds (0 after its end), or
+ * -1 without a usable state (for the ROM list). */
+double video_core_saved_pos(const char *path);
 
 #endif

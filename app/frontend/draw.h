@@ -46,6 +46,11 @@ int draw_text_width(const char *s);
 void draw_image_dim(struct canvas *c, const uint16_t *src, int spitch,
 		    int sw, int sh);
 
+/* A filled triangle in the w x h box at (x, y), pointing right (the
+ * play symbol); clipped. */
+void draw_triangle(struct canvas *c, int x, int y, int w, int h,
+		   uint16_t col);
+
 struct blit_fx;
 /* Scale an image 2x into the canvas at (x0, y0) with effects (or NULL),
  * the same pixels blit_rotate() would produce. Clipped. */

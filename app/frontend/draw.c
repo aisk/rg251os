@@ -1,7 +1,8 @@
 /*
  * Menu drawing on a logical RGB565 canvas; text in the anti-aliased ASCII
  * font of font.h, blended over the canvas, at its own size or scaled up
- * (nearest neighbor) for the clock page.
+ * (nearest neighbor) for the clock page; boxes, frames and a play
+ * triangle (the ROM list's video marker and the video OSD).
  */
 #include <stdarg.h>
 #include <stdio.h>
@@ -27,6 +28,20 @@ void draw_fill(struct canvas *c, int x, int y, int w, int h, uint16_t col)
 
 		for (int i = x; i < x1; i++)
 			p[i] = col;
+	}
+}
+
+void draw_triangle(struct canvas *c, int x, int y, int w, int h,
+		   uint16_t col)
+{
+	/* Row j spans from the left edge to where the slanted sides are,
+	 * widest in the middle. */
+	for (int j = 0; j < h; j++) {
+		int d = 2 * j + 1 - h, len;
+
+		d = d < 0 ? -d : d;
+		len = (int)((long)w * (h - d) / h);
+		draw_fill(c, x, y + j, len, 1, col);
 	}
 }
 

@@ -64,6 +64,9 @@ void draw_rom_name(struct canvas *c, int x, int y, uint16_t col,
  * than its row, steps (60 a second) after it was selected (see menu.c). */
 int marquee_offset(int excess, unsigned steps);
 
+/* The volume as the Volume row shows it: "-12dB" or "mute". */
+void menu_volume_label(char *buf, size_t size);
+
 void message_draw(struct canvas *c, const char *title, const char *body,
 		  uint16_t col);
 

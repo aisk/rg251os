@@ -35,6 +35,16 @@ void blit_rotate(uint16_t *dst, int dpitch, int nw, int nh, int rot,
 		 const uint16_t *src, int spitch, int sw, int sh, int scale,
 		 const struct blit_fx *fx);
 
+/*
+ * Logical rows y0 .. y0 + rows - 1 of a full screen logical image at 1x
+ * (src is its row y0, the logical screen's width wide) over the same rows
+ * of a native buffer filled by blit_rotate, leaving the rest as it is:
+ * for an overlay on part of the screen. Only writes, a span per native
+ * row.
+ */
+void blit_rows(uint16_t *dst, int dpitch, int nw, int nh, int rot,
+	       const uint16_t *src, int spitch, int y0, int rows);
+
 /* Straightforward per-pixel version with the same result, for tests. */
 void blit_reference(uint16_t *dst, int dpitch, int nw, int nh, int rot,
 		    const uint16_t *src, int spitch, int sw, int sh, int scale,

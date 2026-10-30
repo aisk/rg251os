@@ -18,7 +18,8 @@
  * previous frame is on screen, the page stack runs (frame()); in game that
  * is one retro_run with the frame scaled (by the largest integer that
  * fits, 2x for the GBA, centered with black bars) and rotated straight
- * into the back buffer (a video without the grid and color effects),
+ * into the back buffer (a video without the grid and color effects,
+ * with its OSD from osd.c over the rows of its two strips when shown),
  * so emulation runs at the panel's 60.02 Hz and audio is resampled to
  * match (audio.c). A video decodes in video_core.c's own thread, so its
  * game session starts cpuctl's floor at the lowest OPP (CPU_START_LOWEST)
@@ -32,12 +33,23 @@
  * ROM list, or from the in-game menu), system info, date and time, the
  * fatal error screen and the power off message. The game, error and
  * power off pages are here, and on_ui does what the pages ask for: start
- * a game, resume, quit, restart, power off. A game ends by Quit to ROM
- * list, Restart with another core or power off: its save and resume state
- * are written (core_state_save) before the core is unloaded; Restart game
- * resets the core in the same session; a fatal error writes no state.
+ * a game, resume, quit, restart, switch videos, power off. A game ends by
+ * Quit to ROM list, Restart with another core, another video or power
+ * off: its save and resume state are written (core_state_save) before
+ * the core is unloaded; Restart game resets the core in the same session;
+ * a fatal error writes no state.
  * Powering off in game also writes the resume record (poweroff_end_game);
  * the other ends remove it.
+ *
+ * Videos: L/R and the end of a video ask for the previous/next video of
+ * its folder in the ROM list's order (video_request, romlist.c's
+ * romlist_video_neighbor); the game page then asks for UI_SWITCH and
+ * switch_video ends the one playing like a quit and starts the other the
+ * normal way, with the ROM list set to it underneath (so quitting comes
+ * back to the video last played). At the first or last one L/R only show
+ * a note in the OSD, the end stays paused on the last picture. B toggles
+ * the OSD, the volume keys show the new volume in it; every one of these
+ * is logged as "video: ...".
  *
  * Power key (timing in input.c): a short press sleeps (do_sleep: game
  * paused, save and state written, audio closed (reopened on wake but
@@ -103,9 +115,11 @@
 #include "fx.h"
 #include "input.h"
 #include "menu.h"
+#include "osd.h"
 #include "perf.h"
 #include "resume.h"
 #include "romdb.h"
+#include "romlist.h"
 #include "sdgrow.h"
 #include "settings.h"
 #include "sleep.h"
@@ -181,6 +195,9 @@ static struct {
 	int64_t wake_ms;
 	const char *power_dir;
 	int sleep_test;        /* headless: light sleep wakes by itself */
+	/* The video to switch to (UI_SWITCH) and why. */
+	char switch_path[512];
+	const char *switch_why;
 } m = {
 	.cv = { .w = CANVAS_W, .h = CANVAS_H },
 	.power_dir = "/sys/power",
@@ -233,11 +250,27 @@ void on_power_key(int down)
 	power_action(pwrkey_event(&m.pk, down, now_ns()));
 }
 
+/* A video playing shows the new volume in its OSD (a game has no
+ * feedback, the menus their Volume row). */
+static int video_playing(void)
+{
+	return ui_top() == &game_page && core_loaded() &&
+	       core_info()->core == CORE_VIDEO;
+}
+
 void on_volume_key(int dir)
 {
+	char label[16], note[24];
+
 	log_verbose("volume key %+d", dir);
 	audio_volume_step(dir);
 	ui_redraw();  /* the Volume row */
+	if (video_playing()) {
+		menu_volume_label(label, sizeof(label));
+		snprintf(note, sizeof(note), "Volume %s", label);
+		log_msg("video: volume key %+d, %s (OSD)", dir, label);
+		osd_note(note, now_ns());
+	}
 }
 
 void on_jack(int inserted)
@@ -290,6 +323,8 @@ static int end_game(const char *why)
 	int failed = !strcmp(why, "resume failed"), ret = -1;
 
 	game_end_logs(why);
+	if (core_loaded() && core_info()->core == CORE_VIDEO)
+		osd_log_stats("unload");
 	audio_pause();
 	if (core_loaded() && strcmp(why, "fatal") && !failed)
 		ret = core_state_save(why);
@@ -429,6 +464,8 @@ static void start_game(const char *path)
 			  m.game_start_ns);
 	ui_reset(&game_page, now_ns());
 	ui_suppress(input_buttons());
+	if (core_info()->core == CORE_VIDEO)
+		osd_start(m.rom_id.title, now_ns());
 	/* The ROM list idled without flips: its gap is not missed frames. */
 	display_resync();
 	m.next_perf = now_ns() + PERF_INTERVAL_NS;
@@ -457,6 +494,86 @@ static void restart_game(void)
 	log_msg("restarting with %s", core_names[rom_settings.core]);
 	end_game("restart");
 	save_settings();
+	start_game(path);
+	if (ui_top() != &game_page) {
+		ui_reset(&romlist_page, now_ns());
+		ui_suppress(input_buttons());
+	}
+}
+
+/*
+ * L, R or the end of a video (video_core_take_request): 1 with the
+ * previous or next video of its folder (romlist_video_neighbor, the ROM
+ * list's order) in m.switch_path. None there: the OSD says so after L/R,
+ * the end stays paused on the last picture.
+ */
+static int video_request(int64_t now)
+{
+	static const char *const keys[] = { "", "L", "R", "end" };
+	int req = video_core_take_request(), d = req == VIDEO_REQ_PREV ? -1 : 1;
+	char path[sizeof(m.switch_path)], rel[ROMLIST_PATH], folder[ROMLIST_PATH];
+	const char *base, *cut;
+	int rc, at, count;
+
+	if (req == VIDEO_REQ_NONE)
+		return 0;
+	if (req == VIDEO_REQ_END)
+		osd_log_stats("end");
+	rc = romlist_video_neighbor(m.rom_path, d, path, sizeof(path), &at,
+				    &count);
+	/* The folder for the log, relative to roms/ like the ROM list's. */
+	if (resume_rom_rel(m.rom_path, rel, sizeof(rel)))
+		snprintf(rel, sizeof(rel), "%s", m.rom_path);
+	cut = strrchr(rel, '/');
+	snprintf(folder, sizeof(folder), "/%.*s", cut ? (int)(cut - rel) : 0,
+		 rel);
+	if (rc < 0) {
+		log_msg("video: %s: cannot list the videos of %s", keys[req],
+			folder);
+		return 0;
+	}
+	if (rc == 0) {
+		base = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
+		log_msg("video: %s: %s video %s (%d of %d in %s)%s", keys[req],
+			d < 0 ? "previous" : "next", base, at + d, count, folder,
+			req == VIDEO_REQ_END ? ", playing it" : "");
+		snprintf(m.switch_path, sizeof(m.switch_path), "%s", path);
+		m.switch_why = req == VIDEO_REQ_PREV ? "previous video" :
+			       req == VIDEO_REQ_NEXT ? "next video" : "autoplay";
+		return 1;
+	}
+	if (req == VIDEO_REQ_END) {
+		log_msg("video: end: %s is the last video in %s (%d of %d), "
+			"paused on its last picture", m.rom_name, folder, at,
+			count);
+		return 0;
+	}
+	log_msg("video: %s: %s is the %s video in %s (%d of %d), staying",
+		keys[req], m.rom_name, d < 0 ? "first" : "last", folder, at,
+		count);
+	osd_note(d < 0 ? "First video" : "Last video", now);
+	return 0;
+}
+
+/*
+ * The video video_request picked, through the normal game start: the
+ * one playing ends like a quit (its resume state written, at 0 after its
+ * end), then the other starts (resuming from its own state), with the ROM
+ * list set to it underneath, so quitting comes back to the video last
+ * played. One that does not start leaves the ROM list with its message.
+ */
+static void switch_video(void)
+{
+	char path[sizeof(m.switch_path)], rel[ROMLIST_PATH];
+	const char *base = strrchr(m.switch_path, '/');
+
+	snprintf(path, sizeof(path), "%s", m.switch_path);
+	log_msg("video: %s: %s -> %s", m.switch_why, m.rom_name,
+		base ? base + 1 : path);
+	end_game(m.switch_why);
+	save_settings();
+	if (!resume_rom_rel(path, rel, sizeof(rel)))
+		romlist_menu_select(rel);
 	start_game(path);
 	if (ui_top() != &game_page) {
 		ui_reset(&romlist_page, now_ns());
@@ -734,13 +851,17 @@ static struct ui_result game_update(uint32_t held, int64_t now)
 	int fw, fh, fp, pitch;
 	unsigned missed;
 	uint16_t *dst;
-	int skipped;
+	int skipped, video = core_info()->core == CORE_VIDEO, sw = 0;
 
 	if (ui_hotkey())
 		return open_menu();
 	t0 = now_ns();
 	skipped = emulate(held & 0xffff);
 	t2 = now_ns();
+	if (video) {
+		osd_input(held, now);
+		sw = video_request(now);
+	}
 
 	fr = core_frame(&fw, &fh, &fp);
 	if (display_ready()) {
@@ -750,6 +871,10 @@ static struct ui_result game_update(uint32_t held, int64_t now)
 				    di->rotation, fr, fp, fw, fh,
 				    frame_scale(di->logical_w, di->logical_h, fw, fh),
 				    game_fx());
+		/* The video's OSD over it, only its strips' rows. */
+		if (video)
+			osd_frame(dst, pitch, di->native_w, di->native_h,
+				  di->rotation, fr, fp, fw, fh, now);
 		t3 = now_ns();
 		display_present();
 	} else {
@@ -775,7 +900,7 @@ static struct ui_result game_update(uint32_t held, int64_t now)
 		snprintf(name, sizeof(name), "dmesg-game%u-30s.txt", m.games);
 		klog_dump_async(name);
 	}
-	return UI_STAY;
+	return sw ? UI_ACT(UI_SWITCH) : UI_STAY;
 }
 
 static void fatal_draw(struct canvas *c, const struct game_view *g)
@@ -822,6 +947,9 @@ static void on_ui(enum ui_action act, const struct page *from)
 		break;
 	case UI_RESET:
 		reset_game();
+		break;
+	case UI_SWITCH:
+		switch_video();
 		break;
 	case UI_POWEROFF:
 		request_poweroff(from->name);
@@ -1273,8 +1401,9 @@ static void run(void)
  * codec plays on, as the panel does on the device). FE_RESET_AT=N
  * opens the in-game menu after frame N and confirms Restart game, with
  * key presses through the page stack (ui_frame). The game taps A for 10
- * frames every 2 s; a video gets Right, Left, A, A at frames 120, 240,
- * 360, 420 instead (headless_video_keys). The game starts and
+ * frames every 2 s; a video gets the keys of FE_VIDEO_KEYS instead
+ * (headless_video_keys), its OSD is drawn into the native buffer and L,
+ * R and its end switch videos like on the device. The game starts and
  * ends like on the device (start_game, end_game and the settings saved),
  * so the resume state is loaded and written like on a start and a quit.
  * ROM "resume" plays a boot instead: resume_boot picks the game (B held
@@ -1283,21 +1412,50 @@ static void run(void)
  * record, without powering off), quit (Quit to ROM list), crash (nothing
  * written, as if the device lost power), otherwise like a quit.
  */
-/* A video gets these instead of the A taps (one frame each, edges):
- * +10 s, -10 s, pause, play. */
+/*
+ * A video gets these instead of the A taps: FE_VIDEO_KEYS, a list of
+ * "frame:key" or "first-last:key" (held from first to last), keys A, B,
+ * L, R, Up, Down, Left, Right; "none" for no keys. By default: +10 s,
+ * -10 s, pause, play, Left held a second (three repeats), -60 s, R and L
+ * (the only video of its folder: last and first), B twice (OSD hidden,
+ * shown).
+ */
+#define HEADLESS_VIDEO_KEYS "120:Right,240:Left,360:A,420:A,480-539:Left," \
+	"600:Down,700:R,760:L,820:B,850:B"
+
 static uint32_t headless_video_keys(long i)
 {
-	switch (i) {
-	case 120:
-		return JOY_BIT(RIGHT);
-	case 240:
-		return JOY_BIT(LEFT);
-	case 360:
-	case 420:
-		return JOY_BIT(A);
-	default:
-		return 0;
+	static const struct { const char *name; uint32_t bit; } names[] = {
+		{ "A", JOY_BIT(A) }, { "B", JOY_BIT(B) }, { "L", JOY_BIT(L) },
+		{ "R", JOY_BIT(R) }, { "Up", JOY_BIT(UP) },
+		{ "Down", JOY_BIT(DOWN) }, { "Left", JOY_BIT(LEFT) },
+		{ "Right", JOY_BIT(RIGHT) },
+	};
+	const char *s = getenv("FE_VIDEO_KEYS");
+	uint32_t keys = 0;
+
+	if (!s)
+		s = HEADLESS_VIDEO_KEYS;
+	while (*s) {
+		char *end;
+		long a = strtol(s, &end, 10), b = a;
+		size_t n;
+
+		if (*end == '-')
+			b = strtol(end + 1, &end, 10);
+		if (*end != ':')
+			break;
+		s = end + 1;
+		n = strcspn(s, ",");
+		for (size_t k = 0; k < ARRAY_SIZE(names); k++)
+			if (strlen(names[k].name) == n &&
+			    !strncmp(s, names[k].name, n) && i >= a && i <= b)
+				keys |= names[k].bit;
+		s += n;
+		if (*s == ',')
+			s++;
 	}
+	return keys;
 }
 
 static int headless(const char *data, const char *rom, long frames)
@@ -1314,6 +1472,7 @@ static int headless(const char *data, const char *rom, long frames)
 	int fw = 0, fh = 0, fp = 0, st;
 	unsigned nrun, nskip;
 	int64_t t;
+	long i0 = 0;  /* the frame the current game started at */
 	pid_t pid;
 
 	snprintf(fe_data_dir, sizeof(fe_data_dir), "%s", data);
@@ -1363,16 +1522,24 @@ static int headless(const char *data, const char *rom, long frames)
 		int64_t t0 = now_ns(), t2;
 		int skipped;
 
+		int video = core_info()->core == CORE_VIDEO, sw = 0;
+		uint32_t held = video ? headless_video_keys(i) :
+				i % 120 < 10 ? JOY_BIT(A) : 0;
+
 		/* Fake time from the start: 60 frames per second. */
-		t = m.game_start_ns + i * HEADLESS_FRAME_NS;
-		skipped = emulate(core_info()->core == CORE_VIDEO ?
-				  headless_video_keys(i) :
-				  i % 120 < 10 ? JOY_BIT(A) : 0);
+		t = m.game_start_ns + (i - i0) * HEADLESS_FRAME_NS;
+		skipped = emulate(held);
+		if (video) {
+			osd_input(held, t);
+			sw = video_request(t);
+		}
 		fr = core_frame(&fw, &fh, &fp);
 		t2 = now_ns();
 		if (fr)
 			blit_rotate(native, 320, 320, 480, 270, fr, fp, fw, fh,
 				    frame_scale(480, 320, fw, fh), game_fx());
+		if (video)
+			osd_frame(native, 320, 320, 480, 270, fr, fp, fw, fh, t);
 		perf_add(&m.p_blit, now_ns() - t2);
 		cpuctl_game_frame(now_ns() - t0, 0, skipped,
 				  t + HEADLESS_FRAME_NS);
@@ -1385,6 +1552,15 @@ static int headless(const char *data, const char *rom, long frames)
 		}
 		while ((pid = sys_reap(&st)) > 0)
 			core_child_exited(pid, st);
+		if (sw) {
+			switch_video();
+			if (ui_top() != &game_page) {
+				log_msg("headless: %s did not start", m.switch_path);
+				return 1;
+			}
+			i0 = i + 1;
+			continue;
+		}
 		if (i == sleep_at) {
 			/* A short press, as the input layer reports it. */
 			on_power_key(1);

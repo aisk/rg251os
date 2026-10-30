@@ -56,8 +56,12 @@
  * for gpSP), LCD grid, Grid darkness, Dot boost and Debug log. A video
  * (video_core.c) has a shorter in-game menu without Core, Frameskip and
  * Settings, with Picture instead: Fit or Crop, a global setting
- * (settings.video_scale) the player takes on the next frame. The list
- * shows videos (*.mpg) among the ROMs, by file name. In
+ * (settings.video_scale) the player takes on the next frame; its Restart
+ * game reads "Play from start". The list shows videos (*.mpg) among the
+ * ROMs, by file name, with a play triangle at the end of the row (two
+ * columns less for the name); for the selected video with a resume state
+ * the key hints read "A:resume m:ss" with where it resumes (read from the
+ * state when the selection changes or the list opens). In
  * menus, up/down select, left/right change a value, A activates, B goes
  * back. The battery level is shown in the ROM list and settings headers
  * and right of the game's name in the in-game menu; the ROM list header
@@ -76,6 +80,7 @@
 #include "fx.h"
 #include "input.h"
 #include "menu.h"
+#include "osd.h"
 #include "romlist.h"
 #include "settings.h"
 #include "sysinfo.h"
@@ -116,6 +121,12 @@ static char start_path[ROMLIST_PATH + 256];  /* UI_START_ROM */
 /* Selected when the list opens next (romlist_menu_select), "": none. */
 static char select_next[256];
 static struct marquee list_mq = { .sel = -1 };
+/* Where the selected video resumes (resume_hint): its path, the
+ * position, -1 for none. */
+static struct {
+	char path[ROMLIST_PATH + 256];
+	double pos;
+} hint = { .pos = -1 };
 
 /*
  * Two-press confirmation for the rows that restart the game or power off:
@@ -132,7 +143,7 @@ struct confirm {
 
 /* ------------------------------------------------------------- helpers */
 
-static void volume_label(char *buf, size_t size)
+void menu_volume_label(char *buf, size_t size)
 {
 	if (settings.volume == 0)
 		snprintf(buf, size, "mute");
@@ -229,6 +240,38 @@ static void list_scroll(void)
 		top = roms.count > LIST_ROWS ? roms.count - LIST_ROWS : 0;
 }
 
+static int is_video_entry(int i)
+{
+	return i < roms.count && !roms.roms[i].dir &&
+	       romdb_is_video(roms.roms[i].file);
+}
+
+/* The columns of entry i's name: a video's marker takes two. */
+static int entry_cols(int i)
+{
+	return is_video_entry(i) ? LIST_COLS - 2 : LIST_COLS;
+}
+
+/* The selected video's resume position, read again when the selection
+ * moved to another file (or after list_open, which clears the path). */
+static void resume_hint(void)
+{
+	char path[sizeof(hint.path)];
+
+	path[0] = 0;
+	if (roms.count && is_video_entry(sel) &&
+	    snprintf(path, sizeof(path), "%s/%s", roms.dir,
+		     roms.roms[sel].file) >= (int)sizeof(path))
+		path[0] = 0;
+	if (!strcmp(path, hint.path) && path[0])
+		return;
+	snprintf(hint.path, sizeof(hint.path), "%s", path);
+	hint.pos = path[0] ? video_core_saved_pos(path) : -1;
+	if (hint.pos > 0)
+		log_verbose("roms: %s resumes at %.1f s", roms.roms[sel].file,
+			    hint.pos);
+}
+
 /* Scan cur_dir (or the first parent that still exists) and select the
  * entry named select (a folder if dir), else the row at index fallback. */
 static void list_open(const char *select, int dir, int fallback)
@@ -260,6 +303,8 @@ static void list_open(const char *select, int dir, int fallback)
 	list_scroll();
 	list_mq.sel = -1;
 	list_mq.offset = 0;
+	hint.path[0] = 0;
+	resume_hint();
 	if (n < 0)
 		log_msg("roms: %s cannot be opened", path);
 	else
@@ -413,9 +458,11 @@ static struct ui_result romlist_menu_update(uint32_t pressed, int64_t now)
 	r = romlist_keys(pressed);
 	if (roms.pending)  /* a folder just opened */
 		ui_wake_at(now + CRC_SLICE_NS);
+	if (r.act == UI_NONE)
+		resume_hint();
 	if (r.act == UI_NONE && roms.count)
-		marquee_update(&list_mq, sel, roms.roms[sel].id.title, LIST_COLS,
-			       now);
+		marquee_update(&list_mq, sel, roms.roms[sel].id.title,
+			       entry_cols(sel), now);
 	return r;
 }
 
@@ -552,6 +599,7 @@ static void list_header(struct canvas *c)
 static void romlist_menu_draw(struct canvas *c, const struct game_view *g)
 {
 	const char *keys;
+	char buf[48], t[16];
 
 	(void)g;
 	draw_fill(c, 0, 0, c->w, c->h, COL_BG);
@@ -582,7 +630,12 @@ static void romlist_menu_draw(struct canvas *c, const struct game_view *g)
 		}
 		if (roms.roms[top + i].dir)
 			col = COL_HI;
-		draw_rom_name(c, LIST_X, y, col, name, LIST_COLS, offset);
+		draw_rom_name(c, LIST_X, y, col, name, entry_cols(top + i),
+			      offset);
+		/* A video: a play triangle right of its name. */
+		if (is_video_entry(top + i))
+			draw_triangle(c, LIST_X + FONT_W * LIST_COLS - 12,
+				      y + (FONT_H - 12) / 2, 10, 12, col);
 	}
 	if (cur_dir[0])
 		keys = !roms.count ? "B:up  SELECT:settings" :
@@ -592,6 +645,12 @@ static void romlist_menu_draw(struct canvas *c, const struct game_view *g)
 		keys = !roms.count ? "SELECT:settings" :
 		       roms.roms[sel].dir ? "A:open  SELECT:settings" :
 		       "A:start  SELECT:settings";
+	if (roms.count && is_video_entry(sel) && hint.pos > 0) {
+		osd_format_time(hint.pos, hint.pos >= 3600, t, sizeof(t));
+		snprintf(buf, sizeof(buf), "A:resume %s%s", t, cur_dir[0] ?
+			 " B:up SELECT:settings" : "  SELECT:settings");
+		keys = buf;
+	}
 	if (message[0])
 		draw_text(c, 8, FOOT_Y, COL_ERR, message);
 	else
@@ -926,8 +985,12 @@ static const struct row
 		"Restart game", .flags = ROW_CONFIRM, .press = { UI_RESET, 0 },
 		.armed = "Press A to restart",
 	},
+	row_play_start = {
+		"Play from start", .flags = ROW_CONFIRM, .press = { UI_RESET, 0 },
+		.armed = "Press A to restart",
+	},
 	row_volume = {
-		"Volume", .step = audio_volume_step, .value = volume_label,
+		"Volume", .step = audio_volume_step, .value = menu_volume_label,
 	},
 	row_brightness = {
 		"Brightness", .step = brightness_step, .value = brightness_value,
@@ -1001,7 +1064,7 @@ _Static_assert(ARRAY_SIZE(ig_rows) == IG_ROWS, "IG_ROWS in menu.h");
 /* A video (video_core.c): no core, frameskip or GBA picture settings, but
  * how the picture fills the screen. */
 static const struct row *const ig_video_rows[] = {
-	&row_resume, &row_reset, &row_volume, &row_brightness, &row_cpu,
+	&row_resume, &row_play_start, &row_volume, &row_brightness, &row_cpu,
 	&row_video_scale, &row_sysinfo, &row_quit, &row_poweroff,
 };
 _Static_assert(ARRAY_SIZE(ig_video_rows) <= IG_ROWS, "IG_ROWS in menu.h");

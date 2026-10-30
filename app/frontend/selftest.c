@@ -2,7 +2,9 @@
  * Unit tests for the parts that do not need the device; run with
  * `frontend --selftest DIR`, e.g. under qemu-aarch64. The video player
  * is tested on ffmpeg clips (FE_TEST_VIDEOS), in lockstep with its
- * decoder thread and with the thread running free.
+ * decoder thread and with the thread running free, with its controls,
+ * its OSD (pixel checks, osd-*.raw screenshots), the previous/next
+ * video of a folder and the ROM list's video rows.
  */
 #include <dirent.h>
 #include <errno.h>
@@ -25,6 +27,7 @@
 #include "draw.h"
 #include "menu.h"
 #include "fe.h"
+#include "osd.h"
 #include "fx.h"
 #include "input.h"
 #include "resample.h"
@@ -170,6 +173,39 @@ static void test_blit(void)
 				CHECK(!diff, "fx %d blit case %zu: %d rows differ", f,
 				      k, diff);
 			}
+	}
+
+	/* A band of logical rows over a filled buffer (the video OSD's
+	 * strips): those rows as a 1x blit of the whole image gives them,
+	 * the rest as it was. */
+	{
+		static const int rots[] = { 270, 90, 0 };
+		uint16_t *c = malloc(dpitch * 480 * 2);
+
+		for (size_t k = 0; k < ARRAY_SIZE(rots); k++) {
+			int r = rots[k], nw = r ? 320 : 480, nh = r ? 480 : 320;
+			int dp = r ? dpitch : 480, diff = 0;
+
+			/* a: 1x of src, b: 2x of other pixels, c: expected. */
+			blit_reference(a, dp, nw, nh, r, src, 480, 480, 320, 1,
+				       NULL);
+			blit_rotate(b, dp, nw, nh, r, src + 100, 256, 240, 160, 2,
+				    NULL);
+			memcpy(c, b, dpitch * 480 * 2);
+			blit_rows(b, dp, nw, nh, r, src, 480, 0, 32);
+			blit_rows(b, dp, nw, nh, r, src + 288 * 480, 480, 288, 32);
+			for (int y = 0; y < nh; y++)
+				for (int x = 0; x < nw; x++) {
+					int ly = r == 270 ? x : r == 90 ? 319 - x : y;
+					uint16_t want = ly < 32 || ly >= 288 ?
+						a[y * dp + x] : c[y * dp + x];
+
+					diff += b[y * dp + x] != want;
+				}
+			CHECK(!diff, "blit_rows rotation %d: %d pixels differ", r,
+			      diff);
+		}
+		free(c);
 	}
 
 	/* Orientation, as verified on the device: rotation 270 puts logical
@@ -3599,6 +3635,345 @@ static int test_video_threaded(const char *clip, const char *silent)
 	return 0;
 }
 
+/* n runs with the buttons held for all of them, then one released. */
+static void video_hold(int n, uint32_t held)
+{
+	for (int i = 0; i < n; i++) {
+		core_run(held);
+		audio_flush();
+	}
+	core_run(0);
+	audio_flush();
+}
+
+static unsigned video_seeks(void)
+{
+	struct video_counters k;
+
+	video_core_counters(&k);
+	return k.seeks;
+}
+
+static int osd_pixels(const uint16_t *px, int x0, int y0, int w, int h,
+		      uint16_t col)
+{
+	int n = 0;
+
+	for (int y = y0; y < y0 + h; y++)
+		for (int x = x0; x < x0 + w; x++)
+			n += px[y * 480 + x] == col;
+	return n;
+}
+
+/*
+ * The video controls (in lockstep, clip.mpg loaded and playing): a held
+ * seek key repeating 24 runs after its press and every 15 after that,
+ * L/R and the status the OSD reads; then the OSD: time formatting, its
+ * strips drawn for fake states (the name, a note, the time with and
+ * without hours, the play, pause and end symbols, the progress bar, the
+ * rows between untouched), over the real picture (darkened, black over
+ * the bars), composited into a rotated native buffer, and when it shows
+ * (3 s after a control, while paused, B both ways).
+ */
+static void test_video_osd(const char *base)
+{
+	static uint16_t px[480 * 320], native[320 * 480], want[320 * 480];
+	struct canvas cv = { px, 480, 320 };
+	struct video_status st;
+	char t[16], title[80], cut[48], path_buf[400];
+	const uint16_t *fr;
+	int w, h, pitch, x0, by = 320 - OSD_STRIP_H;
+	unsigned n, ev;
+	int64_t now = 1000000000000LL;
+
+	/* Hold repeat: the press, then 24 runs later, then every 15 (at
+	 * the start, so they all stay there). */
+	video_runs(1, JOY_BIT(DOWN));
+	n = video_seeks();
+	video_hold(24, JOY_BIT(LEFT));
+	CHECK(video_seeks() - n == 1, "video repeat: 24 runs held, %u seeks",
+	      video_seeks() - n);
+	n = video_seeks();
+	video_hold(25, JOY_BIT(LEFT));
+	CHECK(video_seeks() - n == 2, "video repeat: 25 runs held, %u seeks",
+	      video_seeks() - n);
+	n = video_seeks();
+	video_hold(54, JOY_BIT(LEFT));
+	CHECK(video_seeks() - n == 3, "video repeat: 54 runs held, %u seeks",
+	      video_seeks() - n);
+	n = video_seeks();
+	video_hold(55, JOY_BIT(LEFT));
+	CHECK(video_seeks() - n == 4, "video repeat: 55 runs held, %u seeks",
+	      video_seeks() - n);
+	/* Each repeat a real seek, from where the last one aimed: 2 x 10 s
+	 * forward from the start. */
+	video_hold(25, JOY_BIT(RIGHT));
+	CHECK(video_pos() > 19 && video_pos() < 20.6, "video repeat: at %.2f s",
+	      video_pos());
+	n = video_seeks();
+	video_hold(30, JOY_BIT(L) | JOY_BIT(R) | JOY_BIT(A) | JOY_BIT(B));
+	CHECK(video_seeks() == n, "video repeat: L, R, A and B do not seek");
+	video_runs(1, JOY_BIT(A));  /* playing again */
+	video_runs(1, JOY_BIT(DOWN));
+	CHECK(video_pos() < 0.05, "video: Down to %.2f", video_pos());
+
+	/* L and R are requests for main.c, taken once; the status. */
+	video_core_take_request();
+	video_core_status(&st);
+	ev = st.events;
+	video_runs(1, JOY_BIT(L));
+	CHECK(video_core_take_request() == VIDEO_REQ_PREV &&
+	      video_core_take_request() == VIDEO_REQ_NONE, "video: L asks for "
+	      "the previous video once");
+	video_runs(1, JOY_BIT(R));
+	CHECK(video_core_take_request() == VIDEO_REQ_NEXT, "video: R asks for "
+	      "the next video");
+	video_runs(1, JOY_BIT(A));
+	video_core_status(&st);
+	CHECK(st.loaded && st.paused && !st.ended && st.events == ev + 3 &&
+	      fabs(st.duration - 30) < 0.1 && st.pos < 0.2,
+	      "video status: loaded %d paused %d events %u (+%u), %.2f of %.2f",
+	      st.loaded, st.paused, st.events, st.events - ev, st.pos,
+	      st.duration);
+	video_runs(1, JOY_BIT(RIGHT));
+	video_core_status(&st);
+	CHECK(st.pos > 9 && st.pos <= 10.05, "video status: at %.2f after +10 "
+	      "s while paused", st.pos);
+
+	/* Time formatting. */
+	{
+		static const struct { double t; int hours; const char *s; } tf[] = {
+			{ 0, 0, "0:00" }, { 59.9999, 0, "0:59" }, { 60, 0, "1:00" },
+			{ 754.5, 0, "12:34" }, { 3599.9, 0, "59:59" },
+			{ 3600, 1, "1:00:00" }, { 3725.9, 1, "1:02:05" },
+			{ 5, 1, "0:00:05" }, { 36000, 1, "10:00:00" }, { -3, 0, "0:00" },
+		};
+
+		for (size_t i = 0; i < ARRAY_SIZE(tf); i++) {
+			osd_format_time(tf[i].t, tf[i].hours, t, sizeof(t));
+			CHECK(!strcmp(t, tf[i].s), "osd time %.4f: %s, want %s",
+			      tf[i].t, t, tf[i].s);
+		}
+	}
+
+	/* The strips for fake states on black (no picture), the rows
+	 * between them untouched. */
+	osd_start("clip", now);
+	for (int i = 0; i < 480 * 320; i++)
+		px[i] = 0x1234;
+	st = (struct video_status){ 1, 15.2, 30, 1, 0, 0, 0 };
+	osd_draw(&cv, &st, NULL, 0, 0, 0, now);
+	CHECK(osd_pixels(px, 0, OSD_STRIP_H, 480, by - OSD_STRIP_H, 0x1234) ==
+	      480 * (by - OSD_STRIP_H), "osd: rows between the strips untouched");
+	CHECK(row_shows_on(px, 8, 4, "clip", COL_HI, 0), "osd: name");
+	CHECK(row_shows_on(px, 34, by + 4, "0:15", COL_FG, 0) &&
+	      row_shows_on(px, 34 + 4 * FONT_W, by + 4, " / 0:30", COL_DIM, 0),
+	      "osd: time 0:15 / 0:30");
+	CHECK(osd_pixels(px, 11, by + 8, 4, 16, COL_FG) == 64 &&
+	      osd_pixels(px, 19, by + 8, 4, 16, COL_FG) == 64 &&
+	      osd_pixels(px, 15, by + 8, 4, 16, COL_FG) == 0,
+	      "osd: pause symbol");
+	/* The bar from 12 px after the text to 12 px from the right, half
+	 * of it filled. */
+	x0 = 34 + 11 * FONT_W + 12;
+	CHECK(px[(by + 14) * 480 + x0 - 1] == 0 &&
+	      px[(by + 14) * 480 + x0] == COL_HI &&
+	      px[(by + 14) * 480 + x0 + (468 - x0) / 2 - 1] == COL_HI &&
+	      px[(by + 14) * 480 + x0 + (468 - x0) / 2 + 1] == COL_SEL &&
+	      px[(by + 14) * 480 + 467] == COL_SEL &&
+	      px[(by + 14) * 480 + 468] == 0 &&
+	      osd_pixels(px, x0, by + 13, 468 - x0, 6, COL_HI) +
+	      osd_pixels(px, x0, by + 13, 468 - x0, 6, COL_SEL) ==
+	      6 * (468 - x0), "osd: progress bar");
+	snprintf(path_buf, sizeof(path_buf), "%s/osd-paused.raw", base);
+	write_file_atomic(path_buf, px, sizeof(px));
+	/* An hour or more: h:mm:ss; playing: the triangle; a note on the
+	 * right and the name cut to fit before it. */
+	memset(title, 'n', sizeof(title) - 1);
+	title[sizeof(title) - 1] = 0;
+	osd_start(title, now);
+	osd_note("Volume -12dB", now);
+	st = (struct video_status){ 1, 3725.9, 7200, 0, 0, 0, 0 };
+	osd_draw(&cv, &st, NULL, 0, 0, 0, now + 1000000000LL);
+	CHECK(row_shows_on(px, 34, by + 4, "1:02:05", COL_FG, 0) &&
+	      row_shows_on(px, 34 + 7 * FONT_W, by + 4, " / 2:00:00", COL_DIM,
+			   0), "osd: time with hours");
+	CHECK(px[(by + 16) * 480 + 12] == COL_FG &&
+	      px[(by + 16) * 480 + 23] == 0 && px[(by + 9) * 480 + 20] == 0 &&
+	      osd_pixels(px, 10, by + 8, 14, 16, COL_FG) > 90,
+	      "osd: play symbol");
+	CHECK(row_shows_on(px, 472 - draw_text_width("Volume -12dB"), 4,
+			   "Volume -12dB", COL_FG, 0), "osd: volume note");
+	snprintf(cut, sizeof(cut), "%.*s~", (472 - 12 * FONT_W - FONT_W - 8) /
+		 FONT_W - 1, title);
+	CHECK(row_shows_on(px, 8, 4, cut, COL_HI, 0), "osd: name cut to %zu "
+	      "columns before the note", strlen(cut));
+	/* The note goes after 3 s; the end: a square, unknown duration. */
+	st = (struct video_status){ 1, 75, 0, 0, 1, 0, 0 };
+	osd_draw(&cv, &st, NULL, 0, 0, 0, now + OSD_SHOW_NS);
+	CHECK(osd_pixels(px, 400, 4, 72, 24, COL_FG) == 0, "osd: note gone");
+	CHECK(osd_pixels(px, 10, by + 9, 14, 14, COL_FG) == 196,
+	      "osd: end symbol");
+	CHECK(row_shows_on(px, 34, by + 4, "1:15 / --:--", COL_FG, 0) ||
+	      (row_shows_on(px, 34, by + 4, "1:15", COL_FG, 0) &&
+	       row_shows_on(px, 34 + 4 * FONT_W, by + 4, " / --:--", COL_DIM, 0)),
+	      "osd: unknown duration");
+
+	/* Over the picture (Fit, 480x270 with 25 px bars): darkened, black
+	 * over the bars. */
+	fr = core_frame(&w, &h, &pitch);
+	osd_start("clip", now);
+	video_core_status(&st);
+	osd_draw(&cv, &st, fr, pitch, w, h, now);
+	CHECK(fr && w == 480 && h == 270 && px[2 * 480 + 470] == 0 &&
+	      px[28 * 480 + 470] == ((fr[3 * pitch + 470] >> 2) & 0x39e7) &&
+	      px[290 * 480 + 470] == ((fr[265 * pitch + 470] >> 2) & 0x39e7) &&
+	      px[300 * 480 + 470] == 0, "osd: over the picture");
+
+	/* Composited: the frame blitted, then only the strips' rows. */
+	draw_fill(&cv, 0, 0, 480, 320, 0);
+	for (int y = 0; y < h; y++)
+		memcpy(px + (y + 25) * 480, fr + y * pitch, 480 * 2);
+	osd_draw(&cv, &st, fr, pitch, w, h, now);
+	snprintf(path_buf, sizeof(path_buf), "%s/osd-video.raw", base);
+	write_file_atomic(path_buf, px, sizeof(px));
+	blit_reference(want, 320, 320, 480, 270, px, 480, 480, 320, 1, NULL);
+	blit_rotate(native, 320, 320, 480, 270, fr, pitch, w, h, 1, NULL);
+	osd_frame(native, 320, 320, 480, 270, fr, pitch, w, h, now);
+	CHECK(!memcmp(native, want, sizeof(want)), "osd: composited");
+
+	/* When it shows: paused now (the A above), so always; B hides it
+	 * until the next control, which shows it 3 s. */
+	CHECK(osd_shown(now + 60 * 1000000000LL), "osd: shown while paused");
+	osd_input(JOY_BIT(B), now);
+	osd_input(0, now);
+	CHECK(!osd_shown(now + 1), "osd: B hides it while paused");
+	video_runs(1, JOY_BIT(A));  /* playing */
+	CHECK(osd_shown(now + 2) && osd_shown(now + OSD_SHOW_NS) &&
+	      !osd_shown(now + 2 + OSD_SHOW_NS), "osd: a control shows it 3 s");
+	/* Hidden while playing: B shows it until B again. */
+	now += 10 * 1000000000LL;
+	osd_input(JOY_BIT(B), now);
+	osd_input(JOY_BIT(B), now + 1);  /* still held: no toggle */
+	CHECK(osd_shown(now + 100 * 1000000000LL), "osd: B pins it");
+	osd_input(0, now + 2);
+	osd_input(JOY_BIT(B), now + 3);
+	CHECK(!osd_shown(now + 4), "osd: B again hides it");
+	/* Hidden: the strips are not drawn. */
+	blit_rotate(native, 320, 320, 480, 270, fr, pitch, w, h, 1, NULL);
+	memcpy(want, native, sizeof(want));
+	osd_frame(native, 320, 320, 480, 270, fr, pitch, w, h, now + 5);
+	CHECK(!memcmp(native, want, sizeof(want)), "osd: hidden, not drawn");
+	osd_log_stats("selftest");
+}
+
+/*
+ * L/R's neighbours (romlist_video_neighbor): only the videos of the
+ * folder, in the list's order (case-insensitive by name), nothing past
+ * either end. Then the ROM list over a folder of videos: the marker on
+ * their rows and, for one with a resume state, where it resumes in the
+ * key hints.
+ */
+static void test_video_list(const char *base, const char *clip,
+			    const char *silent)
+{
+	static uint16_t px[480 * 320];
+	struct canvas cv = { px, 480, 320 };
+	char d[300], p[400], out[400], rom[512], err[128];
+	int at, count, rc, y, w, h, pitch;
+	void *data;
+	int n;
+
+	snprintf(d, sizeof(d), "%s/roms/videos", base);
+	mkdir(d, 0755);
+	touch(d, "a.mpg");
+	touch(d, "c.mpg");
+	touch(d, "D.MPG");
+	touch(d, "x.gba");
+	snprintf(p, sizeof(p), "%s/sub.mpg", d);
+	mkdir(p, 0755);
+	/* b.mpg a real clip, for its state. */
+	data = malloc(1 << 20);
+	n = data ? read_file(silent, data, 1 << 20) : -1;
+	snprintf(p, sizeof(p), "%s/b.mpg", d);
+	CHECK(n > 0 && !write_file_atomic(p, data, n), "video list: copy");
+	free(data);
+
+	rc = romlist_video_neighbor(p, 1, out, sizeof(out), &at, &count);
+	CHECK(rc == 0 && strstr(out, "/videos/c.mpg") && at == 2 && count == 4,
+	      "video next: %d %s %d of %d", rc, out, at, count);
+	rc = romlist_video_neighbor(p, -1, out, sizeof(out), &at, &count);
+	CHECK(rc == 0 && strstr(out, "/videos/a.mpg"), "video prev: %d %s",
+	      rc, out);
+	snprintf(p, sizeof(p), "%s/a.mpg", d);
+	rc = romlist_video_neighbor(p, -1, out, sizeof(out), &at, &count);
+	CHECK(rc == 1 && at == 1 && count == 4, "video prev of the first: %d, "
+	      "%d of %d", rc, at, count);
+	snprintf(p, sizeof(p), "%s/c.mpg", d);
+	rc = romlist_video_neighbor(p, 1, out, sizeof(out), &at, &count);
+	CHECK(rc == 0 && strstr(out, "/videos/D.MPG"), "video next after c: "
+	      "%d %s", rc, out);
+	snprintf(p, sizeof(p), "%s/D.MPG", d);
+	rc = romlist_video_neighbor(p, 1, out, sizeof(out), &at, &count);
+	CHECK(rc == 1 && at == 4, "video next of the last: %d, %d", rc, at);
+	snprintf(p, sizeof(p), "%s/x.gba", d);
+	CHECK(romlist_video_neighbor(p, 1, out, sizeof(out), &at, &count) < 0,
+	      "video next of a game");
+	snprintf(p, sizeof(p), "%s/gone/a.mpg", d);
+	CHECK(romlist_video_neighbor(p, 1, out, sizeof(out), &at, &count) < 0,
+	      "video next in a missing folder");
+
+	/* b.mpg played 1 s and quit: its state, which the list reads.
+	 * Right after a larger video, as L/R switch: its own picture size
+	 * (the worker's mapping does not carry over). */
+	if (video_load(clip, err, sizeof(err))) {
+		CHECK(0, "video list: %s", err);
+		return;
+	}
+	video_runs(10, 0);
+	core_unload();
+	snprintf(p, sizeof(p), "%s/b.mpg", d);
+	if (video_load(p, err, sizeof(err))) {
+		CHECK(0, "video list: %s", err);
+		return;
+	}
+	video_runs(75, 0);
+	core_frame(&w, &h, &pitch);
+	CHECK(w == 240 && h == 160 && pitch == 240, "video list: after a larger "
+	      "video %dx%d pitch %d", w, h, pitch);
+	CHECK(core_state_save("selftest") == 0, "video list: state written");
+	core_unload();
+	CHECK(fabs(video_core_saved_pos(p) - 1.25) < 0.02, "video list: saved "
+	      "at %.2f s", video_core_saved_pos(p));
+	snprintf(out, sizeof(out), "%s/a.mpg", d);
+	CHECK(video_core_saved_pos(out) < 0, "video list: a.mpg has no state");
+
+	/* The list on b.mpg: subfolder, a, b, c, D, x.gba. */
+	romlist_menu_select("videos/b.mpg");
+	romlist_page.enter(NULL, 0);
+	draw_page(&romlist_page, &cv, NULL);
+	snprintf(out, sizeof(out), "%s/ui-romlist-video.raw", base);
+	write_file_atomic(out, px, sizeof(px));
+	CHECK(row_shows(px, 8, FOOT_Y, "A:resume 0:01 B:up SELECT:settings") ||
+	      row_shows_on(px, 8, FOOT_Y, "A:resume 0:01 B:up SELECT:settings",
+			   COL_DIM, COL_BG), "video list: resume in the key hints");
+	for (int i = 0; i < 6; i++) {
+		int video = i >= 1 && i <= 4;
+		uint16_t bg = i == 2 ? COL_SEL : COL_BG;
+		uint16_t col = i == 2 ? COL_FG : COL_DIM;
+		int x = LIST_X + FONT_W * LIST_COLS - 12;
+
+		y = LIST_Y + i * ROW_H;
+		CHECK(osd_pixels(px, x, y, 12, FONT_H, col) > (video ? 50 : -1) &&
+		      (video || osd_pixels(px, x, y, 12, FONT_H, bg) ==
+		       12 * FONT_H), "video list: row %d marker %d", i, video);
+	}
+	rl_key(JOY_BIT(UP), rom);
+	draw_page(&romlist_page, &cv, NULL);
+	CHECK(row_shows_on(px, 8, FOOT_Y, "A:start B:up SELECT:settings",
+			   COL_DIM, COL_BG), "video list: a.mpg starts from 0");
+}
+
 /*
  * The video player on clips made by mk/frontend.mk with ffmpeg
  * (FE_TEST_VIDEOS:
@@ -3727,6 +4102,9 @@ static void test_video(const char *base)
 	CHECK(row_shows_on(px, IG_BOX_X + FONT_W, by + IG_HEAD_H + 7 * IG_ROW_H,
 			   "Quit to ROM list", COL_DIM, COL_BOX),
 	      "video menu: no Core or Frameskip rows");
+	CHECK(row_shows_on(px, IG_BOX_X + FONT_W, by + IG_HEAD_H + IG_ROW_H,
+			   "Play from start", COL_DIM, COL_BOX),
+	      "video menu: Play from start instead of Restart game");
 	snprintf(path, sizeof(path), "%s/ui-ingame-video.raw", base);
 	write_file_atomic(path, px, sizeof(px));
 	CHECK(!core_run(0), "video menu: crop on the next run");
@@ -3737,15 +4115,15 @@ static void test_video(const char *base)
 	ig_key(JOY_BIT(B));
 
 	/* Seeks: +10 s lands on the intra frame at or before the target,
-	 * -60 s at the start. */
+	 * -60 s (Down) at the start, +60 s (Up) at the end. */
 	video_runs(2, 0);
 	pos = video_pos();
 	video_runs(1, JOY_BIT(RIGHT));
 	CHECK(video_pos() > pos + 9 && video_pos() <= pos + 10.05,
 	      "video: +10 s from %.2f to %.2f", pos, video_pos());
-	video_runs(1, JOY_BIT(L));
+	video_runs(1, JOY_BIT(DOWN));
 	CHECK(video_pos() < 0.05, "video: -60 s to %.2f", video_pos());
-	video_runs(1, JOY_BIT(R));
+	video_runs(1, JOY_BIT(UP));
 	video_runs(1, JOY_BIT(RIGHT));
 	pos = video_pos();
 	CHECK(pos > 19 && pos < 30, "video: at %.2f s", pos);
@@ -3758,6 +4136,7 @@ static void test_video(const char *base)
 	}
 	CHECK(core_state_resumed() && fabs(video_pos() - pos) < 0.6,
 	      "video: resumed at %.2f s, was %.2f", video_pos(), pos);
+	test_video_osd(base);
 	core_unload();
 
 	/* Larger than the screen: shrunk to fit; mono 32 kHz. */
@@ -3790,10 +4169,14 @@ static void test_video(const char *base)
 	      "video silent: %dx%d, %d pictures", w, h, pics);
 	CHECK(video_runs(30, 0) == 0 && video_pos() == 0,
 	      "video silent: ended, state at %.2f", video_pos());
+	CHECK(video_core_take_request() == VIDEO_REQ_END &&
+	      video_core_take_request() == VIDEO_REQ_NONE,
+	      "video silent: the end asks for the next video once");
 	CHECK(video_runs(4, JOY_BIT(A)) >= 2, "video silent: A plays again");
 	audio_take_stats(&as);
 	CHECK(as.xruns == 0, "video silent: %u underruns", as.xruns);
 	core_unload();
+	test_video_list(base, clip, silent);
 	video_core_test(0, 0);
 	if (test_video_threaded(clip, silent))
 		goto out;

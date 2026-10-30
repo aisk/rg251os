@@ -37,5 +37,12 @@ int romlist_scan(struct romlist *rl, const char *dir);
  * its final name (the list is sorted again, indexes change). */
 int romlist_step(struct romlist *rl, int64_t budget_ns);
 void romlist_free(struct romlist *rl);
+/* The video before (d < 0) or after (d > 0) the one at path among the
+ * videos of its folder, in the list's order (by the name shown), as a
+ * path into out: 0, or 1 when path is the first or last one, -1 when the
+ * folder cannot be read or path is not a video in it. *index and *count
+ * get path's place among them (from 1) and how many there are. */
+int romlist_video_neighbor(const char *path, int d, char *out, size_t size,
+			   int *index, int *count);
 
 #endif

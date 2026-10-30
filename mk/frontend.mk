@@ -27,7 +27,7 @@ LIBRETRO_INCLUDE := $(if $(MGBA_INCLUDE),$(MGBA_INCLUDE),$(EXTERNAL)/mgba/src/pl
 FRONTEND_SRCS := main.c log.c sys.c display.c blit.c draw.c audio.c \
 	resample.c input.c romlist.c core.c menu.c perf.c selftest.c \
 	settings.c fx.c battery.c cpuctl.c sleep.c sdgrow.c romdb.c romdb_data.c \
-	sysinfo.c clock.c font.c ui.c resume.c video_core.c plm.c
+	sysinfo.c clock.c font.c ui.c resume.c video_core.c osd.c plm.c
 FRONTEND_OBJS := $(addprefix $(FRONTEND_BUILD)/obj/,$(FRONTEND_SRCS:.c=.o))
 FRONTEND_STUB_OBJ := $(FRONTEND_BUILD)/obj/stub_core.o
 FRONTEND_STUB_LIB := $(FRONTEND_BUILD)/libstub_core.a
@@ -279,8 +279,10 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	done
 	# A video through the whole game path (the real build): picked by
 	# its extension over the game's core setting, the scripted seeks
-	# and pause, no underrun, perf.csv, its resume state, then powered
-	# off and resumed on the next boot, Crop from the global settings.
+	# (a held key repeating), pause, L/R as the only video of its folder,
+	# the OSD toggled with B and its cost, no underrun, perf.csv, its
+	# resume state, then powered off and resumed on the next boot, Crop
+	# from the global settings.
 	set -e; d=$(FRONTEND_TEST_DIR)/video; f=$$d/log/frontend.txt; \
 	run() { $(QEMU_AARCH64) $(FRONTEND_ELF) --headless $$d "$$@"; }; \
 	mkdir -p $$d/roms/movies $$d/config/roms; \
@@ -296,10 +298,18 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	grep -q 'video: decoding in a worker thread: 4 picture slots' $$f; \
 	grep -q 'cpufreq: game start, mode adaptive, 600000 kHz (util_min 474, lowest start' $$f; \
 	grep -q 'save: core has no save memory' $$f; \
-	grep -q 'video: seek (+10 s) from 2.00 s to 12.00 s: at 1[12].[0-9]* s' $$f; \
-	grep -q 'video: seek (-10 s) from ' $$f; \
+	grep -q 'video: seek (+10 s, Right) from 2.00 s to 12.00 s: at 1[12].[0-9]* s' $$f; \
+	grep -q 'video: seek (-10 s, Left) from ' $$f; \
 	grep -q 'video: paused at ' $$f; \
 	grep -q 'video: playing at ' $$f; \
+	grep -q 'video: seek (-10 s, Left repeat 3) from ' $$f; \
+	! grep -q 'Left repeat 4' $$f; \
+	grep -q 'video: seek (-60 s, Down) from ' $$f; \
+	grep -q 'video: R: clip.mpg is the last video in /movies (1 of 1), staying' $$f; \
+	grep -q 'video: L: clip.mpg is the first video in /movies (1 of 1), staying' $$f; \
+	grep -q 'video: OSD hidden (B) at ' $$f; \
+	grep -q 'video: OSD shown (B) at ' $$f; \
+	grep -q 'video: OSD (unload): drawn on [1-9][0-9]* frames, avg [0-9.]* ms max [0-9.]* ms (2 strips of 32 rows), came up [1-9][0-9]* times, 2 B toggles' $$f; \
 	grep -q 'headless: 900 frames, frame 480x270 pitch 480, .*underruns after warmup 0' $$f; \
 	grep -q 'video: stats (unload): [0-9]* pictures decoded, decode+convert avg' $$f; \
 	grep -q 'video: worker (unload): CPU [0-9.]* s of [0-9.]* s wall' $$f; \
@@ -314,6 +324,31 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	grep -q 'resume: record written, the next boot resumes movies/clip.mpg with video' $$f; \
 	FE_END=quit run resume 120; \
 	grep -q 'resume: found movies/clip.mpg with video' $$f; \
+	grep -q 'headless: quit to ROM list' $$f
+	# Previous, next and the next one after the end, through the game
+	# start path: three 2 s clips, started in the middle one; R, L, Up to
+	# its end (autoplay), the last one ending with nothing after it; each
+	# switch writes the state of the one left and resumes the other, and
+	# the ROM list comes back on the video last played.
+	set -e; d=$(FRONTEND_TEST_DIR)/playlist; f=$$d/log/frontend.txt; \
+	mkdir -p $$d/roms/movies; \
+	for n in a b c; do cp $(FRONTEND_TEST_VIDEOS)/silent.mpg $$d/roms/movies/$$n.mpg; done; \
+	FE_VIDEO_KEYS=30:R,60:L,90:Up FE_END=quit $(QEMU_AARCH64) $(FRONTEND_ELF) \
+		--headless $$d $$d/roms/movies/b.mpg 400; \
+	grep -q 'video: R: next video c.mpg (3 of 3 in /movies)$$' $$f; \
+	grep -q 'video: next video: b.mpg -> c.mpg' $$f; \
+	grep -q 'state: wrote [0-9]* bytes to b.mpg.video.state (next video)' $$f; \
+	grep -q 'video: L: previous video b.mpg (2 of 3 in /movies)$$' $$f; \
+	grep -q 'state: wrote [0-9]* bytes to c.mpg.video.state (previous video)' $$f; \
+	grep -q 'state: loaded [0-9]* bytes from b.mpg.video.state' $$f; \
+	grep -q 'video: seek (+60 s, Up) from ' $$f; \
+	grep -q 'video: OSD (end): drawn on' $$f; \
+	grep -q 'video: end: next video c.mpg (3 of 3 in /movies), playing it' $$f; \
+	grep -q 'video: autoplay: b.mpg -> c.mpg' $$f; \
+	grep -q 'state: wrote [0-9]* bytes to b.mpg.video.state (autoplay)' $$f; \
+	grep -q 'state: loaded [0-9]* bytes from c.mpg.video.state' $$f; \
+	grep -q 'video: end: c.mpg is the last video in /movies (3 of 3), paused on its last picture' $$f; \
+	grep -q 'roms: folder /movies: 3 ROMs, 0 folders .*selected c.mpg' $$f; \
 	grep -q 'headless: quit to ROM list' $$f
 	# A perf.csv from an older build (other header) is moved aside.
 	mkdir -p $(FRONTEND_TEST_DIR)/core/log $(FRONTEND_TEST_DIR)/core/config/roms

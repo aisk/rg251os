@@ -24,6 +24,7 @@ enum ui_action {
 	UI_POWEROFF,  /* confirmed */
 	UI_RESTART,   /* restart the game with rom_settings.core (confirmed) */
 	UI_RESET,     /* start the game over (confirmed) */
+	UI_SWITCH,    /* the video player: another video (main.c's choice) */
 };
 
 struct page;
