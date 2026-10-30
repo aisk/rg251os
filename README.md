@@ -10,9 +10,15 @@ On real hardware the ROM list is on screen about 2.5 s after the kernel starts (
 
 Used for playing. Display, input, audio, saves, battery, both cores and power off work on hardware. Sleep, growing the data partition on first boot and the ROM name database still need more testing. See [docs/roadmap.md](docs/roadmap.md) for open issues and plans, and [docs/hardware-research.md](docs/hardware-research.md) for hardware notes, design decisions and the card layout (both in Chinese).
 
+It also plays videos: `.mpg` files (MPEG-1 video with MP2 audio) in `roms/` show up in the list next to the games. Convert them to fit the 480x320 screen with
+
+```sh
+ffmpeg -i in.mp4 -vf scale=480:-2 -r 30 -c:v mpeg1video -q:v 3 -c:a mp2 -b:a 128k out.mpg
+```
+
 ## Build
 
-Host packages: `genimage mtools dosfstools fakeroot cmake ninja-build`, plus `qemu-user` for tests. The toolchain is downloaded automatically.
+Host packages: `genimage mtools dosfstools fakeroot cmake ninja-build`, plus `qemu-user` and `ffmpeg` for tests. The toolchain is downloaded automatically.
 
 ```sh
 git clone https://github.com/aisk/rg251os

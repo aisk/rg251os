@@ -5,12 +5,14 @@
 # tables) and falls back to a stub core otherwise; FRONTEND_CORE=stub
 # forces the stub, FRONTEND_CORE=mgba or gpsp links only that core. The
 # stub build (every core id runs the stub) is also available as
-# frontend-stub for tests.
+# frontend-stub for tests. The video player (video_core.c, pl_mpeg from
+# external/pl_mpeg compiled once in plm.c) is in every build.
 #
 #   make frontend          build/frontend/frontend (stripped, installed)
 #   make frontend-test     selftest and headless runs under qemu-aarch64,
 #                          the partition grow on card images (needs
-#                          mtools, dosfstools and sfdisk)
+#                          mtools, dosfstools and sfdisk), the video
+#                          player on clips made with ffmpeg
 
 FRONTEND_DIR := $(TOP)/app/frontend
 FRONTEND_BUILD := $(BUILD)/frontend
@@ -25,7 +27,7 @@ LIBRETRO_INCLUDE := $(if $(MGBA_INCLUDE),$(MGBA_INCLUDE),$(EXTERNAL)/mgba/src/pl
 FRONTEND_SRCS := main.c log.c sys.c display.c blit.c draw.c audio.c \
 	resample.c input.c romlist.c core.c menu.c perf.c selftest.c \
 	settings.c fx.c battery.c cpuctl.c sleep.c sdgrow.c romdb.c romdb_data.c \
-	sysinfo.c clock.c font.c ui.c resume.c
+	sysinfo.c clock.c font.c ui.c resume.c video_core.c plm.c
 FRONTEND_OBJS := $(addprefix $(FRONTEND_BUILD)/obj/,$(FRONTEND_SRCS:.c=.o))
 FRONTEND_STUB_OBJ := $(FRONTEND_BUILD)/obj/stub_core.o
 FRONTEND_STUB_LIB := $(FRONTEND_BUILD)/libstub_core.a
@@ -34,7 +36,7 @@ FRONTEND_STUB_CORES_OBJ := $(FRONTEND_BUILD)/obj/cores-stub.o
 
 FRONTEND_CFLAGS := -std=c11 -O2 -Wall -Wextra -Wshadow -D_GNU_SOURCE \
 	-mcpu=cortex-a35 -isystem $(LIBRETRO_INCLUDE) -isystem $(TINYALSA_INCLUDE) \
-	-MMD -MP
+	-isystem $(EXTERNAL)/pl_mpeg -MMD -MP
 FRONTEND_LDFLAGS := -static
 
 ifeq ($(FRONTEND_CORE),stub)
@@ -87,7 +89,9 @@ $(FRONTEND_BIN): $(FRONTEND_ELF)
 	@echo "frontend ($(FRONTEND_CORE) cores): $$(stat -c %s $@) bytes"
 
 QEMU_AARCH64 ?= qemu-aarch64
+FFMPEG ?= ffmpeg
 FRONTEND_TEST_DIR := $(FRONTEND_BUILD)/test
+FRONTEND_TEST_VIDEOS := $(FRONTEND_TEST_DIR)/videos
 FRONTEND_TEST_ROM ?= $(EXTERNAL)/mgba/cinema/gba/irq/keyirq/test.gba
 FRONTEND_GPSP_TEST_ROMS ?= $(wildcard $(EXTERNAL)/mgba/cinema/gba/*/*/test.gba)
 
@@ -98,7 +102,24 @@ frontend-stub: $(FRONTEND_STUB_ELF)
 frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	rm -rf $(FRONTEND_TEST_DIR)
 	mkdir -p $(FRONTEND_TEST_DIR)/stub $(FRONTEND_TEST_DIR)/core
-	$(QEMU_AARCH64) $(FRONTEND_STUB_ELF) --selftest $(FRONTEND_TEST_DIR)/selftest
+	# Test clips for the video player, made from ffmpeg's generators:
+	# 480x270 30 fps stereo 44.1 kHz 30 s, 640x360 25 fps mono 32 kHz
+	# 3 s, 240x160 30 fps without audio 2 s.
+	mkdir -p $(FRONTEND_TEST_VIDEOS)
+	set -e; f="$(FFMPEG) -nostdin -loglevel error -y -f lavfi"; \
+	$$f -i testsrc2=size=480x270:rate=30 -f lavfi \
+		-i sine=frequency=440:sample_rate=44100 -ac 2 -t 30 \
+		-c:v mpeg1video -q:v 10 -c:a mp2 -b:a 128k -f mpeg \
+		$(FRONTEND_TEST_VIDEOS)/clip.mpg; \
+	$$f -i testsrc2=size=640x360:rate=25 -f lavfi \
+		-i sine=frequency=300:sample_rate=32000 -ac 1 -t 3 \
+		-c:v mpeg1video -q:v 10 -c:a mp2 -b:a 64k -f mpeg \
+		$(FRONTEND_TEST_VIDEOS)/big.mpg; \
+	$$f -i testsrc2=size=240x160:rate=30 -t 2 -c:v mpeg1video -q:v 10 \
+		-an -f mpeg $(FRONTEND_TEST_VIDEOS)/silent.mpg
+	FE_TEST_VIDEOS=$(FRONTEND_TEST_VIDEOS) $(QEMU_AARCH64) \
+		$(FRONTEND_STUB_ELF) --selftest $(FRONTEND_TEST_DIR)/selftest
+	grep -q 'selftest: video core done' $(FRONTEND_TEST_DIR)/selftest/*.txt
 	$(QEMU_AARCH64) $(FRONTEND_STUB_ELF) --headless $(FRONTEND_TEST_DIR)/stub \
 		$(FRONTEND_TEST_ROM) 3000
 	test -s $(FRONTEND_TEST_DIR)/stub/saves/test.sav
@@ -252,6 +273,39 @@ frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 			grep -q 'roms: folder /sub: 1 ROMs, 0 folders .*selected test.gba' $$f; \
 		fi; \
 	done
+	# A video through the whole game path (the real build): picked by
+	# its extension over the game's core setting, the scripted seeks
+	# and pause, no underrun, perf.csv, its resume state, then powered
+	# off and resumed on the next boot, Crop from the global settings.
+	set -e; d=$(FRONTEND_TEST_DIR)/video; f=$$d/log/frontend.txt; \
+	run() { $(QEMU_AARCH64) $(FRONTEND_ELF) --headless $$d "$$@"; }; \
+	mkdir -p $$d/roms/movies $$d/config/roms; \
+	cp $(FRONTEND_TEST_VIDEOS)/clip.mpg $$d/roms/movies/; \
+	printf 'core=mgba\n' > $$d/config/roms/clip.mpg.txt; \
+	run $$d/roms/movies/clip.mpg 900; \
+	grep -q 'romdb: clip.mpg is a video, shown as "clip"' $$f; \
+	grep -q 'starting .*clip.mpg with video' $$f; \
+	grep -q 'video: clip.mpg: 480x270 at 30.000 fps (pixel aspect 1.000), MP2 stereo, duration 30.0 s' $$f; \
+	grep -q 'video: start: fit, 480x270 scaled to 480x270, crop 0,0, picture 480x270' $$f; \
+	grep -q 'save: core has no save memory' $$f; \
+	grep -q 'video: seek (+10 s) from 2.00 s to 12.00 s: at 1[12].[0-9]* s' $$f; \
+	grep -q 'video: seek (-10 s) from ' $$f; \
+	grep -q 'video: paused at ' $$f; \
+	grep -q 'video: playing at ' $$f; \
+	grep -q 'headless: 900 frames, frame 480x270 pitch 480, .*underruns after warmup 0' $$f; \
+	grep -q 'video: stats (unload): [0-9]* pictures decoded, decode+convert avg' $$f; \
+	grep -q 'state: wrote [0-9]* bytes to clip.mpg.video.state (headless end)' $$f; \
+	! test -e $$d/saves/clip.mpg.sav; \
+	grep -q ',all,' $$d/log/perf.csv; \
+	printf 'video_scale=crop\n' > $$d/config/settings.txt; \
+	FE_END=poweroff run $$d/roms/movies/clip.mpg 300; \
+	grep -q 'video: seek (resume) from 0.00 s to ' $$f; \
+	grep -q 'state: loaded [0-9]* bytes from clip.mpg.video.state' $$f; \
+	grep -q 'video: start: crop, 480x270 scaled to 569x320, crop 44,0, picture 480x320' $$f; \
+	grep -q 'resume: record written, the next boot resumes movies/clip.mpg with video' $$f; \
+	FE_END=quit run resume 120; \
+	grep -q 'resume: found movies/clip.mpg with video' $$f; \
+	grep -q 'headless: quit to ROM list' $$f
 	# A perf.csv from an older build (other header) is moved aside.
 	mkdir -p $(FRONTEND_TEST_DIR)/core/log $(FRONTEND_TEST_DIR)/core/config/roms
 	printf 'time,old\n1,2\n' > $(FRONTEND_TEST_DIR)/core/log/perf.csv

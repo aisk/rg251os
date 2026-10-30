@@ -28,7 +28,7 @@ struct romlist {
 	char dir[ROMLIST_PATH];
 };
 
-/* List the subfolders and *.gba files of dir (no hidden or AppleDouble
+/* List the subfolders, *.gba and *.mpg files of dir (no hidden or AppleDouble
  * "._" entries), not recursing, and identify the ROMs from their headers
  * and the CRC cache (romdb.c). Returns the number of entries, -1 when dir
  * cannot be opened. */

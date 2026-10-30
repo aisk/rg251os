@@ -128,23 +128,20 @@ int draw_text_width(const char *s)
 void draw_image_dim(struct canvas *c, const uint16_t *src, int spitch,
 		    int sw, int sh)
 {
-	int ox = (c->w - 2 * sw) / 2, oy = (c->h - 2 * sh) / 2;
+	int k = sw > 0 && sh > 0 ? (c->w / sw < c->h / sh ? c->w / sw :
+				    c->h / sh) : 0;
+	int ox = (c->w - k * sw) / 2, oy = (c->h - k * sh) / 2;
 
 	draw_fill(c, 0, 0, c->w, c->h, 0);
-	if (!src || ox < 0 || oy < 0)
+	if (!src || k < 1)
 		return;
-	for (int y = 0; y < sh; y++) {
-		uint16_t *d0 = c->px + (long)(oy + 2 * y) * c->w + ox;
-		uint16_t *d1 = d0 + c->w;
-		const uint16_t *s = src + (long)y * spitch;
+	for (int y = 0; y < sh * k; y++) {
+		uint16_t *d = c->px + (long)(oy + y) * c->w + ox;
+		const uint16_t *s = src + (long)(y / k) * spitch;
 
-		for (int x = 0; x < sw; x++) {
+		for (int x = 0; x < sw * k; x++)
 			/* Quarter brightness: shift each channel by 2. */
-			uint16_t v = (s[x] >> 2) & 0x39e7;
-
-			d0[2 * x] = d0[2 * x + 1] = v;
-			d1[2 * x] = d1[2 * x + 1] = v;
-		}
+			d[x] = (s[x / k] >> 2) & 0x39e7;
 	}
 }
 

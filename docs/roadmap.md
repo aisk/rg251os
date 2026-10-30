@@ -1,13 +1,13 @@
 # 进度、已知问题和待办
 
-2026-10-27 更新。硬件调研和设计决定见 [hardware-research.md](hardware-research.md)，这里记录还没验证的、已知的问题、以后可以做的事，以及开发过程中踩过的坑。
+2026-10-30 更新。硬件调研和设计决定见 [hardware-research.md](hardware-research.md)，这里记录还没验证的、已知的问题、以后可以做的事，以及开发过程中踩过的坑。
 
 ## 开发流程
 
 - 没有串口线。每次迭代是烧卡、上机、把 GBA 分区里的 `log/` 拷回来分析。所以前端的日志和 dmesg 转存一定要保留，新功能也要带上足够的日志，尽量做到一次上机就能定位问题。
 - 卡上的 Debug log 开关默认关。排查问题前先在设置里打开。
 - 重新烧镜像会把 GBA 分区恢复成 64MiB 的空分区，烧之前要先备份 `saves/`。
-- 主机上的验证：`make image` 和 `make frontend-test`（qemu-user 跑 selftest、headless 游戏、核心切换、休眠的浅睡眠路径、开机恢复的几次连续开机、分区扩展的断电恢复）。要求零 warning。
+- 主机上的验证：`make image` 和 `make frontend-test`（qemu-user 跑 selftest、headless 游戏、核心切换、休眠的浅睡眠路径、开机恢复的几次连续开机、分区扩展的断电恢复、用 ffmpeg 生成的测试片段跑视频播放）。要求零 warning。
 - 开机速度暂时不优化，先把功能做完。
 
 ## 已在真机验证
@@ -38,12 +38,14 @@
 - 充电诊断（`battery.c`，不用开 Debug log）：开机日志里应该有 `charger: PMIC registers from /sys/kernel/debug/regmap/<设备>/registers, 7 bytes per line, ...`（如果是 `charger: no ...`，说明 debugfs 或 regmap 没找到，寄存器就不记了），然后是 `charger: start: ...` 和 `charger: start: regs ...` 两行。测试步骤：先用电池开机，打开 System info；插上充电器，等 30 秒，记下屏幕上电池一行显示什么（Charging 还是 Not charging，电流正负）；拔掉等 10 秒再插上，重复 5 次，每次记下有没有充上；再在关机状态下插上充电器后开机一次；最后把 `log/` 拷回来，连同每次的结果一起发给我。要看的日志：每次插拔后有一行 `charger: change (<变了什么>): ...`，紧跟一行 `charger: change (...): regs e4=... e5=... e6=... eb=... f0=... (PLUG_IN_STS N, CHRG_STS ..., BAT_EXS N, CHRG_EN N, in: VLIM on 4.5 V ILIM on 1.50 A, out: 4.20 V 2.00 A), read in X ms`，之后 30 行 `charger: +N s: ...` 和一行 `charger: samples done, 30 in 30 s, read time avg ...`（每次读的耗时，游戏里应该远低于 1 ms）。没充上的那几次重点看 PLUG_IN_STS 是 0 还是 1，CHRG_STS 是不是 CHRG_OFF，e5 的 VLIM 和 ILIM 是否还是 on 4.5 V 和 1.50 A，`IRQs plug_in N plug_out M` 有没有加一，以及 online 有没有变。PLUG_IN_STS=0 是第一种情况，PLUG_IN_STS=1 而 e5 变了是第二种。插拔会把休眠唤醒，休眠前后还各有一组 `charger: sleep #N before: ...` 和 `charger: sleep #N after: ...`。
 - 菜单只在有变化时重绘：以前 ROM 列表和菜单每个 vblank 都整屏重绘（约 60 次每秒），现在停着不动时不重绘，主循环睡在 `poll()` 里。打开 Debug log 后，在菜单里每 60 秒和离开菜单（进游戏、休眠、关机）时有一行 `ui: menus for X s (...): N redraws (R/s), M updates, P% asleep in poll; bat ...`。要看：停在 ROM 列表、设置或游戏菜单不动时 R 应该接近 0（选中的名字太长在滚动时，滚动期间约 60，两端各停 1 秒；System info 每秒最多 3 次，Date & time 每秒 1 次），P 应该接近 100%；菜单按键、方向键按住连发是否和以前一样跟手；走马灯速度是否和以前一样（每秒 60 像素，开头和结尾各停 1 秒）；两次确认的 "Press A to ..." 是否 3 秒后恢复；标题栏时间是否按分钟跳；电量变化、插拔充电线、按音量键时菜单上的电量和 Volume 是否马上更新；ROM 列表里有 ROM 在算 CRC 时名字是否还会改过来。省电效果：同一行里的 `bat` 有功率（mW），和以前版本 Debug log 里 ROM 列表停着时的 `battery:` 行（每分钟一行）比较，同样亮度下看功率差多少。selftest 里模拟的结果是：菜单静止 10 秒 0 次重绘，滚动时 0.5 秒 30 次，System info 3 秒 9 次。
 - 开机恢复（`resume.c`，ROM 列表设置里的 Resume on boot，默认开）：设置页现在正好一页 9 行，去掉了 Back 行（按 B 返回），Resume on boot 在 Power off 上面，确认一下。测试步骤：一、玩一个子文件夹里的游戏，长按电源键关机，再开机，应该直接进游戏、接着上次的位置，Quit to ROM list 回到那个文件夹并选中这个 ROM。关机时的日志是 `state: wrote ... (power off)` 和 `resume: record written, the next boot resumes <路径> with <核心> (power off: power key held 2 s)`；开机是 `resume: found ... gamepad up after N ms, buttons 0x0; resuming`、`state: loaded ...`、`resume: <路径> started at X ms, Y ms after the frontend started`、`resume: first game frame on screen at X ms, Y ms after the frontend started`，5 秒后 `resume: record removed (the resumed game ran 5 s)`。要看从前端启动到游戏第一帧多久（qemu 里从决定到读完即时存档约 30 ms，真机主要是等手柄，预计 1.2 到 1.4 s 出画面，比现在出列表的约 1.06 s 晚一点），以及 N 是不是一直在 100 到 200 ms 左右。二、用游戏菜单的 Power off 再试一次，日志里是 `(power off: in-game menu)`。三、游戏中关机后按住 B 开机，应该显示列表并选中那个游戏，日志 `resume: skipped ...: B held at boot; gamepad up after N ms, buttons 0x1`。如果按住 B 还是进了游戏，看 buttons 是不是 0x0，以及有没有 `input event5: buttons 0x1 already held`，那说明手柄的第一个报告比 100 ms 来得晚，要加长 `RESUME_PAD_SETTLE_NS`。四、退出到列表再从设置里关机，开机应该是列表，日志 `resume: none (no record, ...)`。五、把 Resume on boot 关掉，游戏中关机再开，是列表，日志 `Resume on boot is off`。出问题时看 `resume: skipped` 一行后面的原因。
+- 视频播放（`video_core.c`，见 hardware-research.md 的默认行为）：用 README 里的 ffmpeg 命令转一段 480 宽、30fps 的视频放进 `roms/`，打开 Debug log 播一遍。要看：一、流畅度，画面有没有卡顿或跳帧，日志里 `video: stats` 的 `decode+convert avg/max`（qemu 里 480x270 约 4 ms，真机预计要翻几倍，max 要在 16 ms 以内）和 `dropped (late)` 是否为 0，perf 行里有没有 missed vblank。二、声画同步，看人说话的口型，日志里有没有 `audio: underrun`。三、CPU 频率和功耗，对比同一亮度下玩游戏时 perf.csv 的各频率行和 `bat`，解码负载低时应该停在 600 或 816 MHz；跳转那一帧要读卡加解码，可能会让调频跳到最高一次，看 `cpufreq:` 日志。四、跳转，左右 10 秒、L 和 R 60 秒，`video: seek` 一行的实际位置和耗时（真卡上读文件的时间），跳转后声音是否马上对上。五、Fit 和 Crop 在游戏菜单的 Picture 里切换，480x270 的视频 Fit 上下有黑边，Crop 铺满、左右各裁 44 像素，日志 `video: changed: ...`。六、暂停、播完停在最后一帧再按 A 从头播、退出再进接着播、播放中关机再开机直接接着播。七、单声道和没有音轨的文件，以及比屏幕大的视频（比如 640x360，应该缩成 480x270）的解码耗时。
 
 ## 已知问题
 
 - 声音还有轻微的爆音。还没定位。先看每局游戏结束时的摘要行里 underrun 次数。如果是 0，最可能是重采样，现在 32768Hz 到 48000Hz 用的是线性插值（`resample.c`），可以换成多相 FIR。另外 gpSP 的音频模拟本身比 mGBA 粗糙，可以拿同一个游戏两个核心对比。
 - 界面字体只有 ASCII（JetBrains Mono，`app/frontend/font.c`），中文文件名显示不了。
 - 不支持 zip 格式的 ROM。
+- 视频只支持 pl_mpeg 能解的 MPEG-PS（MPEG-1 视频加 MP2 音频），`.mp4` 等要先用 ffmpeg 转。缩放是最近邻，像素宽高比按正方形处理。跳转只到关键帧，不精确。
 - 硬件时钟出厂时可能没设过（这台是设过的），用到 RTC 的游戏（宝可梦宝石系列的树果和潮汐等）时间会不对，要先在设置的 Date & time 里设一次，开机日志会标出没设过的情况。没有时区，输入的时间按 UTC 存进系统时钟和 RTC，游戏看到的就是输入的时间，日志和 perf.csv 里写的 UTC 其实是这个时间。
 - 插拔充电线也会把机器从休眠唤醒（PMIC 中断），现在唤醒后一律亮屏。
 - 插上充电器经常显示 Not charging，电池也确实没充进去，同样的线和充电器要拔插几次才开始充。指示灯颜色会变，但那是 VBUS 直接点亮的另一颗灯，和 PMIC 无关。旧日志里 boot-0003、0004、0019 是插着线开机的：电池电流为正（+0.09 到 +0.15A），电压在 4.12V 以上，但 rk817-charger 的 ONLINE=0，STATUS 是 Not charging。看驱动（`rk817_charger.c`）：电流不为负时 STATUS 取 CHRG_STS（0xeb）的 6:4 位，CHRG_OFF 就报 Not charging；ONLINE 只在 probe 时从 SYS_STS（0xf0）的 PLUG_IN_STS 读一次，之后只跟着 plug_in 和 plug_out 两个中断变；输入限制 CHRG_IN（0xe5，4.5V、1.5A）只在 probe 和拔出中断里写（驱动注释说拔线时这个寄存器会复位），插入时不写；充电使能位驱动从来不写；这些值每 8 秒刷新一次。BSP 用来检测充电器的 dc_det GPIO（gpio0 PB3）主线和我们的 DTS 都没用。怀疑两个方向：一是 PMIC 没认到插入（PLUG_IN_STS=0，充电状态机停在 OFF），二是 CHRG_IN 被复位，要等下一次拔出中断才写回。新加的 `charger:` 日志用来区分这两种，见待实机验证。

@@ -435,8 +435,11 @@ static void test_settings(const char *base)
 	s.audio = AUDIO_ADAPTIVE;
 	s.debug = 1;
 	s.resume = 0;
+	s.video_scale = VIDEO_CROP;
 	CHECK(settings_format(&s, buf, sizeof(buf)) > 0, "format");
-	CHECK(settings_parse(&t, buf) == 9, "parse back: %s", buf);
+	CHECK(settings_parse(&t, buf) == 10, "parse back: %s", buf);
+	CHECK(strstr(buf, "video_scale=crop\n") != NULL, "video_scale: %s", buf);
+	CHECK(settings_defaults.video_scale == VIDEO_FIT, "videos fit by default");
 	CHECK(strstr(buf, "resume=off\n") != NULL, "resume: %s", buf);
 	CHECK(settings_defaults.resume == 1, "resume on boot on by default");
 	CHECK(strstr(buf, "debug=on\n") != NULL, "debug: %s", buf);
@@ -3386,6 +3389,243 @@ static void test_sdgrow(const char *base)
 	CHECK(sdgrow_compare_tree(a, b, &t) < 0, "compare: extra file");
 }
 
+
+/* ---------------------------------------------------------- video core */
+
+/* The video player's play position, from its save state (video_core.c's
+ * struct video_state: magic, then the position). */
+static double video_pos(void)
+{
+	const struct core_api *api = core_api_get(CORE_VIDEO);
+	uint8_t st[64];
+	double pos = -1;
+
+	if (api->serialize_size() <= sizeof(st) &&
+	    api->serialize(st, api->serialize_size()))
+		memcpy(&pos, st + 8, sizeof(pos));
+	return pos;
+}
+
+/* n runs with the buttons held for the first; new pictures among them. */
+static int video_runs(int n, uint32_t first)
+{
+	int pics = 0;
+
+	for (int i = 0; i < n; i++) {
+		pics += !core_run(i ? 0 : first);
+		audio_flush();
+	}
+	return pics;
+}
+
+static int video_load(const char *path, char *err, size_t errlen)
+{
+	if (core_load(path, CORE_VIDEO, err, errlen))
+		return -1;
+	audio_set_source(core_info()->sample_rate, core_info()->fps, 60.0186);
+	return 0;
+}
+
+/*
+ * The video player on clips made by mk/frontend.mk with ffmpeg
+ * (FE_TEST_VIDEOS:
+ * clip.mpg 480x270 30 fps stereo 44.1 kHz 30 s, big.mpg 640x360 25 fps
+ * mono 32 kHz 3 s, silent.mpg 240x160 30 fps without audio 2 s): the
+ * list, names and file names, the core picked by extension, timing,
+ * Fit and Crop switched live (also while paused, and from the in-game
+ * menu, which has Picture and no Core for a video), seeking, the resume
+ * state, the end and playing again, the downscale and the silence.
+ */
+static void test_video(const char *base)
+{
+	static uint16_t px[480 * 320];
+	struct canvas cv = { px, 480, 320 };
+	const char *dir = getenv("FE_TEST_VIDEOS");
+	struct rom_settings keep = rom_settings;
+	int keep_scale = settings.video_scale;
+	char clip[300], big[300], silent[300], d[300], path[400], err[128];
+	struct romlist rl = { 0 };
+	struct audio_stats as;
+	const uint16_t *fr;
+	int w, h, pitch, pics, bh, by;
+	double pos;
+
+	if (!dir) {
+		log_msg("selftest: video: FE_TEST_VIDEOS not set, skipped");
+		return;
+	}
+	snprintf(clip, sizeof(clip), "%s/clip.mpg", dir);
+	snprintf(big, sizeof(big), "%s/big.mpg", dir);
+	snprintf(silent, sizeof(silent), "%s/silent.mpg", dir);
+
+	/* Listed with the ROMs, by file name, never looked up. */
+	snprintf(d, sizeof(d), "%s/videolist", base);
+	mkdir(d, 0755);
+	touch(d, "Movie.MPG");
+	touch(d, "movie.gba");
+	touch(d, "notes.txt");
+	CHECK(romlist_scan(&rl, d) == 2, "video list: %d entries", rl.count);
+	for (int i = 0; i < rl.count; i++) {
+		int vid = romdb_is_video(rl.roms[i].file);
+
+		CHECK(!strcmp(rl.roms[i].id.title, vid ? "Movie" : "movie"),
+		      "video list: %s shown as %s", rl.roms[i].file,
+		      rl.roms[i].id.title);
+		CHECK(!vid || rl.roms[i].id.how == ROMDB_UNKNOWN,
+		      "video list: not looked up");
+	}
+	romlist_free(&rl);
+	/* Its own settings and state names, the video core whatever the
+	 * game setting says, which never offers the video core. */
+	rom_settings.core = CORE_MGBA;
+	CHECK(core_for_rom("a/Movie.MPG") == CORE_VIDEO &&
+	      core_for_rom("movie.gba") == CORE_MGBA, "video: core by extension");
+	core_state_path("x/movie.mpg", CORE_VIDEO, path, sizeof(path));
+	CHECK(strstr(path, "/saves/movie.mpg.video.state") != NULL,
+	      "video: state path %s", path);
+	rom_settings_load("movie.mpg");
+	rom_settings.cpu_start = 600;
+	rom_settings_save();
+	snprintf(path, sizeof(path), "%s/config/roms/movie.mpg.txt", base);
+	CHECK(access(path, F_OK) == 0, "video: settings in movie.mpg.txt");
+	rom_settings_load("movie.gba");
+	CHECK(rom_settings.cpu_start == 0, "video: x.gba keeps its own settings");
+	CHECK(rom_settings_parse(&rom_settings, "core=video\n") == 0 &&
+	      rom_settings.core != CORE_VIDEO, "video: not a game core setting");
+	rom_settings_load(NULL);
+
+	/* Playing: 60 runs per second, a 30 fps clip a picture every other
+	 * run, at 1x with Fit. */
+	settings.video_scale = VIDEO_FIT;
+	audio_init_null(0.001);
+	if (video_load(clip, err, sizeof(err))) {
+		CHECK(0, "video: %s", err);
+		goto out;
+	}
+	CHECK(core_info()->core == CORE_VIDEO && core_info()->fps == 60.0 &&
+	      core_info()->sample_rate == 44100, "video: %.3f fps %.0f Hz",
+	      core_info()->fps, core_info()->sample_rate);
+	pics = video_runs(600, 0);
+	fr = core_frame(&w, &h, &pitch);
+	CHECK(fr && w == 480 && h == 270 && pitch == 480,
+	      "video: fit %dx%d pitch %d", w, h, pitch);
+	CHECK(pics >= 299 && pics <= 302, "video: %d pictures in 600 runs", pics);
+	pos = video_pos();
+	CHECK(fabs(pos - 10.0) < 0.05, "video: at %.3f s after 600 runs", pos);
+	audio_take_stats(&as);
+	CHECK(as.xruns == 0, "video: %u underruns", as.xruns);
+
+	/* Crop applied on the next run. */
+	settings.video_scale = VIDEO_CROP;
+	core_options_changed();
+	CHECK(!core_run(0), "video: crop shows a new picture");
+	fr = core_frame(&w, &h, &pitch);
+	CHECK(fr && w == 480 && h == 320, "video: crop %dx%d", w, h);
+	/* Paused (A): the clock stands, repeats, Fit still shows at once. */
+	pos = video_pos();
+	pics = video_runs(120, JOY_BIT(A));
+	CHECK(pics == 0 && fabs(video_pos() - pos) < 0.02,
+	      "video: paused: %d pictures, %.3f -> %.3f s", pics, pos,
+	      video_pos());
+	settings.video_scale = VIDEO_FIT;
+	core_options_changed();
+	CHECK(!core_run(0), "video: fit while paused shows a new picture");
+	fr = core_frame(&w, &h, &pitch);
+	CHECK(w == 480 && h == 270, "video: fit while paused %dx%d", w, h);
+	video_runs(1, JOY_BIT(A));  /* playing again */
+
+	/* The in-game menu of a video: Picture (row 5) toggles it live. */
+	ig_open("clip");
+	for (int i = 0; i < 5; i++)
+		ig_key(JOY_BIT(DOWN));
+	ig_key(JOY_BIT(A));
+	CHECK(settings.video_scale == VIDEO_CROP, "video menu: Picture -> crop");
+	draw_page(&ingame_page, &cv, NULL);
+	bh = IG_BOX_H - (IG_ROWS - 9) * IG_ROW_H;
+	by = (320 - bh) / 2;
+	CHECK(row_shows_on(px, IG_BOX_X + FONT_W, by + IG_HEAD_H + 5 * IG_ROW_H,
+			   "Picture", COL_FG, COL_SEL) &&
+	      row_shows_on(px, IG_BOX_X + IG_BOX_W - FONT_W -
+			   draw_text_width("Crop"), by + IG_HEAD_H + 5 * IG_ROW_H,
+			   "Crop", COL_FG, COL_SEL), "video menu: Picture Crop row");
+	CHECK(row_shows_on(px, IG_BOX_X + FONT_W, by + IG_HEAD_H + 7 * IG_ROW_H,
+			   "Quit to ROM list", COL_DIM, COL_BOX),
+	      "video menu: no Core or Frameskip rows");
+	snprintf(path, sizeof(path), "%s/ui-ingame-video.raw", base);
+	write_file_atomic(path, px, sizeof(px));
+	CHECK(!core_run(0), "video menu: crop on the next run");
+	fr = core_frame(&w, &h, &pitch);
+	CHECK(w == 480 && h == 320, "video menu: crop %dx%d", w, h);
+	ig_key(JOY_BIT(A));
+	CHECK(settings.video_scale == VIDEO_FIT, "video menu: Picture -> fit");
+	ig_key(JOY_BIT(B));
+
+	/* Seeks: +10 s lands on the intra frame at or before the target,
+	 * -60 s at the start. */
+	video_runs(2, 0);
+	pos = video_pos();
+	video_runs(1, JOY_BIT(RIGHT));
+	CHECK(video_pos() > pos + 9 && video_pos() <= pos + 10.05,
+	      "video: +10 s from %.2f to %.2f", pos, video_pos());
+	video_runs(1, JOY_BIT(L));
+	CHECK(video_pos() < 0.05, "video: -60 s to %.2f", video_pos());
+	video_runs(1, JOY_BIT(R));
+	video_runs(1, JOY_BIT(RIGHT));
+	pos = video_pos();
+	CHECK(pos > 19 && pos < 30, "video: at %.2f s", pos);
+	/* The resume state brings it back there. */
+	CHECK(core_state_save("selftest") == 0, "video: state written");
+	core_unload();
+	if (video_load(clip, err, sizeof(err))) {
+		CHECK(0, "video again: %s", err);
+		goto out;
+	}
+	CHECK(core_state_resumed() && fabs(video_pos() - pos) < 0.6,
+	      "video: resumed at %.2f s, was %.2f", video_pos(), pos);
+	core_unload();
+
+	/* Larger than the screen: shrunk to fit; mono 32 kHz. */
+	if (video_load(big, err, sizeof(err))) {
+		CHECK(0, "video big: %s", err);
+		goto out;
+	}
+	CHECK(core_info()->sample_rate == 32000, "video big: %.0f Hz",
+	      core_info()->sample_rate);
+	video_runs(2, 0);
+	fr = core_frame(&w, &h, &pitch);
+	CHECK(w == 480 && h == 270, "video big: fit %dx%d", w, h);
+	settings.video_scale = VIDEO_CROP;
+	core_options_changed();
+	video_runs(1, 0);
+	fr = core_frame(&w, &h, &pitch);
+	CHECK(w == 480 && h == 320, "video big: crop %dx%d", w, h);
+	settings.video_scale = VIDEO_FIT;
+	core_unload();
+
+	/* No audio, the end: the last picture stays, the state says start
+	 * over, A plays again. */
+	if (video_load(silent, err, sizeof(err))) {
+		CHECK(0, "video silent: %s", err);
+		goto out;
+	}
+	pics = video_runs(200, 0);
+	fr = core_frame(&w, &h, &pitch);
+	CHECK(fr && w == 240 && h == 160 && pics >= 59 && pics <= 61,
+	      "video silent: %dx%d, %d pictures", w, h, pics);
+	CHECK(video_runs(30, 0) == 0 && video_pos() == 0,
+	      "video silent: ended, state at %.2f", video_pos());
+	CHECK(video_runs(4, JOY_BIT(A)) >= 2, "video silent: A plays again");
+	audio_take_stats(&as);
+	CHECK(as.xruns == 0, "video silent: %u underruns", as.xruns);
+	core_unload();
+	log_msg("selftest: video core done");
+out:
+	core_unload();
+	audio_init_null(0);
+	rom_settings = keep;
+	settings.video_scale = keep_scale;
+}
+
 int selftest(const char *dir)
 {
 	mkdir(dir, 0755);
@@ -3424,6 +3664,7 @@ int selftest(const char *dir)
 	test_clock(dir);
 	test_pages();
 	test_redraw(dir);
+	test_video(dir);
 	log_msg("selftest: %s (%d failures)", failures ? "FAILED" : "passed",
 		failures);
 	return failures ? 1 : 0;

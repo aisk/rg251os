@@ -26,7 +26,8 @@
 
 /* The in-game menu: a box with the game's name and the battery in its
  * IG_HEAD_H px top, then IG_ROWS rows IG_ROW_H px apart and IG_TAIL px
- * under them, centered on the screen. */
+ * under them, centered on the screen (a video's shorter menu gets a
+ * box as tall as its rows, menu.c). */
 #define IG_ROWS     11
 #define IG_BOX_X    40
 #define IG_BOX_W    (CANVAS_W - 2 * IG_BOX_X)

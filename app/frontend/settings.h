@@ -22,10 +22,14 @@ enum color_mode {
 extern const char *const color_mode_names[COLOR_COUNT];   /* in files */
 extern const char *const color_mode_labels[COLOR_COUNT];  /* in menus */
 
-/* The libretro cores linked in (core.c), selectable per game. */
+/* The libretro cores linked in (core.c): the GBA cores, selectable per
+ * game, then the video player (video_core.c), which plays the *.mpg
+ * files and is picked by extension, never by the game setting. */
 enum core_id {
 	CORE_MGBA,
 	CORE_GPSP,  /* gpSP, ARM64 dynarec: much faster, less accurate */
+	CORE_GBA_COUNT,
+	CORE_VIDEO = CORE_GBA_COUNT,
 	CORE_COUNT
 };
 extern const char *const core_names[CORE_COUNT];   /* in files */
@@ -43,6 +47,16 @@ enum frameskip {
 };
 extern const char *const frameskip_names[FRAMESKIP_COUNT];   /* in files */
 extern const char *const frameskip_labels[FRAMESKIP_COUNT];  /* in menus */
+
+/* settings.video_scale, for videos (video_core.c): the whole picture
+ * with black bars, or filling the screen with the overflow cut off. */
+enum video_scale {
+	VIDEO_FIT,
+	VIDEO_CROP,
+	VIDEO_SCALE_COUNT
+};
+extern const char *const video_scale_names[VIDEO_SCALE_COUNT];   /* files */
+extern const char *const video_scale_labels[VIDEO_SCALE_COUNT];  /* menus */
 
 /* settings.audio (see audio.c) */
 #define AUDIO_SIMPLE 0    /* blocking writes, fixed resampling ratio */
@@ -67,12 +81,14 @@ struct settings {
 	int audio;       /* AUDIO_SIMPLE or AUDIO_ADAPTIVE (audio.c) */
 	int debug;       /* debug logging (see log.c), off for normal play */
 	int resume;      /* resume the game powered off in on boot (resume.c) */
+	int video_scale; /* enum video_scale (video_core.c), fit by default */
 };
 /* Per game, in config/roms/<rom name>.txt. */
 struct rom_settings {
 	int color;       /* enum color_mode, COLOR_AUTO by default */
 	int cpu_start;   /* learned start OPP in MHz, 0: the top */
-	int core;        /* enum core_id, used when the game starts */
+	int core;        /* enum core_id below CORE_GBA_COUNT, used when the
+			  * game starts (videos ignore it, core_for_rom) */
 	int blend;       /* gpSP frame blending (core.c), mGBA ignores it */
 	int frameskip;   /* enum frameskip (core.c), off by default */
 };

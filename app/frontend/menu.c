@@ -53,7 +53,11 @@
  * the current and the previous frame for games that rely on LCD
  * ghosting; it applies on the next frame, mGBA has none, so with mGBA
  * the row reads "gpSP only" and cannot be changed, the setting is kept
- * for gpSP), LCD grid, Grid darkness, Dot boost and Debug log. In
+ * for gpSP), LCD grid, Grid darkness, Dot boost and Debug log. A video
+ * (video_core.c) has a shorter in-game menu without Core, Frameskip and
+ * Settings, with Picture instead: Fit or Crop, a global setting
+ * (settings.video_scale) the player takes on the next frame. The list
+ * shows videos (*.mpg) among the ROMs, by file name. In
  * menus, up/down select, left/right change a value, A activates, B goes
  * back. The battery level is shown in the ROM list and settings headers
  * and right of the game's name in the in-game menu; the ROM list header
@@ -850,8 +854,8 @@ static void core_step(int d)
 {
 	int id = rom_settings.core;
 
-	for (int i = 0; i < CORE_COUNT; i++) {
-		id = (id + CORE_COUNT + d) % CORE_COUNT;
+	for (int i = 0; i < CORE_GBA_COUNT; i++) {
+		id = (id + CORE_GBA_COUNT + d) % CORE_GBA_COUNT;
 		if (core_available(id))
 			break;
 	}
@@ -897,6 +901,16 @@ static void grid_boost_value(char *buf, size_t size)
 		snprintf(buf, size, "+%d%%", settings.grid_boost);
 	else
 		snprintf(buf, size, "Off");
+}
+
+/* Fit or Crop for videos (global), to the running video player now. */
+static void video_scale_step(int d)
+{
+	(void)d;
+	settings.video_scale = settings.video_scale == VIDEO_CROP ? VIDEO_FIT :
+			       VIDEO_CROP;
+	log_msg("menu: video picture %s", video_scale_names[settings.video_scale]);
+	core_options_changed();
 }
 
 static void debug_step(int d)
@@ -966,6 +980,10 @@ static const struct row
 		.flags = ROW_TOGGLE,
 	},
 	row_datetime = { "Date & time", .press = { UI_PUSH, &datetime_page } },
+	row_video_scale = {
+		"Picture", &settings.video_scale, 0, VIDEO_SCALE_COUNT - 1,
+		video_scale_labels, .step = video_scale_step, .flags = ROW_TOGGLE,
+	},
 	row_resume_boot = {
 		"Resume on boot", &settings.resume, 0, 1, off_on,
 		.flags = ROW_TOGGLE,
@@ -980,6 +998,13 @@ static const struct row *const ig_rows[] = {
 	&row_poweroff,
 };
 _Static_assert(ARRAY_SIZE(ig_rows) == IG_ROWS, "IG_ROWS in menu.h");
+/* A video (video_core.c): no core, frameskip or GBA picture settings, but
+ * how the picture fills the screen. */
+static const struct row *const ig_video_rows[] = {
+	&row_resume, &row_reset, &row_volume, &row_brightness, &row_cpu,
+	&row_video_scale, &row_sysinfo, &row_quit, &row_poweroff,
+};
+_Static_assert(ARRAY_SIZE(ig_video_rows) <= IG_ROWS, "IG_ROWS in menu.h");
 
 static struct {
 	struct menu menu;
@@ -996,7 +1021,12 @@ static void ingame_menu_enter(const char *from, int64_t now)
 {
 	(void)from;
 	(void)now;
-	menu_open(&ig.menu, ig_rows, ARRAY_SIZE(ig_rows), UI_ACT(UI_RESUME));
+	if (core_loaded() && core_info()->core == CORE_VIDEO)
+		menu_open(&ig.menu, ig_video_rows, ARRAY_SIZE(ig_video_rows),
+			  UI_ACT(UI_RESUME));
+	else
+		menu_open(&ig.menu, ig_rows, ARRAY_SIZE(ig_rows),
+			  UI_ACT(UI_RESUME));
 	ig.mq.sel = -1;
 	ig.mq.offset = 0;
 }
@@ -1019,13 +1049,15 @@ static struct ui_result ingame_menu_update(uint32_t pressed, int64_t now)
 
 static void ingame_menu_draw(struct canvas *c, const struct game_view *g)
 {
-	const int bx = IG_BOX_X, by = IG_BOX_Y, bw = IG_BOX_W;
+	/* The box fits its rows: IG_BOX_H for the game's IG_ROWS. */
+	const int bh = IG_BOX_H - (IG_ROWS - ig.menu.count) * IG_ROW_H;
+	const int bx = IG_BOX_X, by = (CANVAS_H - bh) / 2, bw = IG_BOX_W;
 	const int ny = by + (IG_HEAD_H - FONT_H) / 2;
 	int cols;
 
 	draw_image_dim(c, g->px, g->pitch, g->w, g->h);
-	draw_fill(c, bx, by, bw, IG_BOX_H, COL_BOX);
-	draw_frame(c, bx, by, bw, IG_BOX_H, COL_SEL);
+	draw_fill(c, bx, by, bw, bh, COL_BOX);
+	draw_frame(c, bx, by, bw, bh, COL_SEL);
 	draw_battery(c, bx + bw - FONT_W, ny);
 	cols = ig_name_cols();
 	draw_rom_name(c, bx + 12, ny, COL_HI, ig.name, cols,

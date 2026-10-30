@@ -35,3 +35,8 @@
 	url = https://github.com/libretro/gpsp.git
 	branch = master
 	shallow = true
+[submodule "external/pl_mpeg"]
+	path = external/pl_mpeg
+	url = https://github.com/phoboslab/pl_mpeg.git
+	branch = master
+	shallow = true

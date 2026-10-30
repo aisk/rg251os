@@ -1,7 +1,8 @@
 /*
  * ROM list: one folder of <data>/roms at a time (the menu scans a folder
  * when it is entered, nothing deeper), its subfolders first by name, then
- * its *.gba files, identified (romdb.c) and sorted by the name shown.
+ * its *.gba files and *.mpg videos (video_core.c), identified (romdb.c;
+ * a video by its file name) and sorted by the name shown, mixed.
  * Identification reads each file's header; ROMs that need their CRC and
  * are not in the cache show a provisional name until romlist_step has
  * read them, a slice at a time while the folder is shown. The cache is
@@ -42,7 +43,8 @@ static int cmp_roms(const void *a, const void *b)
 
 static int is_rom(const char *name)
 {
-	return name[0] != '.' && (size_t)romdb_stem_len(name) < strlen(name);
+	return name[0] != '.' && ((size_t)romdb_stem_len(name) < strlen(name) ||
+				  romdb_is_video(name));
 }
 
 static void log_summary(const struct romlist *rl, const char *what,

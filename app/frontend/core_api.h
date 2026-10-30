@@ -2,8 +2,9 @@
  * The libretro entry points of one statically linked core. Every core's
  * retro_* symbols are renamed at build time (mk/core-archive.sh:
  * mgba_retro_run, gpsp_retro_run, ...), so several cores live in one
- * binary; cores.c fills one table per core and core.c calls through the
- * table of the core that is loaded. Only one core is initialized at a
+ * binary; the in-tree video player (video_core.c) has its entry points
+ * named video_retro_* in its source. cores.c fills one table per core
+ * and core.c calls through the table of the core that is loaded. Only one core is initialized at a
  * time.
  */
 #ifndef CORE_API_H

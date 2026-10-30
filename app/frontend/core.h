@@ -14,6 +14,10 @@ struct core_info {
  * err. A core still loaded is unloaded first. The save is loaded, then
  * the resume state if there is a usable one. */
 int core_load(const char *rom_path, int core, char *err, size_t errlen);
+/* The core a ROM file runs with: the video player for a video (by its
+ * extension, romdb_is_video), otherwise rom_settings.core (so load the
+ * ROM's settings first). */
+int core_for_rom(const char *rom_name);
 /* Save if needed, then unload the game and deinit the core. */
 void core_unload(void);
 int core_loaded(void);
@@ -30,10 +34,10 @@ void core_reset(void);
 int core_run(uint32_t buttons);
 /* Frames run and skipped since the game was loaded. */
 void core_frame_counts(unsigned *frames, unsigned *skipped);
-/* A setting behind a core option changed (core.c, rom_options[]): one
- * the running core takes live is read again after the next retro_run,
- * the others wait for the next start or are kept for the other core;
- * each logged. */
+/* A setting behind a core option changed (core.c, rom_options[], and
+ * the global video_scale for the video player): one the running core
+ * takes live is read again after the next retro_run, the others wait for
+ * the next start or are kept for the other core; each logged. */
 void core_options_changed(void);
 /* Whether the core (enum core_id) has the game setting at field (a
  * member of rom_settings behind core options, core.c's rom_options[])

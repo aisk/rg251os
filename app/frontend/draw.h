@@ -41,7 +41,8 @@ int draw_text_scaled(struct canvas *c, int x, int y, int scale, uint16_t col,
 		     const char *s);
 /* The width of s drawn with draw_text. */
 int draw_text_width(const char *s);
-/* Scale an image 2x into the canvas, centered and darkened. */
+/* Scale an image into the canvas by the largest integer that fits (2x
+ * for the GBA, 1x for a full screen video), centered and darkened. */
 void draw_image_dim(struct canvas *c, const uint16_t *src, int spitch,
 		    int sw, int sh);
 

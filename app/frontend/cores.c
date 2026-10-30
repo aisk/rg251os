@@ -1,7 +1,9 @@
 /*
  * The core tables. Built once per binary (see mk/frontend.mk) with
  * HAVE_CORE_MGBA / HAVE_CORE_GPSP for the cores linked in, or with
- * neither for the stub build, where every core id runs the stub core.
+ * neither for the stub build, where every GBA core id runs the stub core.
+ * The video player (video_core.c, CORE_VIDEO) is in every build; its
+ * entry points are named video_retro_* in the source, no renaming.
  */
 #include <stdbool.h>
 #include <stdint.h>
@@ -55,6 +57,9 @@
 	.save_size = save, \
 }
 
+CORE_PROTOS(video)
+static const struct core_api video = CORE_TABLE(video, "video", NULL);
+
 #if defined(HAVE_CORE_MGBA) || defined(HAVE_CORE_GPSP)
 
 #ifdef HAVE_CORE_MGBA
@@ -102,6 +107,8 @@ const struct core_api *core_api_get(int id)
 	case CORE_GPSP:
 		return &gpsp;
 #endif
+	case CORE_VIDEO:
+		return &video;
 	default:
 		return NULL;
 	}
@@ -114,7 +121,9 @@ static const struct core_api stub = CORE_TABLE(stub, "stub", NULL);
 
 const struct core_api *core_api_get(int id)
 {
-	return id >= 0 && id < CORE_COUNT ? &stub : NULL;
+	if (id == CORE_VIDEO)
+		return &video;
+	return id >= 0 && id < CORE_GBA_COUNT ? &stub : NULL;
 }
 
 #endif

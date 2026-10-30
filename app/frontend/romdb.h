@@ -70,11 +70,15 @@ void romdb_match(const char *file, const struct gba_header *h, uint64_t size,
 /* The length of a ROM file name without its ".gba" (any case): the one
  * rule for the name of its save, resume states and settings (core.c,
  * settings.c), the title of an unknown ROM and which files are ROMs
- * (romlist.c: only those it shortens). */
+ * (romlist.c: those it shortens, and videos). A video keeps its ".mpg"
+ * there, so x.mpg and x.gba never share a file. */
 int romdb_stem_len(const char *file);
+/* A video for video_core.c: the name ends in ".mpg" (any case). */
+int romdb_is_video(const char *file);
 
 /* Header (and the cache when the CRC is needed) for path; computes the
  * CRC when allow_crc and still needed, and caches it. Fills id->title.
+ * A video is only stat'ed: ROMDB_UNKNOWN, its name without ".mpg".
  * Returns 0, or -1 when the file cannot be read (title: the file name). */
 int romdb_identify(const char *path, int allow_crc, struct rom_id *id);
 /* The cache key of a ROM path: relative to <data>/roms ("a/b/x.gba"), or

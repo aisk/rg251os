@@ -3,8 +3,9 @@
  * file has startup, the main loop and the game's lifecycle; the work is
  * in the modules (sys.c mounts and system helpers, display.c KMS, input.c
  * evdev and the power key timing, audio.c ALSA, core.c the libretro
- * cores, ui.c the page stack, menu.c the ROM list and menus, settings.c,
- * sleep.c, cpuctl.c, sdgrow.c, clock.c, sysinfo.c).
+ * cores, video_core.c the player for *.mpg videos, ui.c the page stack,
+ * menu.c the ROM list and menus, settings.c, sleep.c, cpuctl.c, sdgrow.c,
+ * clock.c, sysinfo.c).
  *
  * Startup: proc/sys/dev mounts, the first boot's partition grow
  * (sdgrow.c, with its messages on screen), the GBA partition mounted and
@@ -15,9 +16,11 @@
  * underneath; holding B skips it, for which it waits up to 1.5 s for the
  * gamepad). The main loop is driven by page flip events: whenever the
  * previous frame is on screen, the page stack runs (frame()); in game that
- * is one retro_run with the frame scaled 2x and rotated straight into the
- * back buffer, so emulation runs at the panel's 60.02 Hz and audio is
- * resampled to match (audio.c). The menus are drawn only when something
+ * is one retro_run with the frame scaled (by the largest integer that
+ * fits, 2x for the GBA, centered with black bars) and rotated straight
+ * into the back buffer (a video without the grid and color effects),
+ * so emulation runs at the panel's 60.02 Hz and audio is resampled to
+ * match (audio.c). The menus are drawn only when something
  * changed (ui.c); when one was not, nothing is flipped and the loop sleeps
  * in poll() until input or the earliest of the times the page and the
  * timers here need (idle_timeout, at most IDLE_MAX_MS).
@@ -373,6 +376,12 @@ static void identify_game(const char *path)
 	int color;
 
 	romdb_identify(path, 1, &m.rom_id);
+	if (romdb_is_video(m.rom_name)) {
+		/* No color correction, no database: see video_core.c. */
+		log_msg("romdb: %s is a video, shown as \"%s\"", m.rom_name,
+			m.rom_id.title);
+		return;
+	}
 	romdb_log(m.rom_name, &m.rom_id);
 	log_msg("romdb: %s is \"%s\" (%s, %.1f ms)", m.rom_name, m.rom_id.title,
 		romdb_how_names[m.rom_id.how], (now_ns() - t0) / 1e6);
@@ -386,6 +395,7 @@ static void start_game(const char *path)
 		    m.nodisplay_hz;
 	const char *base = strrchr(path, '/');
 	char err[128];
+	int core;
 
 	base = base ? base + 1 : path;
 	snprintf(m.rom_path, sizeof(m.rom_path), "%s", path);
@@ -395,8 +405,9 @@ static void start_game(const char *path)
 	m.saved_rom = rom_settings;
 	identify_game(path);
 	ingame_menu_set_name(m.rom_id.title);
-	log_msg("starting %s with %s", path, core_names[rom_settings.core]);
-	if (core_load(path, rom_settings.core, err, sizeof(err))) {
+	core = core_for_rom(m.rom_name);
+	log_msg("starting %s with %s", path, core_names[core]);
+	if (core_load(path, core, err, sizeof(err))) {
 		rom_settings_load(NULL);
 		m.saved_rom = rom_settings;
 		romlist_menu_message(err);
@@ -691,6 +702,21 @@ static void blit_canvas(void)
 	display_present();
 }
 
+/* The effects for the game picture: none for a video (grid and color
+ * correction are made for the GBA's 2x pixels and palettes). */
+static const struct blit_fx *game_fx(void)
+{
+	return core_info()->core == CORE_VIDEO ? NULL : fx_current();
+}
+
+/* The largest integer scale of a w x h frame on the logical screen. */
+static int frame_scale(int lw, int lh, int w, int h)
+{
+	int s = lw / w < lh / h ? lw / w : lh / h;
+
+	return s < 1 ? 1 : s;
+}
+
 /* The game page: one frame emulated with the held buttons and shown,
  * or the in-game menu opened. */
 static struct ui_result game_update(uint32_t held, int64_t now)
@@ -698,7 +724,7 @@ static struct ui_result game_update(uint32_t held, int64_t now)
 	const struct display_info *di = display_info();
 	const uint16_t *fr;
 	int64_t t0, t2, t3;
-	int fw, fh, fp, pitch, scale;
+	int fw, fh, fp, pitch;
 	unsigned missed;
 	uint16_t *dst;
 	int skipped;
@@ -712,13 +738,11 @@ static struct ui_result game_update(uint32_t held, int64_t now)
 	fr = core_frame(&fw, &fh, &fp);
 	if (display_ready()) {
 		dst = display_backbuf(&pitch);
-		if (fr) {
-			scale = di->logical_w / fw < di->logical_h / fh ?
-				di->logical_w / fw : di->logical_h / fh;
+		if (fr)
 			blit_rotate(dst, pitch, di->native_w, di->native_h,
-				    di->rotation, fr, fp, fw, fh, scale < 1 ? 1 : scale,
-				    fx_current());
-		}
+				    di->rotation, fr, fp, fw, fh,
+				    frame_scale(di->logical_w, di->logical_h, fw, fh),
+				    game_fx());
 		t3 = now_ns();
 		display_present();
 	} else {
@@ -1241,7 +1265,9 @@ static void run(void)
  * frame's flip takes HEADLESS_WAKE_FLIP_FRAMES while the simulated
  * codec plays on, as the panel does on the device). FE_RESET_AT=N
  * opens the in-game menu after frame N and confirms Restart game, with
- * key presses through the page stack (ui_frame). The game starts and
+ * key presses through the page stack (ui_frame). The game taps A for 10
+ * frames every 2 s; a video gets Right, Left, A, A at frames 120, 240,
+ * 360, 420 instead (headless_video_keys). The game starts and
  * ends like on the device (start_game, end_game and the settings saved),
  * so the resume state is loaded and written like on a start and a quit.
  * ROM "resume" plays a boot instead: resume_boot picks the game (B held
@@ -1250,6 +1276,23 @@ static void run(void)
  * record, without powering off), quit (Quit to ROM list), crash (nothing
  * written, as if the device lost power), otherwise like a quit.
  */
+/* A video gets these instead of the A taps (one frame each, edges):
+ * +10 s, -10 s, pause, play. */
+static uint32_t headless_video_keys(long i)
+{
+	switch (i) {
+	case 120:
+		return JOY_BIT(RIGHT);
+	case 240:
+		return JOY_BIT(LEFT);
+	case 360:
+	case 420:
+		return JOY_BIT(A);
+	default:
+		return 0;
+	}
+}
+
 static int headless(const char *data, const char *rom, long frames)
 {
 	static uint16_t native[320 * 480];
@@ -1315,12 +1358,14 @@ static int headless(const char *data, const char *rom, long frames)
 
 		/* Fake time from the start: 60 frames per second. */
 		t = m.game_start_ns + i * HEADLESS_FRAME_NS;
-		skipped = emulate(i % 120 < 10 ? JOY_BIT(A) : 0);
+		skipped = emulate(core_info()->core == CORE_VIDEO ?
+				  headless_video_keys(i) :
+				  i % 120 < 10 ? JOY_BIT(A) : 0);
 		fr = core_frame(&fw, &fh, &fp);
 		t2 = now_ns();
 		if (fr)
-			blit_rotate(native, 320, 320, 480, 270, fr, fp, fw, fh, 2,
-				    fx_current());
+			blit_rotate(native, 320, 320, 480, 270, fr, fp, fw, fh,
+				    frame_scale(480, 320, fw, fh), game_fx());
 		perf_add(&m.p_blit, now_ns() - t2);
 		cpuctl_game_frame(now_ns() - t0, 0, skipped,
 				  t + HEADLESS_FRAME_NS);

@@ -1,9 +1,14 @@
 /*
  * libretro glue for the statically linked cores (mGBA and gpSP, or the
- * stub core). The core is picked per game (rom_settings.core); all calls
- * go through its struct core_api (cores.c), and only one core is
- * initialized at a time: core_unload() deinits it fully, so the next game
- * can use the other one.
+ * stub core, and the video player of video_core.c). The core is picked
+ * per game (rom_settings.core), a video always gets the video player
+ * (core_for_rom); all calls go through its struct core_api (cores.c), and
+ * only one core is initialized at a time: core_unload() deinits it fully,
+ * so the next game can use the other one.
+ *
+ * The video player has no save RAM: no .sav is read or written for it
+ * (save_load logs that), and its resume state is the playback position,
+ * checked like the others (the save part of the header is empty).
  *
  * Saves: neither core writes save files itself (no use of the save
  * directory). Both keep battery saves (SRAM, flash, EEPROM) in a 128KiB
@@ -56,7 +61,8 @@
  * the frame's end it counts down and goes back to mgba_frameskip as mGBA
  * last read it (in that retro_run, after GET_VARIABLE_UPDATE). The
  * settings and the keys sent are logged at the start, skipped frames at
- * the end of each game.
+ * the end of each game. For the video player a "skipped" frame is one
+ * that repeats the previous picture; it logs its own statistics.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -116,6 +122,7 @@ static struct {
 	unsigned info_lines, warn_lines, dropped_lines;
 	char options[512];   /* answered core options, logged after load */
 	int options_changed; /* for RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE */
+	int video_scale_set; /* settings.video_scale the core last got */
 	retro_audio_buffer_status_callback_t audio_status;  /* from the core */
 	unsigned min_latency_ms;
 	int refreshed, null_frame;  /* video_refresh in this retro_run */
@@ -160,7 +167,8 @@ static void core_log(enum retro_log_level level, const char *fmt, ...)
  * Core options. Keys are prefixed per core, so one table serves both;
  * keys not listed get the core's default. The BIOS options depend on
  * whether <data>/bios/gba_bios.bin exists; the ones in rom_options[] on
- * the game's settings. The rest are fixed.
+ * the game's settings; video_scale (the video player's Fit or Crop) on
+ * the global setting, live (core_options_changed). The rest are fixed.
  */
 static const char *const options[][2] = {
 	{ "mgba_skip_bios", "OFF" },
@@ -221,6 +229,7 @@ static const char *const mgba_frameskip[FRAMESKIP_COUNT] = {
 	"0", NULL, "1", "2", "3",
 };
 
+
 #define ROM_OPTION(key, core, member, names, values, live) \
 	{ key, core, #member, names, offsetof(struct rom_settings, member), \
 	  values, ARRAY_SIZE(values), live }
@@ -278,6 +287,8 @@ const char *core_option_value(const char *key)
 		v = c.have_bios ? "ON" : "OFF";
 	else if (!strcmp(key, "gpsp_bios"))
 		v = c.have_bios ? "auto" : "builtin";
+	else if (!strcmp(key, "video_scale"))
+		v = video_scale_names[settings.video_scale == VIDEO_CROP];
 	for (size_t i = 0; !v && i < ARRAY_SIZE(rom_options); i++)
 		if (!strcmp(key, rom_options[i].key))
 			v = rom_option_value(&rom_options[i],
@@ -299,6 +310,10 @@ static void log_rom_options(void)
 	char line[512];
 	size_t n = 0;
 
+	/* The game settings are the GBA cores'; the video player has the
+	 * global video_scale (core_option_value). */
+	if (c.info.core == CORE_VIDEO)
+		return;
 	line[0] = 0;
 	for (size_t i = 0; i < ARRAY_SIZE(rom_options); i++) {
 		const struct rom_option *o = &rom_options[i];
@@ -927,6 +942,7 @@ int core_load(const char *rom_path, int core, char *err, size_t errlen)
 	core_state_path(rom_path, core, c.state_path, sizeof(c.state_path));
 	c.options[0] = 0;
 	c.options_changed = 0;
+	c.video_scale_set = settings.video_scale;
 	c.audio_status = NULL;
 	c.min_latency_ms = 0;
 	c.frames = c.skipped = c.audio_low = 0;
@@ -939,7 +955,8 @@ int core_load(const char *rom_path, int core, char *err, size_t errlen)
 	c.info_lines = c.warn_lines = c.dropped_lines = 0;
 	c.bad_cmds = 0;
 
-	/* gpSP reads the ROM itself (need_fullpath), mGBA wants it in memory. */
+	/* gpSP and the video player read the file themselves
+	 * (need_fullpath), mGBA wants it in memory. */
 	c.api->get_system_info(&si);
 	if (!si.need_fullpath) {
 		rom = read_rom(rom_path, &size);
@@ -1021,7 +1038,8 @@ void core_unload(void)
 	c.api->deinit();
 	c.api = NULL;
 	c.audio_status = NULL;
-	if (c.loaded && (c.skipped || rom_settings.frameskip != FRAMESKIP_OFF)) {
+	if (c.loaded && c.info.core != CORE_VIDEO &&
+	    (c.skipped || rom_settings.frameskip != FRAMESKIP_OFF)) {
 		char st[96] = "no buffer status reported";
 
 		if (c.occ_n)
@@ -1048,6 +1066,14 @@ void core_unload(void)
 	c.sram = NULL;
 	log_msg("core: unloaded (%u save writes)", c.saves_written);
 	c.saves_written = 0;
+}
+
+int core_for_rom(const char *rom_name)
+{
+	const char *base = strrchr(rom_name, '/');
+
+	return romdb_is_video(base ? base + 1 : rom_name) ? CORE_VIDEO :
+	       rom_settings.core;
 }
 
 int core_loaded(void)
@@ -1129,6 +1155,14 @@ void core_options_changed(void)
 {
 	if (!c.loaded)
 		return;
+	if (settings.video_scale != c.video_scale_set) {
+		c.video_scale_set = settings.video_scale;
+		if (c.info.core == CORE_VIDEO) {
+			c.options_changed = 1;
+			log_msg("core: video_scale=%s, applied live",
+				core_option_value("video_scale"));
+		}
+	}
 	for (size_t i = 0; i < ARRAY_SIZE(rom_options); i++) {
 		const struct rom_option *o = &rom_options[i];
 		int v = rom_option_setting(o), old = rom_option_set[i];
