@@ -10,10 +10,11 @@ On real hardware the ROM list is on screen about 2.5 s after the kernel starts (
 
 Used for playing. Display, input, audio, saves, battery, both cores and power off work on hardware. Sleep, growing the data partition on first boot and the ROM name database still need more testing. See [docs/roadmap.md](docs/roadmap.md) for open issues and plans, and [docs/hardware-research.md](docs/hardware-research.md) for hardware notes, design decisions and the card layout (both in Chinese).
 
-It also plays videos: `.mpg` files (MPEG-1 video with MP2 audio) in `roms/` show up in the list next to the games. Convert them to fit the 480x320 screen with
+It also plays videos. To bring back the feel of the cheap "MP4" players of the 2000s, only MPEG-1 is supported, so videos have to be converted first and copied into `roms/`, where the `.mpg` files show up next to the games. For example, to fit the 480x320 screen:
 
 ```sh
-ffmpeg -i in.mp4 -vf scale=480:-2 -r 30 -c:v mpeg1video -q:v 3 -c:a mp2 -b:a 128k out.mpg
+ffmpeg -i in.mp4 -vf scale=480:-2 -r 30 -c:v mpeg1video -q:v 2 -mbd rd -trellis 2 \
+  -c:a mp2 -b:a 128k out.mpg
 ```
 
 While a video plays, A pauses, Left/Right seek 10 s and Down/Up 60 s (hold to keep seeking), L/R go to the previous/next video in the same folder, and B toggles the on-screen display with the name, time and progress. When a video ends the next one in the folder starts by itself. SELECT+START opens the menu as in games, and each video resumes where it was left.
