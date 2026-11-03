@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a FIGHTP10 content pack from ripped sprite sheets and their manifests.
+"""Build a FIGHTP11 content pack from ripped sprite sheets and their manifests.
 
 Each manifest (assets/fighter/<name>.json) describes one sheet and is the
 source of truth for it: every frame is a hand-checked sheet rectangle plus a
@@ -85,7 +85,12 @@ top-level keys such as "notes" are ignored):
               (the thrower) and thrown (the one held); without them throw
               is a generic grab, the stand_hp frames with the first active
               one held until it lasts 30 ticks (no hitboxes), and thrown the
-              hurt animation.
+              hurt animation. run (looped while running and skidding) and
+              backdash (played from its first tick, the last step held) are
+              optional too: without them run is walk_forward with every
+              step half as long, and backdash the first walk_back frame for
+              3 ticks, the jump's second and last frames for 9 ticks each
+              and that walk_back frame again.
               Moves: the eight normals (stand/crouch lp/hp/lk/hk) are fixed by
               name; any other name is a special. A special may have "name",
               shown in the command lists (A-Z, a-z, 0-9, space and "-", at
@@ -212,12 +217,20 @@ hitstop 8; tech, the ticks after the grab in which the victim's HP or HK
 breaks it (0 none), default 6; tech_stun 12 and tech_push 24, both fighters'
 recovery and slide after a break; wakeup_safe 8 and stun_safe 0, ticks a
 fighter cannot be thrown after it rises from a knockdown or leaves hitstun or
-blockstun), src, notes. hop, super_jump,
+blockstun), dash (run and backdash, every key optional, KOF 2002 defaults:
+window 10, the ticks between the two taps of 66 or 44; run_scale 2100, the
+run speed per mille of the character's walk; run_startup 3 ticks at walk
+speed, run_min 10 more before letting go stops it, run_grace 0 ticks still
+running after forward is let go, run_stop 3 ticks of skid; backdash_startup
+3 ticks on the ground, backdash_air 18 airborne ticks covering
+backdash_distance 72 pixels in an arc backdash_height 16 pixels high,
+backdash_stop 3 landing ticks and backdash_invuln 0, the ticks from its
+start that strikes miss it; a backdash can never be thrown), src, notes. hop, super_jump,
 hyper_hop, chip, meters, mechanics, scaling, stun and guard are accepted for
 later steps and not packed.
 
 Pack layout, all little endian (the C loader in app/fighter/render.c checks it):
-  header     "FIGHTP10", u32 size, u32 FNV-1a of bytes 16..size, u32 flags
+  header     "FIGHTP11", u32 size, u32 FNV-1a of bytes 16..size, u32 flags
              (bit 0 automatic), u32 palettes, frames, characters, effects,
              systems, sparks, stages
   palette    u16 sheet, u16 n (1..256), n x u16 RGB565
@@ -237,11 +250,14 @@ Pack layout, all little endian (the C loader in app/fighter/render.c checks it):
              slash_guard, blood_light, blood_heavy, blood_special; u16
              wakeup (ticks from landing in a knockdown to acting again);
              9 x u16 throw range, damage, pushback, hitstop, tech,
-             tech_stun, tech_push, wakeup_safe, stun_safe
+             tech_stun, tech_push, wakeup_safe, stun_safe; 12 x u16 dash
+             window, run_scale, run_startup, run_min, run_grace, run_stop,
+             backdash_startup, backdash_air, backdash_stop,
+             backdash_distance, backdash_height, backdash_invuln
   character  u8 name length, name bytes; u16 normal palette, alternate
              palette; u16 system, u16 override mask (bit per stat), 11 stats
              x u16 as above (0 where the mask bit is clear); u16 steps, boxes,
-             moves, projectiles; 15 actions x (u16 first step, u16 steps);
+             moves, projectiles; 17 actions x (u16 first step, u16 steps);
              moves x 20 u16 (kind 0 normal or 1 special, trigger or motion
              (0 236, 1 214, 2 623, 3 [4]6, 4 [2]8, follow-ups also 5 any,
              6 5, 7 8, 8 2, 9 6, 10 4; 11 41236, 12 63214, 13 421), buttons, first step, steps, damage,
@@ -280,14 +296,14 @@ import struct
 import sys
 import zlib
 
-MAGIC = b'FIGHTP10'
+MAGIC = b'FIGHTP11'
 # Order matters: these are the C enums in app/fighter/fighter.h.
 ACTIONS = ['idle', 'walk_forward', 'walk_back', 'jump', 'guard', 'hurt', 'ko',
            'crouch', 'crouch_guard', 'crouch_hurt', 'fall', 'down', 'getup', 'throw',
-           'thrown']
-# Knockdown and throw actions a manifest may leave out (see
+           'thrown', 'run', 'backdash']
+# Knockdown, throw, run and backdash actions a manifest may leave out (see
 # Character.derived_actions).
-DERIVED_ACTIONS = ['fall', 'down', 'getup', 'throw', 'thrown']
+DERIVED_ACTIONS = ['fall', 'down', 'getup', 'throw', 'thrown', 'run', 'backdash']
 # A derived throw lasts at least this many ticks (its stand HP frames, the
 # first active one held longer).
 THROW_TICKS = 30
@@ -295,6 +311,17 @@ THROW_TICKS = 30
 THROW_KEYS = {'range': (4, 0, 64), 'damage': (100, 0, 1500), 'pushback': (40, 0, 120),
               'hitstop': (8, 0, 30), 'tech': (6, 0, 15), 'tech_stun': (12, 1, 120),
               'tech_push': (24, 0, 120), 'wakeup_safe': (8, 0, 60), 'stun_safe': (0, 0, 60)}
+# Run and backdash (systems.json "dash"): key -> (default, low, high), in
+# packed order. The defaults are KOF 2002's (see systems.json notes).
+DASH_KEYS = {'window': (10, 2, 31), 'run_scale': (2100, 1000, 4000),
+             'run_startup': (3, 0, 15), 'run_min': (10, 0, 60), 'run_grace': (0, 0, 15),
+             'run_stop': (3, 0, 15), 'backdash_startup': (3, 0, 15),
+             'backdash_air': (18, 1, 60), 'backdash_stop': (3, 0, 60),
+             'backdash_distance': (72, 0, 160), 'backdash_height': (16, 0, 75),
+             'backdash_invuln': (0, 0, 135)}
+MAX_RUN = 128
+# The derived backdash's steps: lead (on the ground), rise, drop, landing.
+BACKDASH_LEAD, BACKDASH_RISE, BACKDASH_DROP, BACKDASH_LAND = 3, 9, 9, 30
 # Default get-up length (ticks of the crouch frame) when a character has no
 # getup action.
 GETUP_TICKS = 10
@@ -746,6 +773,11 @@ def stat_values(d, what, partial):
     return out
 
 
+def run_speed(walk, dash):
+    """Running speed in quarter pixels per tick, as the core derives it."""
+    return (walk * dash['run_scale'] + 500) // 1000
+
+
 def check_stats(st, what):
     """The resolved stats must also satisfy the core's jump bound."""
     peak, _ = jump_arc(st['jump_vy'], st['gravity'])
@@ -787,7 +819,7 @@ class Systems:
         need = {'life', 'damage_scale', 'walk', 'walk_back', 'jump', 'stun_table',
                 'hitstop_table', 'input', 'push_distance', 'guard_range'}
         known = need | {'defense', 'weight', 'height', 'src', 'notes', 'wall_margin',
-                        'play_width', 'slash', 'effects', 'wakeup', 'throw'} | \
+                        'play_width', 'slash', 'effects', 'wakeup', 'throw', 'dash'} | \
             LATER_SYSTEM_KEYS
         if not isinstance(p, dict) or need - set(p) or set(p) - known:
             raise ValueError(f'{what}: needs {sorted(need)}, may have '
@@ -825,6 +857,14 @@ class Systems:
             raise ValueError(f'{what}: throw is {{{", ".join(THROW_KEYS)}}} (all optional)')
         throw = {k: check_int(throw.get(k, d), lo, hi, f'{what}: throw {k}')
                  for k, (d, lo, hi) in THROW_KEYS.items()}
+        dash = p.get('dash', {})
+        if not isinstance(dash, dict) or set(dash) - set(DASH_KEYS):
+            raise ValueError(f'{what}: dash is {{{", ".join(DASH_KEYS)}}} (all optional)')
+        dash = {k: check_int(dash.get(k, d), lo, hi, f'{what}: dash {k}')
+                for k, (d, lo, hi) in DASH_KEYS.items()}
+        if dash['backdash_invuln'] > dash['backdash_startup'] + dash['backdash_air'] + \
+                dash['backdash_stop']:
+            raise ValueError(f'{what}: dash backdash_invuln is longer than the backdash')
         effects = p.get('effects', {})
         if not isinstance(effects, dict) or set(effects) - set(EFFECT_KEYS) or not all(
                 isinstance(v, str) and v.count('.') == 1 for v in effects.values()):
@@ -845,7 +885,7 @@ class Systems:
                 'guard_range': check_int(p['guard_range'], 0, SCREEN_WIDTH,
                                          f'{what}: guard_range'),
                 'wakeup': check_int(p.get('wakeup', 25), 1, MAX_WAKEUP, f'{what}: wakeup'),
-                'throw': throw, 'classes': classes}
+                'throw': throw, 'dash': dash, 'classes': classes}
 
     def of(self, character, written):
         """The system a character uses: its own "system", else the assigned
@@ -880,6 +920,7 @@ class Systems:
                 out += struct.pack('<H', sparks[ref] + 1 if ref is not None else 0)
             out += struct.pack('<H', p['wakeup'])
             out += b''.join(struct.pack('<H', p['throw'][k]) for k in THROW_KEYS)
+            out += b''.join(struct.pack('<H', p['dash'][k]) for k in DASH_KEYS)
         return out
 
 
@@ -969,6 +1010,8 @@ class Character:
                              f'and src')
         self.overrides = stat_values(given, f'{name} stats', True)
         self.stats = check_stats({**self.system['stats'], **self.overrides}, f'{name} stats')
+        if run_speed(self.stats['walk'], self.system['dash']) > MAX_RUN:
+            raise ValueError(f'{name}: runs faster than {MAX_RUN} quarter pixels per tick')
         if 'src' in given:
             check_src(given['src'], f'{name} stats', STAT_SRC_KEYS, sources)
         # Where each move field's value comes from: kind -> count.
@@ -1174,13 +1217,20 @@ class Character:
 
     @staticmethod
     def derived_actions(given, moves):
-        """The knockdown and throw actions a manifest has none of: fall is
-        the KO animation without its last step, down that last step (the
-        lying frame) and getup the first crouch frame for GETUP_TICKS; throw
-        is the generic grab, the stand HP frames (their hurtboxes, no hits)
-        with the first active one held until it lasts THROW_TICKS, and
-        thrown (held by a throw) the hurt animation."""
+        """The knockdown, throw, run and backdash actions a manifest has
+        none of: fall is the KO animation without its last step, down that
+        last step (the lying frame) and getup the first crouch frame for
+        GETUP_TICKS; throw is the generic grab, the stand HP frames (their
+        hurtboxes, no hits) with the first active one held until it lasts
+        THROW_TICKS, and thrown (held by a throw) the hurt animation. run is
+        walk_forward at twice the pace (each step half as long, at least a
+        tick); backdash is the first walk_back frame for BACKDASH_LEAD
+        ticks, the jump's second and last frames, then that walk_back frame
+        again for the landing."""
         ko, crouch = given['ko'], given['crouch']
+        back = given['walk_back'][0][0]
+        rise = given['jump'][min(1, len(given['jump']) - 1)][0]
+        drop = given['jump'][-1][0]
         lying = ko[-1][:1] + [1]
         grab = []
         for st in moves.get('stand_hp', {}).get('steps', []):
@@ -1198,6 +1248,9 @@ class Character:
             grab[hold] = [grab[hold][0], grab[hold][1] + THROW_TICKS - total, *grab[hold][2:]]
         return {'fall': ko[:-1] or [lying], 'down': [lying],
                 'getup': [[crouch[0][0], GETUP_TICKS]], 'throw': grab,
+                'run': [[st[0], max(1, st[1] // 2), *st[2:]] for st in given['walk_forward']],
+                'backdash': [[back, BACKDASH_LEAD], [rise, BACKDASH_RISE], [drop, BACKDASH_DROP],
+                             [back, BACKDASH_LAND]],
                 'thrown': [list(st) for st in given['hurt']]}
 
     def frames(self):

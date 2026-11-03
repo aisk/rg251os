@@ -1,5 +1,5 @@
-/* Portable fighter state, FIGHTP10 content (system profiles with walls and
- * effect sets, a roster of characters with stats, frames, per-step boxes and
+/* Portable fighter state, FIGHTP11 content (system profiles with walls,
+ * effect sets, throw and run/backdash rules, a roster of characters with stats, frames, per-step boxes and
  * motion, normals, named specials and projectiles, spark animations and parallax
  * stages), bounded draw commands, the per-tick sound events and the RGB565
  * software renderer interface. Rules (fighter.c) read the pack's steps,
@@ -17,7 +17,7 @@
 #define FW 480
 #define FH 320
 #define COMMANDS 2048
-#define STATE_WORDS 192
+#define STATE_WORDS 256
 /* Ground line in screen rows; fighters' foot anchors stand on it (a stage's
  * ground row is drawn on it). */
 #define GROUND 260
@@ -114,8 +114,15 @@
 #define EFFECT_PIXEL_BUDGET 76800u
 /* Direction history in ticks; the input windows (struct stats) fit in it. */
 #define HISTORY 32
-/* Rounds a fighter must win to take a match (1 = single round). */
-#define ROUNDS_TO_WIN 1
+/* Rounds a fighter must win to take an arcade match (best of three);
+ * survival fights are a single round each. */
+#define ROUNDS_TO_WIN 2
+/* The round clock in arcade and survival rounds: CLOCK_COUNTS counts of
+ * COUNT_TICKS each, running from FIGHT until a KO; at 0 the round is over
+ * and the larger share of life wins. Practice and fight_start have none. */
+#define CLOCK_COUNTS 99
+#define COUNT_TICKS 60
+#define CLOCK_TICKS (CLOCK_COUNTS * COUNT_TICKS)
 /* A ladder round opens with the versus card (INTRO_TICKS, while the core
  * fills the render cache), then READY over the frozen stage (READY_TICKS);
  * the rules hold still through both (no input, no AI). The round runs from
@@ -134,10 +141,11 @@
 #define SCENE_MISSES 16
 /* FALL, DOWN and GETUP are the knockdown (see fighter.c): knocked off the
  * feet until landing, lying, getting up. THROW is a normal throw's
- * thrower, THROWN the fighter it holds. */
+ * thrower, THROWN the fighter it holds. RUN loops while running (and
+ * through the skid), BACKDASH plays from the backdash's first tick. */
 enum action {
 	IDLE, WALK_FORWARD, WALK_BACK, JUMP, GUARD, HURT, KO, CROUCH, CROUCH_GUARD,
-	CROUCH_HURT, FALL, DOWN, GETUP, THROW, THROWN, ACTIONS
+	CROUCH_HURT, FALL, DOWN, GETUP, THROW, THROWN, RUN, BACKDASH, ACTIONS
 };
 /* Normals; specials follow them in the move table. */
 enum trigger {
@@ -179,6 +187,13 @@ enum grab { GRAB_NONE, GRAB_FORWARD, GRAB_BACK, GRAB_HELD, GRAB_TECH, GRABS };
 #define MAX_THROW_RANGE 64
 #define MAX_TECH 15
 #define MAX_THROW_SAFE 60
+/* Run and backdash (struct fighter dash; elapsed counts the phase's
+ * ticks): running (66, held forward), coasting the grace ticks after
+ * forward is let go, the skid to a stop, and the backdash (44). */
+enum dash_phase { DASH_NONE, DASH_RUN, DASH_COAST, DASH_STOP, DASH_BACK, DASH_PHASES };
+#define MAX_DASH_TICKS 60
+#define MAX_RUN 128
+#define MAX_BACKDASH 160
 /* Bits of a packed move's defaults: the field comes from its class. */
 enum hit_default { DEFAULT_HITSTUN = 1, DEFAULT_BLOCKSTUN = 2, DEFAULT_HITSTOP = 4 };
 /* Standing hurt height group, for the AI and tools only. */
@@ -197,8 +212,19 @@ enum effect_key {
 };
 /* CPU difficulty (struct fight_state level; see the AI in fighter.c). */
 enum level { LEVEL_EASY, LEVEL_NORMAL, LEVEL_HARD, LEVELS };
-/* Game flow: the arcade ladder (select, fights, loss result, clear). */
+/* Game flow: the select screen, fights, the result screen (a lost ladder
+ * or survival run) and the clear screen (a finished ladder). */
 enum mode { MODE_SELECT, MODE_FIGHT, MODE_RESULT, MODE_CLEAR, MODES };
+/* Game modes, picked on the select screen (L cycles them): the arcade
+ * ladder; survival, one life bar carried through endless random
+ * opponents with SURVIVAL_HEAL per mille of life back after each win; and
+ * practice against a dummy whose life refills. */
+enum game { GAME_ARCADE, GAME_SURVIVAL, GAME_PRACTICE, GAMES };
+#define SURVIVAL_HEAL 150
+#define MAX_STREAK 9999
+/* The practice dummy (R cycles it in a practice fight): standing,
+ * crouching, guarding everything, or the CPU. */
+enum dummy { DUMMY_STAND, DUMMY_CROUCH, DUMMY_GUARD, DUMMY_CPU, DUMMIES };
 /* One fighter. x is in quarter pixels (x / 4 is the anchor column), y in
  * pixels, vy in quarter pixels per tick; hp counts down from the
  * character's life. move is the move index + 1 (0 = none); elapsed counts
@@ -219,12 +245,14 @@ enum mode { MODE_SELECT, MODE_FIGHT, MODE_RESULT, MODE_CLEAR, MODES };
  * ground, then LYING through lying and getting up. grab is the normal throw
  * state (enum grab; elapsed counts its ticks, equal on both sides); safe
  * counts down the ticks the fighter cannot be thrown after rising or
- * leaving hitstun or blockstun. */
+ * leaving hitstun or blockstun. dash is the run or backdash phase (enum
+ * dash_phase; elapsed counts its ticks). */
 struct fighter {
 	int32_t x, y, vy, hp, face, walk, block, crouch, move, elapsed, hit, stun,
 	    freeze, slide, keys, corner, squat, buffer, age, plan, plan_tick, clock, down, grab,
 	    safe;
 	uint32_t charge, history[HISTORY / 8];
+	int32_t dash;
 };
 /* A live projectile: kind is the owner's projectile index + 1 (0 = free). */
 struct shot {
@@ -294,7 +322,17 @@ struct sound_event {
  * the CPU difficulty (enum level, LEVEL_NORMAL after fight_reset; R cycles
  * it on the select screen, the core sets its option at load, reset and when
  * the option changes while the select screen shows). throws and techs count
- * the normal throws that landed and those broken. */
+ * the normal throws that landed and those broken, runs and backdashes the
+ * runs and backdashes started. game is the game mode (enum game, L cycles
+ * it on the select screen); picking is set while a practice select picks
+ * the dummy (chr[1] is then the cursor); dummy is the practice dummy's
+ * behaviour (enum dummy, R in a practice fight); streak counts the wins of
+ * the current survival run and record the most of this session; carry is
+ * P1's life for the next survival fight (0 outside a survival fight).
+ * damage is the life an attacking side's running combo took (0 = none),
+ * last what its latest combo took (shown in practice). clock is the round
+ * clock's ticks left (0 = no clock, or time over once ended), bout the
+ * round of the current match (from 1, 0 outside a fight). */
 struct fight_state {
 	uint32_t tick, rng, previous, paused, stress, boxes, automatic, round;
 	uint32_t mode, timer, beaten, stage, run, wins[2], chr[2], pal[2];
@@ -307,6 +345,9 @@ struct fight_state {
 	uint32_t sounds;
 	struct sound_event sound[MAX_SOUND_EVENTS];
 	uint32_t combo[2], shown[2], show[2], best[2], list, level, throws, techs;
+	uint32_t runs, backdashes;
+	uint32_t game, picking, dummy, streak, record, carry, damage[2], last[2];
+	uint32_t clock, bout;
 };
 /* One opaque run in a frame row; pixels index the frame's data. */
 struct span {
@@ -388,9 +429,11 @@ struct jump {
  * only: push, the body distance in pixels (closer than push - 1 is pushed
  * out to push), guard_range in pixels, and the input windows buffer,
  * quarter, dragon, charge, grace and release in ticks (see fighter.c), and
- * wakeup, the ticks from landing in a knockdown to acting again. */
+ * wakeup, the ticks from landing in a knockdown to acting again; run, the
+ * running speed in quarter pixels per tick (walk times the system's run
+ * scale, derived at load). */
 struct stats {
-	int16_t life, defense, walk, walk_back, weight, push, guard_range;
+	int16_t life, defense, walk, walk_back, weight, push, guard_range, run;
 	uint8_t height, buffer, quarter, dragon, charge, grace, release, wakeup;
 	struct jump jump;
 };
@@ -411,10 +454,25 @@ struct throw_rule {
 	uint8_t range, tech, tech_stun, tech_push, wakeup_safe, stun_safe;
 	struct hit hit;
 };
+/* Run and backdash of a system's characters (ticks unless noted): window,
+ * the ticks within which the second tap of 66 or 44 must follow the first;
+ * run_scale, the run speed per mille of the walk speed; a run moves at
+ * walk speed for run_startup ticks, then at run speed, lasts at least
+ * run_startup + run_min ticks, coasts run_grace ticks once forward is
+ * let go (forward again keeps running) and skids run_stop ticks. A backdash
+ * waits back_startup ticks on the ground, flies back_air ticks covering
+ * back_distance pixels in an arc back_height pixels high, and lands for
+ * back_stop ticks; it cannot be thrown and strikes miss it for its first
+ * back_invuln ticks. */
+struct dash_rule {
+	uint8_t window, run_startup, run_min, run_grace, run_stop, back_startup, back_air,
+	    back_stop, back_distance, back_height, back_invuln;
+	uint16_t run_scale;
+};
 /* A system profile: the stat defaults, the damage scale applied to its
  * characters' moves at load, the class table, the wall margin and rule
  * window (play_width) of its stages, its effect set (spark + 1, 0 =
- * none, per enum effect_key) and its normal throws. */
+ * none, per enum effect_key), its normal throws and its run and backdash. */
 struct system {
 	char name[MAX_NAME + 1];
 	uint16_t damage_scale, margin, play_width;
@@ -422,6 +480,7 @@ struct system {
 	struct stats stats;
 	struct class_row cls[CLASSES];
 	struct throw_rule throw;
+	struct dash_rule dash;
 };
 struct character {
 	char name[MAX_NAME + 1];
@@ -575,8 +634,9 @@ int fight_assets(struct assets *a, const void *data, size_t size, int *automatic
 int fight_layer_x(const struct layer *l, int cam);
 /* The render cache (render.c). fight_want points it at what state s draws:
  * in the fight mode both sides' (character, palette) and the arena's
- * stage, otherwise side 0 only (the select, result and clear screens show
- * P1; side 1 and the stage keep what they hold). A region whose owner
+ * stage, both sides while a practice select picks the dummy, otherwise
+ * side 0 only (the select, result and clear screens show P1; side 1 and
+ * the stage keep what they hold). A region whose owner
  * changes is emptied; nothing is expanded. Returns bit i when side i
  * changed, bit 2 for the stage. fight_prefetch expands about budget pixels
  * of what is still missing (a stage row counts its width): the stage, then

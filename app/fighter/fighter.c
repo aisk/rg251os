@@ -1,4 +1,6 @@
-/* Deterministic fighter rules and the arcade ladder: movement, prejump,
+/* Deterministic fighter rules and the game modes (arcade ladder, survival,
+ * practice): movement, run and
+ * backdash, prejump,
  * jumps, crouching, data-driven normals and specials with an input buffer,
  * motion and charge commands, cancels, projectiles with clashes, hurt/hit
  * boxes from the pack, hitstop, hitstun, blockstun, high/low/overhead guard,
@@ -62,6 +64,15 @@
  * damage (75%).
  * Normal is the original AI. Everything reads the state's rng and tick, so
  * replays and states stay deterministic.
+ * Game modes (L on the select screen): Arcade is the ladder. Survival
+ * fights random opponents (never the previous one) one round each with
+ * P1's life carried over, SURVIVAL_HEAL per mille back per win, a draw
+ * replaying the fight; the streak ends on a loss and the session's best is
+ * kept. Practice picks P1, then
+ * the dummy, which stands, crouches, guards everything (high or low) or
+ * fights as the CPU (R in the fight cycles it); life never drops under 1
+ * and both bars refill when a combo ends, and each side's last combo damage
+ * is shown. B in a paused fight quits to the select screen.
  * Combos: an unguarded hit (strike or projectile) on a defender still in
  * hitstun as the tick's contacts land continues the attacker's combo,
  * any other starts it at 1; the combo ends at the end of the first tick
@@ -136,6 +147,19 @@
  * thrower's elapsed reaches its THROW total, the one held takes the
  * system's throw hit (class throw, unguardable, it knocks down; a back
  * throw first moves it behind the thrower and sends it the other way).
+ * Run and backdash (the fighter's system's dash rule): on the ground and
+ * free, 6 released and 6 again within window ticks runs, 4 likewise
+ * backdashes. A run moves walk speed for run_startup ticks, then run speed
+ * (walk times run_scale); once it has lasted run_startup + run_min ticks,
+ * letting go of forward coasts run_grace ticks (forward again runs on) and
+ * skids run_stop ticks at a falling speed. A buffered move or UP ends a
+ * run at once (the move starts, the jump's prejump begins); a run never
+ * guards or throws. A backdash waits back_startup ticks, flies back_air
+ * ticks back back_distance pixels on a parabola back_height high (no
+ * gravity) and lands for back_stop ticks; it cannot guard or be thrown,
+ * strikes and projectiles miss it for its first back_invuln ticks, and a
+ * hit ends it (an airborne one falls). The AI runs in from afar in some
+ * plan windows and backdashes from some close swings it does not guard.
  * Cancels: a normal whose hit connected (hit or block) can be cancelled
  * into a special (cancel "special") or another normal (cancel "chain")
  * while its elapsed is inside startup + active; the buffered move starts on
@@ -145,7 +169,9 @@
  * Ladder: the select screen picks P1 (d-pad, any attack confirms; R
  * cycles the CPU level, shown top right, since the handheld has no core
  * option rows); each
- * stage is a match of ROUNDS_TO_WIN won rounds against a random character
+ * stage is a match of ROUNDS_TO_WIN won rounds (best of three; a draw
+ * scores for both, two at once is a loss; Auto keeps single rounds) against
+ * a random character
  * not yet beaten in this run (a mirror with the alternate palette only for
  * a one-character roster), fought on that opponent's home stage, or on
  * pack stage (opponent index % stages) when it has none. Every ladder round
@@ -154,7 +180,11 @@
  * stage; nothing moves through both and held keys are only recorded, so a
  * button held over them is no press. The round begins with FIGHT (shown
  * FIGHT_TICKS while the round runs) and ROUND_START (fight_start has
- * neither and sounds it at once). A loss
+ * neither and sounds it at once). Later rounds of a match skip the card
+ * and show ROUND N instead of READY. Arcade and survival rounds run a
+ * CLOCK_COUNTS clock from FIGHT (held in a pause, drawn over the centre
+ * box, red for the last ten); time over ends the round with both standing
+ * and the larger share of its own life wins (equal is a draw). A loss
  * shows the result screen, beating everyone the clear screen; both return
  * to select. Auto skips select and rotates P1 through the roster each run.
  * START pauses a fight (the pause screen dims it under P1's command list);
@@ -185,14 +215,17 @@ static const unsigned button_bit[4] = {BUTTON_HK, BUTTON_HP, BUTTON_LK, BUTTON_L
  * a follow-up comes after a contact one time in hit_follow and after a
  * whiff one time in whiff_follow (0 = never); a normal that connects is
  * cancelled into a motion special cancel times in 4; its hits deal damage
- * per mille (the ladder's CPU only). */
+ * per mille (the ladder's CPU only). Of 8 plan windows run runs in from
+ * afar, and of 32 close swings it does not guard backdash backdashes
+ * away. */
 static const struct level_ai {
-	uint8_t guard, wrong, react, hit_follow, whiff_follow, cancel, tech, tech_at, grab;
+	uint8_t guard, wrong, react, hit_follow, whiff_follow, cancel, tech, tech_at, grab, run,
+	    backdash;
 	uint16_t special, press, damage;
 } levels[LEVELS] = {
-    {14, 6, 4, 2, 4, 0, 6, 4, 1, 128, 16, 750},
-    {22, 4, 0, 1, 2, 0, 12, 3, 2, 64, 8, 1000},
-    {28, 1, 0, 1, 0, 3, 20, 2, 3, 24, 4, 1000},
+    {14, 6, 4, 2, 4, 0, 6, 4, 1, 1, 2, 128, 16, 750},
+    {22, 4, 0, 1, 2, 0, 12, 3, 2, 3, 4, 64, 8, 1000},
+    {28, 1, 0, 1, 0, 3, 20, 2, 3, 5, 3, 24, 4, 1000},
 };
 static int clamp(int x, int lo, int hi) { return x < lo ? lo : x > hi ? hi : x; }
 static uint32_t random_next(struct fight_state *s)
@@ -255,7 +288,7 @@ static void place(struct fight_state *s)
 	s->p[1].face = -1;
 	s->ended = s->cam = s->arena = s->shake = s->flash = 0;
 	for (int i = 0; i < 2; i++)
-		s->combo[i] = s->shown[i] = s->show[i] = s->best[i] = 0;
+		s->combo[i] = s->shown[i] = s->show[i] = s->best[i] = s->damage[i] = s->last[i] = 0;
 }
 void fight_reset(struct fight_state *s, int automatic)
 {
@@ -288,6 +321,8 @@ static void begin_round(struct fight_state *s, const struct assets *a, unsigned 
 	s->chr[1] = c1;
 	s->pal[0] = 0;
 	s->pal[1] = c0 == c1;
+	s->clock = intro && s->game != GAME_PRACTICE ? CLOCK_TICKS : 0;
+	s->bout = 1;
 	if (!intro)
 		sound(s, a, SOUND_ROUND_START, 0, 0);
 }
@@ -446,12 +481,13 @@ static int throwing(const struct fighter *p)
 {
 	return p->grab == GRAB_FORWARD || p->grab == GRAB_BACK;
 }
-/* Can q be thrown: standing or crouching on the ground (not in a prejump),
- * out of hitstun, blockstun, knockdowns and throws, and past its safe
- * ticks. */
+/* Can q be thrown: standing or crouching on the ground (not in a prejump
+ * or a backdash), out of hitstun, blockstun, knockdowns and throws, and
+ * past its safe ticks. */
 static int throwable(const struct fighter *q)
 {
-	return q->hp && grounded(q) && !q->squat && !q->stun && !q->down && !q->grab && !q->safe;
+	return q->hp && grounded(q) && !q->squat && !q->stun && !q->down && !q->grab && !q->safe &&
+	       q->dash != DASH_BACK;
 }
 /* Body distance: the larger push of the two fighters. */
 static int body(const struct fight_state *s, const struct assets *a)
@@ -464,6 +500,44 @@ static int in_throw_range(const struct fight_state *s, const struct assets *a, i
 {
 	const struct fighter *p = &s->p[i], *q = &s->p[1 - i];
 	return p->hp && throwable(q) && abs(px(q) - px(p)) <= body(s, a) + rule(s, a, i)->range;
+}
+/* ---- run and backdash ---- */
+static const struct dash_rule *dash_rule(const struct fight_state *s, const struct assets *a,
+					 int i)
+{
+	return &a->sys[who(s, a, i)->system].dash;
+}
+static int back_total(const struct dash_rule *d)
+{
+	return d->back_startup + d->back_air + d->back_stop;
+}
+/* A backdash's height after its tick e: a parabola over the airborne
+ * ticks, back on the ground on the last of them. */
+static int back_y(const struct dash_rule *d, int e)
+{
+	int t = e - d->back_startup + 1, n = d->back_air;
+	return t <= 0 || t >= n ? 0 : -(4 * d->back_height * t * (n - t)) / (n * n);
+}
+/* Strikes cannot touch fighter i in the first back_invuln ticks of a
+ * backdash. */
+static int evading(const struct fight_state *s, const struct assets *a, int i)
+{
+	const struct fighter *q = &s->p[i];
+	return q->dash == DASH_BACK && q->elapsed < dash_rule(s, a, i)->back_invuln;
+}
+/* A tap of numpad direction n (6 or 4) now: n this tick, the tick before
+ * without that direction, and n again before it within window ticks
+ * (the in-between ticks without it too). */
+static int tapped(const struct fighter *p, int n, unsigned window)
+{
+	if (numpad(history_at(p, 0), p->face) != n)
+		return 0;
+	for (unsigned k = 1; k <= window && k < HISTORY; k++) {
+		int m = numpad(history_at(p, k), p->face);
+		if (m % 3 == n % 3)
+			return k >= 2 && m == n;
+	}
+	return 0;
 }
 unsigned fight_pose(const struct fight_state *s, const struct assets *a, int i)
 {
@@ -488,6 +562,10 @@ unsigned fight_pose(const struct fight_state *s, const struct assets *a, int i)
 			       &c->action[p->block ? (low ? CROUCH_GUARD : GUARD)
 						   : (low ? CROUCH_HURT : HURT)],
 			       (uint32_t)p->elapsed, 0, NULL);
+	if (p->dash == DASH_BACK)
+		return step_at(a, &c->action[BACKDASH], (uint32_t)p->elapsed, 0, NULL);
+	if (p->dash)
+		return step_at(a, &c->action[RUN], s->tick, 1, NULL);
 	if (p->squat)
 		return step_at(a, &c->action[JUMP], 0, 0, NULL);
 	if (!grounded(p))
@@ -583,6 +661,12 @@ static uint32_t macro(int motion, uint32_t charge, uint32_t t, int face, uint32_
 	uint32_t key = (n <= 3 ? down : 0) | (n % 3 == 0 ? fwd : n % 3 == 1 ? back : 0);
 	return t == 4 ? key | button : key;
 }
+/* The AI's half of a 66 or 44: key now unless the last tick held it, so
+ * held keys turn into taps. */
+static uint32_t tap(const struct fighter *p, uint32_t key)
+{
+	return history_at(p, 0) & (key >> RETRO_DEVICE_ID_JOYPAD_UP) ? 0 : key;
+}
 static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
 {
 	struct fighter *p = &s->p[i];
@@ -630,6 +714,10 @@ static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
 				low = !low;
 			return away | (low ? KEY(DOWN) : 0u);
 		}
+		/* Some swings it does not guard, up close, it backdashes from. */
+		if (h - lv->guard < lv->backdash && dist < 120 && !p->move && !p->stun &&
+		    grounded(p) && !p->dash)
+			return tap(p, away);
 	}
 	for (int k = 0; k < MAX_PROJECTILES; k++) {
 		const struct shot *sh = &s->shot[k];
@@ -716,13 +804,21 @@ static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
 	unsigned window = (s->tick + (unsigned)i * 17) / 29, plan = window * 2654435761u >> 24;
 	int button = (int)(plan & 3), low = (int)(plan >> 2) & 1;
 	const struct move *m = &c->move[strength[button] + (low ? CROUCH_LP : 0)];
-	if (waking < 0 && ((plan >> 3) & 7) < lv->grab) {
+	/* lv->run windows in 8 run in (66, held until the target is near). */
+	int grab = waking < 0 && ((plan >> 3) & 7) < lv->grab,
+	    near = grab ? body(s, a) + rule(s, a, i)->range : m->reach + 20,
+	    run = ((window * 2246822519u) >> 29) < lv->run;
+	if (p->dash == DASH_RUN || p->dash == DASH_COAST)
+		return dist > near + 40 ? toward : 0;
+	if (run && dist > 180 && !p->move && !p->stun && !p->dash && grounded(p))
+		return tap(p, toward);
+	if (grab) {
 		if (!p->move && !p->stun && grounded(p) && in_throw_range(s, a, i))
 			return (plan & 0x40 && plan & 0x80 ? away : toward) |
 			       (plan & 1 ? KEY(A) : KEY(X));
-		return dist > body(s, a) + rule(s, a, i)->range ? toward : 0;
+		return dist > near ? toward : 0;
 	}
-	uint32_t key = dist > m->reach + 20 ? toward : 0;
+	uint32_t key = dist > near ? toward : 0;
 	int press = waking < 0 ? r % lv->press == 0
 			       : s->level != LEVEL_EASY && waking <= m->startup + 1;
 	if (!key && !p->move && !p->stun && press)
@@ -841,7 +937,7 @@ static void start(struct fight_state *s, const struct assets *a, int i, int k)
 	const struct character *c = who(s, a, i);
 	struct fighter *p = &s->p[i];
 	p->move = k + 1;
-	p->elapsed = p->hit = p->block = p->squat = p->walk = p->clock = 0;
+	p->elapsed = p->hit = p->block = p->squat = p->walk = p->clock = p->dash = 0;
 	p->buffer = p->age = 0;
 	p->crouch = k >= CROUCH_LP && k <= CROUCH_HK;
 	if (c->move[k].special)
@@ -879,9 +975,69 @@ static void begin_throw(struct fight_state *s, const struct assets *a, int i, in
 {
 	struct fighter *p = &s->p[i];
 	p->grab = back ? GRAB_BACK : GRAB_FORWARD;
-	p->elapsed = p->hit = p->block = p->squat = p->walk = p->crouch = p->clock = 0;
+	p->elapsed = p->hit = p->block = p->squat = p->walk = p->crouch = p->clock = p->dash = 0;
 	p->buffer = p->age = 0;
 	sound(s, a, SOUND_WHOOSH_HEAVY, i, 0);
+}
+/* Backdash motion of its tick elapsed: back the next share of
+ * back_distance on each airborne tick, up and down the arc; JUMP on the
+ * first of them, LAND on the last. */
+static void back_move(struct fight_state *s, const struct assets *a, int i)
+{
+	struct fighter *p = &s->p[i];
+	const struct dash_rule *d = dash_rule(s, a, i);
+	int j = p->elapsed - d->back_startup, n = d->back_air, far = QUARTER(d->back_distance);
+	if (j < 0 || j >= n)
+		return;
+	p->x -= p->face * (far * (j + 1) / n - far * j / n);
+	p->y = back_y(d, p->elapsed);
+	if (!j)
+		sound(s, a, SOUND_JUMP, i, 0);
+	if (j == n - 1)
+		sound(s, a, SOUND_LAND, i, 0);
+}
+/* One tick of a run or backdash (the tick it began did its own). Returns 1
+ * while it holds the fighter, 0 once it is over or a buffered move or UP
+ * cancels a run (the caller then acts as usual; a run never throws). */
+static int dashing(struct fight_state *s, const struct assets *a, int i, uint32_t keys)
+{
+	struct fighter *p = &s->p[i];
+	const struct dash_rule *d = dash_rule(s, a, i);
+	const struct stats *st = &who(s, a, i)->stats;
+	age(p);
+	if (p->dash == DASH_BACK) {
+		if (p->elapsed >= back_total(d)) {
+			p->dash = p->elapsed = 0;
+			return 0;
+		}
+		back_move(s, a, i);
+		return 1;
+	}
+	if (p->dash != DASH_STOP && (p->buffer || (keys & KEY(UP)))) {
+		if (keys & KEY(UP))
+			p->dash = p->elapsed = 0;
+		return 0;
+	}
+	int fwd = numpad(direction(keys), p->face) % 3 == 0;
+	if (p->dash == DASH_RUN && !fwd && p->elapsed >= d->run_startup + d->run_min) {
+		p->dash = d->run_grace ? DASH_COAST : DASH_STOP;
+		p->elapsed = 0;
+	} else if (p->dash == DASH_COAST && fwd) {
+		p->dash = DASH_RUN;
+		p->elapsed = d->run_startup + d->run_min;
+	} else if (p->dash == DASH_COAST && p->elapsed >= d->run_grace) {
+		p->dash = DASH_STOP;
+		p->elapsed = 0;
+	}
+	if (p->dash == DASH_STOP && p->elapsed >= d->run_stop) {
+		p->dash = p->elapsed = 0;
+		return 0;
+	}
+	int v = p->dash == DASH_STOP ? st->run * (d->run_stop - p->elapsed) / (d->run_stop + 1)
+		: p->dash == DASH_RUN && p->elapsed < d->run_startup ? st->walk
+								     : st->run;
+	p->x += p->face * v;
+	return 1;
 }
 /* One fighter's tick before contacts; returns 1 if it was frozen. reach:
  * the opponent was in throw range and throwable as the tick began. */
@@ -945,22 +1101,36 @@ static int update(struct fight_state *s, const struct assets *a, int i, uint32_t
 	}
 	if (p->slide)
 		slide(s, a, p, q);
-	if (!grounded(p) && !p->move)
+	if (!grounded(p) && !p->move && p->dash != DASH_BACK)
 		fall(s, a, i);
 	p->walk = 0;
-	if (!p->move && !p->stun) {
+	if (!p->move && !p->stun && p->dash && dashing(s, a, i, keys)) {
+		/* Running, skidding or backdashing: nothing else this tick. */
+	} else if (!p->move && !p->stun) {
 		int ground = grounded(p);
 		if (ground)
 			p->face = q->x >= p->x ? 1 : -1;
 		p->crouch = ground && !p->squat && (keys & KEY(DOWN));
 		/* Forward or back with HP or HK near a throwable opponent
-		 * throws (on this first tick); otherwise it is the normal. */
+		 * throws (on this first tick, never out of a run); otherwise it
+		 * is the normal. 66 runs, 44 backdashes. */
 		int n = numpad(direction(keys), p->face);
-		if (p->buffer && ground && reach && (n == 4 || n == 6) &&
+		const struct dash_rule *d = dash_rule(s, a, i);
+		if (p->buffer && ground && reach && !p->dash && (n == 4 || n == 6) &&
 		    (p->buffer - 1 == STAND_HP || p->buffer - 1 == STAND_HK)) {
 			begin_throw(s, a, i, n == 4);
 		} else if (p->buffer && ground) {
 			start(s, a, i, p->buffer - 1);
+		} else if (ground && !p->squat && tapped(p, 6, d->window)) {
+			p->dash = DASH_RUN;
+			p->elapsed = p->block = 0;
+			s->runs++;
+			p->x += p->face * c->stats.walk;
+		} else if (ground && !p->squat && tapped(p, 4, d->window)) {
+			p->dash = DASH_BACK;
+			p->elapsed = p->block = 0;
+			s->backdashes++;
+			back_move(s, a, i);
 		} else if (p->squat) {
 			if (!--p->squat) {
 				p->vy = c->stats.jump.vy;
@@ -1012,7 +1182,7 @@ static int update(struct fight_state *s, const struct assets *a, int i, uint32_t
 static int contact(const struct fight_state *s, const struct assets *a, int i, int at[2])
 {
 	const struct fighter *p = &s->p[i], *q = &s->p[1 - i];
-	if (!p->move || !q->hp || q->grab)
+	if (!p->move || !q->hp || q->grab || evading(s, a, 1 - i))
 		return 0;
 	/* A fighter knocked down is out of reach, except lying for OTG moves. */
 	if (q->down && !(lying(q, who(s, a, 1 - i)) &&
@@ -1038,7 +1208,7 @@ static int shot_hits_body(const struct fight_state *s, const struct assets *a,
 			  const struct shot *sh, int i, int at[2])
 {
 	const struct fighter *q = &s->p[i];
-	if (q->down || q->grab)
+	if (q->down || q->grab || evading(s, a, i))
 		return 0;
 	const struct step *hit = &a->step[shot_step(s, a, sh)],
 			  *body = &a->step[fight_pose(s, a, i)];
@@ -1068,7 +1238,7 @@ static int shots_clash(const struct fight_state *s, const struct assets *a,
 /* Can the defender block this hit with these keys? */
 static int blocks(const struct fighter *q, uint32_t keys, const struct hit *h)
 {
-	if (q->move || q->down || (q->stun && q->block != 1) || !grounded(q) ||
+	if (q->move || q->down || q->dash || (q->stun && q->block != 1) || !grounded(q) ||
 	    !(keys & back_key(q)))
 		return 0;
 	int low = (keys & KEY(DOWN)) != 0;
@@ -1083,16 +1253,20 @@ static int permille(int v, int factor)
 /* Damage, stun and pushback on fighter q (character qc); a strike also
  * freezes its attacker p (projectiles pass p = NULL). knock: an unguarded
  * knockdown hit that leaves q alive puts it down (FALLING) instead of in
- * hitstun. */
-static void struck(struct fight_state *s, struct fighter *p, struct fighter *q,
-		   const struct character *qc, const struct hit *h, int guarded, int face,
-		   uint32_t keys, int scale, int knock)
+ * hitstun. Practice never takes the last point of life. Returns the
+ * damage dealt (before the life bar's floor). */
+static int struck(struct fight_state *s, struct fighter *p, struct fighter *q,
+		  const struct character *qc, const struct hit *h, int guarded, int face,
+		  uint32_t keys, int scale, int knock)
 {
 	int v = guarded ? h->chip : h->damage;
 	if (scale != 1000)
 		v = permille(v, scale);
-	q->hp = clamp(q->hp - permille(v, qc->stats.defense), 0, qc->stats.life);
-	q->move = q->hit = q->squat = 0;
+	int dealt = permille(v, qc->stats.defense);
+	q->hp = clamp(q->hp - dealt, 0, qc->stats.life);
+	if (s->game == GAME_PRACTICE && !q->hp)
+		q->hp = 1;
+	q->move = q->hit = q->squat = q->dash = 0;
 	q->stun = guarded ? h->blockstun : h->hitstun;
 	q->block = guarded;
 	q->elapsed = 0;
@@ -1116,6 +1290,7 @@ static void struck(struct fight_state *s, struct fighter *p, struct fighter *q,
 	s->tone = 2400;
 	s->hits++;
 	s->guards += (unsigned)guarded;
+	return dealt;
 }
 /* A spark of system sy's effect key at world x, screen y: the first free
  * slot, else the oldest (lowest slot on ties). */
@@ -1160,12 +1335,16 @@ static void react(struct fight_state *s, const struct assets *a, int i, const st
 		s->flash = FLASH_TICKS;
 	}
 }
-/* An unguarded hit by side i: the next hit of a combo when the defender was
- * still in hitstun, else the first. From the second hit on the count is on
- * screen and its timer waits until the combo ends. */
-static void count_hit(struct fight_state *s, int i, int stunned)
+/* An unguarded hit by side i dealing dealt: the next hit of a combo when
+ * the defender was still in hitstun, else the first. From the second hit
+ * on the count is on screen and its timer waits until the combo ends.
+ * damage sums the combo's hits, last keeps it after the combo ends. */
+#define MAX_COMBO_DAMAGE 65535
+static void count_hit(struct fight_state *s, int i, int stunned, int dealt)
 {
 	uint32_t n = stunned && s->combo[i] ? s->combo[i] + 1 : 1;
+	uint32_t total = (n > 1 ? s->damage[i] : 0) + (uint32_t)dealt;
+	s->damage[i] = s->last[i] = total < MAX_COMBO_DAMAGE ? total : MAX_COMBO_DAMAGE;
 	s->combo[i] = n < MAX_COMBO ? n : MAX_COMBO;
 	if (s->combo[i] >= 2) {
 		s->shown[i] = s->combo[i];
@@ -1182,6 +1361,7 @@ static void seize(struct fight_state *s, const struct assets *a, int i)
 	struct fighter *p = &s->p[i], *q = &s->p[1 - i];
 	q->grab = GRAB_HELD;
 	q->elapsed = q->move = q->hit = q->stun = q->block = q->squat = q->walk = q->crouch = 0;
+	q->dash = p->dash = 0;
 	q->buffer = q->age = q->clock = q->freeze = q->slide = q->corner = q->y = q->vy = 0;
 	p->freeze = p->slide = p->corner = 0;
 	q->face = -p->face;
@@ -1195,7 +1375,7 @@ static void tech(struct fight_state *s, const struct assets *a, int i)
 	for (int j = 0; j < 2; j++) {
 		struct fighter *f = &s->p[j];
 		f->grab = GRAB_NONE;
-		f->move = f->hit = f->squat = f->walk = f->crouch = f->buffer = f->age = 0;
+		f->move = f->hit = f->squat = f->walk = f->crouch = f->buffer = f->age = f->dash = 0;
 		f->stun = t->tech_stun;
 		f->block = 1;
 		f->elapsed = 0;
@@ -1224,8 +1404,7 @@ static void release(struct fight_state *s, const struct assets *a, int i, int sc
 	if (back)
 		q->x = wall(s, a, p->x - p->face * QUARTER(body(s, a)));
 	int dir = back ? -p->face : p->face;
-	struck(s, p, q, who(s, a, 1 - i), h, 0, dir, 0, scale, 1);
-	count_hit(s, i, 0);
+	count_hit(s, i, 0, struck(s, p, q, who(s, a, 1 - i), h, 0, dir, 0, scale, 1));
 	react(s, a, i, h, 0, 0, 0, at, dir, alive && !q->hp);
 	s->throws++;
 }
@@ -1318,11 +1497,12 @@ static void combat(struct fight_state *s, const struct assets *a, const uint32_t
 		struct fighter *p = &s->p[i];
 		int alive = s->p[1 - i].hp > 0;
 		/* Only a move's last hit group knocks down. */
-		struck(s, p, &s->p[1 - i], who(s, a, 1 - i), &move[i]->hit, guarded[i], p->face,
-		       keys[1 - i], scale[i],
-		       (move[i]->hit.flags & FLAG_KNOCKDOWN) && group[i] == move[i]->groups);
+		int dealt = struck(s, p, &s->p[1 - i], who(s, a, 1 - i), &move[i]->hit, guarded[i],
+				   p->face, keys[1 - i], scale[i],
+				   (move[i]->hit.flags & FLAG_KNOCKDOWN) &&
+				       group[i] == move[i]->groups);
 		if (!guarded[i])
-			count_hit(s, i, stunned[1 - i]);
+			count_hit(s, i, stunned[1 - i], dealt);
 		react(s, a, i, &move[i]->hit, p->move, move[i]->slash, guarded[i], at[i], p->face,
 		      alive && !s->p[1 - i].hp);
 		if (p->move)
@@ -1333,10 +1513,11 @@ static void combat(struct fight_state *s, const struct assets *a, const uint32_t
 		if (landed[k]) {
 			int d = 1 - sh->owner, alive = s->p[d].hp > 0;
 			const struct hit *h = &shot_type(s, a, sh)->hit;
-			struck(s, NULL, &s->p[d], who(s, a, d), h, shot_guard[k], sh->face, keys[d],
-			       scale[sh->owner], h->flags & FLAG_KNOCKDOWN);
+			int dealt = struck(s, NULL, &s->p[d], who(s, a, d), h, shot_guard[k],
+					   sh->face, keys[d], scale[sh->owner],
+					   h->flags & FLAG_KNOCKDOWN);
 			if (!shot_guard[k])
-				count_hit(s, sh->owner, stunned[d]);
+				count_hit(s, sh->owner, stunned[d], dealt);
 			react(s, a, sh->owner, h, 0, 0, shot_guard[k], shot_at[k], sh->face,
 			      alive && !s->p[d].hp);
 		}
@@ -1355,9 +1536,37 @@ static void combat(struct fight_state *s, const struct assets *a, const uint32_t
 	/* A combo ends once its defender is out of hitstun. */
 	for (int i = 0; i < 2; i++)
 		if (!in_hitstun(&s->p[1 - i]))
-			s->combo[i] = 0;
+			s->combo[i] = s->damage[i] = 0;
+	/* Practice: life refills once no combo runs on a fighter that is up
+	 * and free of throws. */
+	for (int i = 0; s->game == GAME_PRACTICE && i < 2; i++) {
+		struct fighter *f = &s->p[i];
+		if (!s->combo[1 - i] && !in_hitstun(f) && !f->down && !f->grab)
+			f->hp = who(s, a, i)->stats.life;
+	}
 	if (!p0->hp || !p1->hp)
 		s->ended = 1;
+}
+/* The practice dummy's keys: nothing, down, the guard each incoming
+ * strike or projectile needs (crouching for lows), or the CPU. */
+static uint32_t dummy(struct fight_state *s, const struct assets *a)
+{
+	const struct fighter *p = &s->p[1], *q = &s->p[0];
+	if (s->dummy == DUMMY_CROUCH)
+		return KEY(DOWN);
+	if (s->dummy == DUMMY_CPU)
+		return ai(s, a, 1);
+	if (s->dummy != DUMMY_GUARD)
+		return 0;
+	int range = who(s, a, 1)->stats.guard_range, guard = -1;
+	if (q->move && abs(px(q) - px(p)) < range)
+		guard = who(s, a, 0)->move[q->move - 1].hit.guard;
+	for (int k = 0; k < MAX_PROJECTILES; k++) {
+		const struct shot *sh = &s->shot[k];
+		if (sh->kind && !sh->owner && abs(sh->x - px(p)) < range)
+			guard = guard == GUARD_LOW ? guard : shot_type(s, a, sh)->hit.guard;
+	}
+	return guard < 0 ? 0 : back_key(p) | (guard == GUARD_LOW ? KEY(DOWN) : 0u);
 }
 /* ---- ladder ---- */
 /* Characters P1 meets in a run: everyone else, or itself in a one-character
@@ -1391,47 +1600,114 @@ static void begin_run(struct fight_state *s, const struct assets *a, unsigned c0
 	s->beaten = 0;
 	next_stage(s, a);
 }
+/* The next survival fight: a random opponent (not the last one when there
+ * is a choice), P1 at its carried life. */
+static void survive(struct fight_state *s, const struct assets *a)
+{
+	uint32_t left = opponents(a, s->chr[0]);
+	if (count(left) > 1)
+		left &= ~(1u << s->chr[1]);
+	unsigned pick = random_next(s) % count(left), c = 0;
+	for (;; c++)
+		if ((left >> c) & 1 && !pick--)
+			break;
+	s->stage = 1;
+	s->wins[0] = s->wins[1] = 0;
+	begin_round(s, a, s->chr[0], c, 1);
+	s->p[0].hp = (int32_t)s->carry;
+}
+/* Rounds to win a match in the current game; Auto (the benchmark) keeps
+ * single rounds so its P1 rotation stays quick. */
+static unsigned rounds(const struct fight_state *s)
+{
+	return s->game == GAME_ARCADE && !s->automatic ? ROUNDS_TO_WIN : 1;
+}
+/* A finished round's winner: the side still standing, after time over the
+ * larger share of its own life; -1 for a draw (double KO, equal shares). */
+static int winner(const struct fight_state *s, const struct assets *a)
+{
+	int alive0 = s->p[0].hp > 0, alive1 = s->p[1].hp > 0;
+	if (alive0 != alive1)
+		return alive0 ? 0 : 1;
+	if (!alive0)
+		return -1;
+	int64_t share0 = (int64_t)s->p[0].hp * who(s, a, 1)->stats.life,
+		share1 = (int64_t)s->p[1].hp * who(s, a, 0)->stats.life;
+	return share0 == share1 ? -1 : share0 > share1 ? 0 : 1;
+}
+/* Leave the fight for the result or clear screen. */
+static void match_over(struct fight_state *s, uint32_t mode)
+{
+	place(s);
+	s->mode = mode;
+	s->timer = s->carry = s->clock = s->bout = 0;
+	s->wins[0] = s->wins[1] = 0;
+}
 static void to_select(struct fight_state *s, const struct assets *a)
 {
 	place(s);
 	s->mode = MODE_SELECT;
 	s->timer = s->beaten = s->stage = s->wins[0] = s->wins[1] = 0;
+	s->clock = s->bout = 0;
 	s->run++;
 	s->chr[1] = s->chr[0];
 	s->pal[0] = 0;
 	s->pal[1] = 1;
+	s->picking = s->carry = 0;
 	if (s->automatic)
 		begin_run(s, a, s->run % a->characters);
 }
 static void round_over(struct fight_state *s, const struct assets *a)
 {
-	int alive0 = s->p[0].hp > 0, alive1 = s->p[1].hp > 0;
+	int w = winner(s, a);
 	s->round++;
-	if (alive0 != alive1)
-		s->wins[alive0 ? 0 : 1]++;
-	if (s->wins[0] >= ROUNDS_TO_WIN) {
-		s->beaten |= 1u << s->chr[1];
-		uint32_t all = opponents(a, s->chr[0]);
-		if ((s->beaten & all) == all) {
-			place(s);
-			s->mode = MODE_CLEAR;
-			s->timer = 0;
-			s->wins[0] = s->wins[1] = 0;
-		} else
-			next_stage(s, a);
-	} else if (s->wins[1] >= ROUNDS_TO_WIN) {
-		place(s);
-		s->mode = MODE_RESULT;
-		s->timer = 0;
-		s->wins[0] = s->wins[1] = 0;
-	} else {
-		/* Another round of the same match, both at full life. */
+	if (s->game == GAME_SURVIVAL && w == 0) {
+		/* A survival win: count it, heal a little, on to the next. */
+		int life = who(s, a, 0)->stats.life, hp = s->p[0].hp + life * SURVIVAL_HEAL / 1000;
+		s->streak += s->streak < MAX_STREAK;
+		s->record = s->streak > s->record ? s->streak : s->record;
+		s->carry = (uint32_t)(hp < life ? hp : life);
+		survive(s, a);
+	} else if (s->game == GAME_SURVIVAL && w < 0) {
+		/* A draw: the fight again from the life P1 brought in. */
 		begin_round(s, a, s->chr[0], s->chr[1], 1);
+		s->p[0].hp = (int32_t)s->carry;
+	} else if (s->game == GAME_SURVIVAL) {
+		match_over(s, MODE_RESULT);
+	} else if (s->game == GAME_PRACTICE) {
+		/* Practice never takes the last point of life; just in case. */
+		begin_round(s, a, s->chr[0], s->chr[1], 1);
+	} else {
+		/* Arcade: the round's winner scores, a draw scores for both. P1
+		 * must take the match outright: two at once is a loss. */
+		for (int i = 0; i < 2; i++)
+			s->wins[i] += w < 0 || w == i;
+		if (s->wins[1] >= rounds(s)) {
+			match_over(s, MODE_RESULT);
+		} else if (s->wins[0] >= rounds(s)) {
+			s->beaten |= 1u << s->chr[1];
+			uint32_t all = opponents(a, s->chr[0]);
+			if ((s->beaten & all) == all)
+				match_over(s, MODE_CLEAR);
+			else
+				next_stage(s, a);
+		} else {
+			/* The next round of the match: both at full life, READY
+			 * (ROUND N) without the versus card. */
+			uint32_t bout = s->bout;
+			begin_round(s, a, s->chr[0], s->chr[1], 1);
+			s->bout = bout + 1;
+			s->timer = INTRO_TICKS;
+		}
 	}
 }
+/* The select screen: the cursor is P1 (chr[0], chr[1] follows it), or the
+ * dummy (chr[1]) once a practice P1 is picked. An attack button picks:
+ * the arcade ladder, a survival run or, in practice, P1 and then the
+ * dummy. */
 static void select_screen(struct fight_state *s, const struct assets *a, uint32_t pressed)
 {
-	int n = (int)a->characters, c = (int)s->chr[0];
+	int n = (int)a->characters, c = (int)s->chr[s->picking];
 	if (s->automatic) {
 		begin_run(s, a, s->run % a->characters);
 		return;
@@ -1446,9 +1722,29 @@ static void select_screen(struct fight_state *s, const struct assets *a, uint32_
 		c -= 4;
 	if ((pressed & KEY(DOWN)) && c + 4 < n)
 		c += 4;
-	s->chr[0] = s->chr[1] = (uint32_t)c;
-	if (pressed & ATTACKS)
+	if (s->picking) {
+		s->chr[1] = (uint32_t)c;
+		s->pal[1] = s->chr[1] == s->chr[0];
+	} else
+		s->chr[0] = s->chr[1] = (uint32_t)c;
+	if (!(pressed & ATTACKS))
+		return;
+	if (s->game == GAME_ARCADE) {
 		begin_run(s, a, (unsigned)c);
+	} else if (s->game == GAME_SURVIVAL) {
+		s->streak = 0;
+		s->carry = (uint32_t)a->chr[c].stats.life;
+		survive(s, a);
+	} else if (!s->picking) {
+		/* The dummy cursor starts on the next character. */
+		s->picking = 1;
+		s->chr[1] = (uint32_t)(n > 1 ? (c + 1) % n : c);
+		s->pal[1] = s->chr[1] == s->chr[0];
+	} else {
+		s->picking = 0;
+		s->stage = 1;
+		begin_round(s, a, s->chr[0], s->chr[1], 1);
+	}
 }
 void fight_step(struct fight_state *s, const struct assets *a, uint32_t input,
 		uint32_t second, int human)
@@ -1464,14 +1760,30 @@ void fight_step(struct fight_state *s, const struct assets *a, uint32_t input,
 		else
 			s->paused ^= 1;
 	}
-	if (pressed & KEY(L))
+	/* L toggles the box overlay, or on the select screen cycles the game
+	 * mode (back to picking P1). */
+	int choosing = s->mode == MODE_SELECT && !s->automatic && !s->paused;
+	if ((pressed & KEY(L)) && choosing) {
+		s->game = (s->game + 1) % GAMES;
+		s->chr[1] = s->chr[0];
+		s->pal[1] = 1;
+		s->picking = 0;
+	} else if (pressed & KEY(L))
 		s->boxes ^= 1;
-	/* R cycles the stress scene, or on the select screen the CPU level
-	 * (Easy, Normal, Hard). */
-	if ((pressed & KEY(R)) && s->mode == MODE_SELECT && !s->automatic && !s->paused)
+	/* R cycles the stress scene, on the select screen the CPU level (Easy,
+	 * Normal, Hard) and in a practice fight the dummy. */
+	if ((pressed & KEY(R)) && choosing)
 		s->level = (s->level + 1) % LEVELS;
+	else if ((pressed & KEY(R)) && s->mode == MODE_FIGHT && s->game == GAME_PRACTICE)
+		s->dummy = (s->dummy + 1) % DUMMIES;
 	else if (pressed & KEY(R))
 		s->stress = (s->stress + 1) % 4;
+	/* B in a paused fight quits to the select screen. */
+	if (s->paused && (pressed & KEY(B)) && s->mode == MODE_FIGHT && !s->automatic) {
+		s->paused = 0;
+		to_select(s, a);
+		return;
+	}
 	if (s->paused)
 		return;
 	if (s->automatic)
@@ -1524,8 +1836,8 @@ void fight_step(struct fight_state *s, const struct assets *a, uint32_t input,
 		 * plays; nothing hits. */
 		for (int i = 0; i < 2; i++) {
 			struct fighter *p = &s->p[i];
-			if (p->move)
-				p->move = p->elapsed = p->hit = 0;
+			if (p->move || p->dash)
+				p->move = p->elapsed = p->hit = p->dash = 0;
 			if (p->down)
 				knocked(s, a, i);
 			else if (!grounded(p))
@@ -1540,8 +1852,18 @@ void fight_step(struct fight_state *s, const struct assets *a, uint32_t input,
 	}
 	uint32_t keys[2];
 	keys[0] = s->automatic ? ai(s, a, 0) : input;
-	keys[1] = human ? second : ai(s, a, 1);
+	keys[1] = human				? second
+		  : s->game == GAME_PRACTICE ? dummy(s, a)
+					     : ai(s, a, 1);
 	combat(s, a, keys, !human && !s->automatic);
+	/* The clock runs out: time over, the loser's KO sound (none on a
+	 * draw) starts the win music. */
+	if (s->clock && !s->ended && !--s->clock) {
+		s->ended = 1;
+		int w = winner(s, a);
+		if (w >= 0)
+			sound(s, a, SOUND_KO, (unsigned)(1 - w), 0);
+	}
 }
 /* ---- drawing ---- */
 static void rect(struct scene *s, int x, int y, int w, int h, uint16_t color, int blend,
@@ -1550,6 +1872,15 @@ static void rect(struct scene *s, int x, int y, int w, int h, uint16_t color, in
 	if (s->count < COMMANDS)
 		s->cmd[s->count++] = (struct command){
 		    RECT, x, y, w, h, 0, 0, blend, color, (uint8_t)alpha};
+}
+/* v in decimal (at most four digits). */
+static void number(char *out, unsigned v)
+{
+	for (unsigned d = 1000; d > 1; d /= 10)
+		if (v >= d)
+			*out++ = (char)('0' + v / d % 10);
+	*out++ = (char)('0' + v % 10);
+	*out = 0;
 }
 /* Compact original 3x5 glyphs: digits, then the limited HUD alphabet. */
 static const char alphabet[] = "0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ:-/+[]>.";
@@ -1855,13 +2186,30 @@ static void select_difficulty(struct scene *out, const struct fight_state *s)
 	difficulty(out, s, 12);
 	text(out, 464 - text_width(level_names[s->level]) - text_width("R "), 12, "R", 0x8410);
 }
+/* The game modes' names and colours (select screen, versus card, HUD). */
+static const char *const game_names[GAMES] = {"ARCADE", "SURVIVAL", "PRACTICE"};
+static const uint16_t game_colors[GAMES] = {0xffff, 0xfd20, 0x07ff};
+static const char *const dummy_names[DUMMIES] = {"STAND", "CROUCH", "GUARD ALL", "CPU"};
+/* The select screen's game mode at the top left, with the key that
+ * changes it in grey before it (and the session's survival record). */
+static void select_game(struct scene *out, const struct fight_state *s)
+{
+	text(out, 16, 12, "L", 0x8410);
+	text(out, 16 + text_width("L "), 12, game_names[s->game], game_colors[s->game]);
+	if (s->game == GAME_SURVIVAL && s->record) {
+		char line[16] = "BEST ";
+		number(line + 5, s->record);
+		text(out, 16 + text_width("L SURVIVAL  "), 12, line, 0xbdf7);
+	}
+}
 /* The select screen's command list: the highlighted fighter on the left,
  * its list in a panel on the right. */
 static void select_list(const struct fight_state *s, const struct assets *a, struct scene *out)
 {
-	const struct character *c = &a->chr[s->chr[0]];
+	int i = (int)s->picking;
+	const struct character *c = &a->chr[s->chr[i]];
 	rect(out, 0, 262, 190, 2, 0x8c50, OPAQUE, 255);
-	idle_sprite(out, s, a, 0, 96, 262, 0);
+	idle_sprite(out, s, a, i, 96, 262, 0);
 	text(out, 96 - text_width(c->name) / 2, 270, c->name, 0xffff);
 	text(out, 16, 290, "ATTACK TO FIGHT", 0x8410);
 	text(out, 16, 304, "START BACK", 0x8410);
@@ -1869,10 +2217,16 @@ static void select_list(const struct fight_state *s, const struct assets *a, str
 	text(out, 206, 40, c->name, 0xffe0);
 	move_list(out, c, 206, 60, 14, 1);
 }
+/* The select screen: the game mode (top left), the difficulty (top
+ * right), the roster grid with the cursor and P1's pose. Picking a
+ * practice dummy keeps P1 outlined in green, outlines the dummy cursor in
+ * cyan and shows both poses facing each other. */
 static void select_scene(const struct fight_state *s, const struct assets *a, struct scene *out)
 {
 	rect(out, 0, 0, FW, FH, 0x0841, OPAQUE, 255);
-	text(out, 240 - text_width("SELECT") / 2, 12, "SELECT", 0xffff);
+	const char *title = s->picking ? "DUMMY" : "SELECT";
+	text(out, 240 - text_width(title) / 2, 12, title, 0xffff);
+	select_game(out, s);
 	select_difficulty(out, s);
 	if (s->list) {
 		select_list(s, a, out);
@@ -1880,48 +2234,67 @@ static void select_scene(const struct fight_state *s, const struct assets *a, st
 	}
 	for (unsigned k = 0; k < a->characters; k++) {
 		int x = 16 + (int)(k % 4) * 114, y = 40 + (int)(k / 4) * 20;
+		int cursor = k == s->chr[s->picking];
 		rect(out, x, y, 108, 18, 0x2124, OPAQUE, 255);
-		if (k == s->chr[0])
+		if (s->picking && k == s->chr[0])
 			outline(out, (struct area){x, y, 108, 18}, 0x07e0, 0, 2);
-		text(out, x + 6, y + 4, a->chr[k].name, k == s->chr[0] ? 0xffe0 : 0xffff);
+		if (cursor)
+			outline(out, (struct area){x + (s->picking ? 3 : 0), y + (s->picking ? 3 : 0),
+						   108 - (s->picking ? 6 : 0), 18 - (s->picking ? 6 : 0)},
+				s->picking ? 0x07ff : 0x07e0, 0, 2);
+		text(out, x + 6, y + 4, a->chr[k].name, cursor ? 0xffe0 : 0xffff);
 	}
 	rect(out, 0, 300, FW, 2, 0x8c50, OPAQUE, 255);
+	if (s->picking) {
+		idle_sprite(out, s, a, 0, 100, 300, 0);
+		idle_sprite(out, s, a, 1, 380, 300, 1);
+		text(out, 180, 240, "P1", 0x07e0);
+		text(out, 180, 254, a->chr[s->chr[0]].name, 0xffff);
+		text(out, 180, 272, "DUMMY", 0x07ff);
+		text(out, 180, 286, a->chr[s->chr[1]].name, 0xffff);
+		return;
+	}
 	idle_sprite(out, s, a, 0, 120, 300, 0);
 	text(out, 220, 240, "P1", 0x07e0);
 	text(out, 220, 254, a->chr[s->chr[0]].name, 0xffff);
-	text(out, 220, 272, "ATTACK TO FIGHT", 0x8410);
+	text(out, 220, 272, s->game == GAME_PRACTICE ? "ATTACK TO PICK DUMMY" : "ATTACK TO FIGHT",
+	     0x8410);
 	text(out, 220, 286, "START COMMANDS", 0x8410);
 }
 static void screen_scene(const struct fight_state *s, const struct assets *a, struct scene *out)
 {
 	char line[24];
 	unsigned all = count(opponents(a, s->chr[0]));
-	int clear = s->mode == MODE_CLEAR;
+	int clear = s->mode == MODE_CLEAR, survival = s->game == GAME_SURVIVAL;
 	rect(out, 0, 0, FW, FH, clear ? 0x0110 : 0x2000, OPAQUE, 255);
-	const char *title = clear ? "ALL CLEAR" : "YOU LOSE";
+	const char *title = clear ? "ALL CLEAR" : survival ? "SURVIVAL OVER" : "YOU LOSE";
 	text(out, 240 - text_width(title) / 2, 60, title, clear ? 0xffe0 : 0xf800);
 	text(out, 240 - text_width(a->chr[s->chr[0]].name) / 2, 90, a->chr[s->chr[0]].name,
 	     0xffff);
-	unsigned beaten = count(s->beaten);
-	strcpy(line, "BEATEN ");
-	size_t n = strlen(line);
-	line[n++] = (char)('0' + beaten / 10 % 10);
-	line[n++] = (char)('0' + beaten % 10);
-	line[n++] = '/';
-	line[n++] = (char)('0' + all / 10 % 10);
-	line[n++] = (char)('0' + all % 10);
-	line[n] = 0;
-	text(out, 240 - text_width(line) / 2, 110, line, 0xffff);
+	if (survival) {
+		/* Wins of this run and the session's best. */
+		strcpy(line, "WINS ");
+		number(line + 5, s->streak);
+		text(out, 240 - text_width(line) / 2, 110, line, 0xffff);
+		strcpy(line, "BEST ");
+		number(line + 5, s->record);
+		text(out, 240 - text_width(line) / 2, 128, line, 0xfd20);
+	} else {
+		unsigned beaten = count(s->beaten);
+		strcpy(line, "BEATEN ");
+		size_t n = strlen(line);
+		line[n++] = (char)('0' + beaten / 10 % 10);
+		line[n++] = (char)('0' + beaten % 10);
+		line[n++] = '/';
+		line[n++] = (char)('0' + all / 10 % 10);
+		line[n++] = (char)('0' + all % 10);
+		line[n] = 0;
+		text(out, 240 - text_width(line) / 2, 110, line, 0xffff);
+	}
 	rect(out, 0, 300, FW, 2, 0x8c50, OPAQUE, 255);
 	idle_sprite(out, s, a, 0, 240, 300, 0);
 }
-static void number(char *out, unsigned v)
-{
-	if (v >= 10)
-		*out++ = (char)('0' + v / 10 % 10);
-	*out++ = (char)('0' + v % 10);
-	*out = 0;
-}
+
 /* Which fighter is drawn on top: the thrower in a throw, the one in a move
  * (the more recent move if both are), else the one not stunned, else player 2 as before, so an attack is never
  * hidden behind the defender. Derived from the state, nothing is stored. */
@@ -1943,13 +2316,21 @@ static int front_fighter(const struct fight_state *s)
  * waits for the stage cache. */
 static void intro_scene(const struct fight_state *s, const struct assets *a, struct scene *out)
 {
-	char line[16] = "STAGE ";
+	char line[24];
 	rect(out, 0, 0, FW, FH, 0x0841, OPAQUE, 255);
-	number(line + 6, s->stage);
-	size_t len = strlen(line);
-	line[len++] = '/';
-	number(line + len, count(opponents(a, s->chr[0])));
-	text(out, 240 - text_width(line) / 2, 40, line, 0xffff);
+	if (s->game == GAME_SURVIVAL) {
+		strcpy(line, "SURVIVAL  WINS ");
+		number(line + strlen(line), s->streak);
+	} else if (s->game == GAME_PRACTICE) {
+		strcpy(line, "PRACTICE");
+	} else {
+		strcpy(line, "STAGE ");
+		number(line + 6, s->stage);
+		size_t len = strlen(line);
+		line[len++] = '/';
+		number(line + len, count(opponents(a, s->chr[0])));
+	}
+	text(out, 240 - text_width(line) / 2, 40, line, game_colors[s->game]);
 	difficulty(out, s, 12);
 	rect(out, 0, 262, FW, 2, 0x8c50, OPAQUE, 255);
 	idle_sprite(out, s, a, 0, 140, 262, 0);
@@ -1972,7 +2353,7 @@ static void pause_panel(struct scene *out, const struct fight_state *s, const st
 	text_cell(out, (FW - 19 * 4) / 2, 28, "PAUSE", 0xffff, 4);
 	text(out, 60, 62, c->name, 0xffe0);
 	int y = move_list(out, c, 60, 82, 14, 0);
-	text(out, 60, y + 6, "START RESUME", 0x8410);
+	text(out, 60, y + 6, "START RESUME  B QUIT", 0x8410);
 }
 /* READY over the frozen round, then FIGHT as it begins: big glyphs (cell
  * BANNER_CELL) with a dark drop shadow, centred above the fighters. */
@@ -1982,7 +2363,10 @@ static void banner(struct scene *out, const struct fight_state *s)
 	if (s->timer < INTRO_TICKS || s->timer >= BANNER_END)
 		return;
 	int ready = s->timer < ROUND_TICKS;
-	const char *word = ready ? "READY" : "FIGHT";
+	/* An arcade match names its round instead of READY. */
+	char round[12] = "ROUND ";
+	number(round + 6, s->bout);
+	const char *word = !ready ? "FIGHT" : rounds(s) > 1 ? round : "READY";
 	int w = (4 * (int)strlen(word) - 1) * BANNER_CELL, x = (FW - w) / 2, y = 96;
 	text_cell(out, x + 4, y + 4, word, 0x0000, BANNER_CELL);
 	text_cell(out, x, y, word, ready ? 0xffe0 : 0xfa00, BANNER_CELL);
@@ -2095,13 +2479,34 @@ hud:
 	const char *n0 = c0->name, *n1 = c1->name;
 	text(out, 16, 34, n0, 0xffff);
 	text(out, 464 - text_width(n1), 34, n1, 0xffff);
-	/* Stage x/y of the ladder under the mode indicator. */
-	char line[8];
-	number(line, s->stage);
-	size_t len = strlen(line);
-	line[len++] = '/';
-	number(line + len, count(opponents(a, s->chr[0])));
-	text(out, 240 - text_width(line) / 2, 34, line, 0xffff);
+	/* Under the mode indicator: the ladder's stage x/y, the survival wins,
+	 * or PRACTICE with the dummy (R cycles it) and each side's last combo
+	 * damage. */
+	char line[24];
+	if (s->game == GAME_SURVIVAL) {
+		strcpy(line, "WINS ");
+		number(line + 5, s->streak);
+	} else if (s->game == GAME_PRACTICE) {
+		strcpy(line, "PRACTICE");
+		char dummy_line[24] = "R DUMMY ";
+		strcat(dummy_line, dummy_names[s->dummy]);
+		text(out, 240 - text_width(dummy_line) / 2, 48, dummy_line, 0x07ff);
+		for (int i = 0; i < 2; i++) {
+			if (!s->last[i])
+				continue;
+			char damage[24] = "DAMAGE ";
+			number(damage + 7, s->last[i]);
+			int x = i ? 464 - text_width(damage) : 16;
+			text(out, x + 1, 77, damage, 0x0000);
+			text(out, x, 76, damage, 0xffff);
+		}
+	} else {
+		number(line, s->stage);
+		size_t len = strlen(line);
+		line[len++] = '/';
+		number(line + len, count(opponents(a, s->chr[0])));
+	}
+	text(out, 240 - text_width(line) / 2, 34, line, game_colors[s->game]);
 	if (s->automatic)
 		text(out, 224, 48, "AUTO", 0x8410);
 	/* Keep labels short: each glyph row run is a bounded command. */
@@ -2116,17 +2521,39 @@ hud:
 		text_cell(out, x + 2, 52, hits, 0, 4);
 		text_cell(out, x, 50, hits, 0xffe0, 4);
 	}
-	if (s->ended && !s->paused)
-		text(out, 232, 80, "KO", 0xffff);
+	if (s->ended && !s->paused) {
+		/* Both standing means the clock ran out. */
+		const char *end = s->p[0].hp && s->p[1].hp ? "TIME UP" : "KO";
+		text(out, 240 - text_width(end) / 2, 80, end, 0xffff);
+	}
+	/* Round wins as squares between the names and the centre label,
+	 * filled when won. */
+	for (int i = 0; rounds(s) > 1 && i < 2; i++)
+		for (unsigned k = 0; k < rounds(s); k++) {
+			int x = i ? 280 + (int)k * 12 : 192 - (int)k * 12;
+			if (k < s->wins[i])
+				rect(out, x, 33, 8, 8, 0xffe0, OPAQUE, 255);
+			else
+				outline(out, (struct area){x, 33, 8, 8}, 0x8410, 0, 1);
+		}
 	/* Mode indicators don't depend on the text command budget. */
 	rect(out, 220, 16, 40, 13, (uint16_t)(0x001f + s->stress * 0x3800), OPAQUE,
 	     255);
+	/* The clock's count over it, red for the last ten. */
+	if (s->clock || (s->ended && s->p[0].hp && s->p[1].hp)) {
+		char clock[4];
+		unsigned left = (s->clock + COUNT_TICKS - 1) / COUNT_TICKS;
+		number(clock, left);
+		int w = (4 * (int)strlen(clock) - 1) * 2, x = 240 - w / 2;
+		text_cell(out, x + 1, 18, clock, 0x0000, 2);
+		text_cell(out, x, 17, clock, left > 10 ? 0xffff : 0xf800, 2);
+	}
 	banner(out, s);
 	if (s->paused)
 		pause_panel(out, s, a);
 }
 /* ---- state words ---- */
-#define FIGHTER_WORDS 30
+#define FIGHTER_WORDS 31
 #define SHOT_WORDS 6
 #define GLOBAL_WORDS 19
 #define SHOTS_AT (GLOBAL_WORDS + 2 * FIGHTER_WORDS)
@@ -2139,12 +2566,17 @@ hud:
 #define SPARKS_AT (EXTRA_AT + 4)
 #define SOUNDS_AT (SPARKS_AT + SPARK_SLOTS * SPARK_WORDS)
 /* Then combo, shown, show and best per side, the select list flag, the
- * difficulty and the throw and tech counts. */
+ * difficulty, the throw and tech counts and the run and backdash counts. */
 #define COMBO_AT (SOUNDS_AT + 1 + MAX_SOUND_EVENTS)
 #define LIST_AT (COMBO_AT + 8)
 #define LEVEL_AT (LIST_AT + 1)
 #define THROWS_AT (LEVEL_AT + 1)
-#define USED_WORDS (THROWS_AT + 2)
+#define DASHES_AT (THROWS_AT + 2)
+/* Then game, picking, dummy, streak, record, carry, damage and last per
+ * side, the clock and the bout. */
+#define GAME_AT (DASHES_AT + 2)
+#define GAME_WORDS 12
+#define USED_WORDS (GAME_AT + GAME_WORDS)
 static void fighter_fields(struct fighter *p, int32_t *v[FIGHTER_WORDS])
 {
 	int32_t *f[] = {&p->x,	   &p->y,     &p->vy,	     &p->hp,	&p->face,  &p->walk,
@@ -2157,6 +2589,7 @@ static void fighter_fields(struct fighter *p, int32_t *v[FIGHTER_WORDS])
 	v[25] = (int32_t *)(void *)&p->charge;
 	for (int k = 0; k < HISTORY / 8; k++)
 		v[26 + k] = (int32_t *)(void *)&p->history[k];
+	v[26 + HISTORY / 8] = &p->dash;
 }
 static void global_fields(struct fight_state *s, uint32_t *v[GLOBAL_WORDS])
 {
@@ -2170,6 +2603,13 @@ static void tail_fields(struct fight_state *s, uint32_t *v[7])
 {
 	uint32_t *f[7] = {&s->tone, &s->phase, &s->ended, &s->hits, &s->guards, &s->specials,
 			  &s->clashes};
+	memcpy(v, f, sizeof(f));
+}
+static void game_fields(struct fight_state *s, uint32_t *v[GAME_WORDS])
+{
+	uint32_t *f[GAME_WORDS] = {&s->game,	&s->picking, &s->dummy, &s->streak, &s->record,
+				   &s->carry,	&s->damage[0], &s->damage[1], &s->last[0],
+				   &s->last[1], &s->clock, &s->bout};
 	memcpy(v, f, sizeof(f));
 }
 void fight_encode(const struct fight_state *s, uint32_t w[STATE_WORDS])
@@ -2221,6 +2661,12 @@ void fight_encode(const struct fight_state *s, uint32_t w[STATE_WORDS])
 	w[LEVEL_AT] = t.level;
 	w[THROWS_AT] = t.throws;
 	w[THROWS_AT + 1] = t.techs;
+	w[DASHES_AT] = t.runs;
+	w[DASHES_AT + 1] = t.backdashes;
+	uint32_t *g2[GAME_WORDS];
+	game_fields(&t, g2);
+	for (int k = 0; k < GAME_WORDS; k++)
+		w[GAME_AT + k] = *g2[k];
 }
 /* Bounds come from the fighter's own character (life, jump velocities,
  * prejump, buffer, charge and grace) and the walls of the state's camera. */
@@ -2265,6 +2711,18 @@ static int valid(const struct fight_state *s, const struct fighter *p, const str
 	    (p->grab && (p->move || p->stun || p->block || p->crouch || p->squat || p->walk ||
 			 p->down || !grounded(p) || p->freeze || p->buffer || p->slide)) ||
 	    (throwing(p) && p->elapsed >= c->action[THROW].total))
+		return 0;
+	/* Running, skidding or backdashing: nothing else going on; a run on
+	 * the ground within its phase, a backdash on its arc. */
+	const struct dash_rule *d = &a->sys[c->system].dash;
+	if (p->dash < DASH_NONE || p->dash >= DASH_PHASES ||
+	    (p->dash && (p->move || p->stun || p->block || p->crouch || p->squat || p->walk ||
+			 p->down || p->grab || p->vy)) ||
+	    (p->dash == DASH_BACK &&
+	     (p->elapsed >= back_total(d) || p->y != back_y(d, p->elapsed))) ||
+	    (p->dash && p->dash != DASH_BACK && p->y) ||
+	    (p->dash == DASH_COAST && p->elapsed >= d->run_grace) ||
+	    (p->dash == DASH_STOP && p->elapsed >= d->run_stop))
 		return 0;
 	if (p->move) {
 		const struct move *m = &c->move[p->move - 1];
@@ -2352,13 +2810,33 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 	t.level = w[LEVEL_AT];
 	t.throws = w[THROWS_AT];
 	t.techs = w[THROWS_AT + 1];
+	t.runs = w[DASHES_AT];
+	t.backdashes = w[DASHES_AT + 1];
+	uint32_t *g2[GAME_WORDS];
+	game_fields(&t, g2);
+	for (int k = 0; k < GAME_WORDS; k++)
+		*g2[k] = w[GAME_AT + k];
+	/* The game mode: picking a dummy only on a practice select screen; a
+	 * running combo's damage is its last; nothing outside a running round;
+	 * carry only in a survival fight. */
+	if (t.game >= GAMES || t.picking > 1 || t.dummy >= DUMMIES || t.record > MAX_STREAK ||
+	    t.streak > t.record ||
+	    (t.picking && (t.mode != MODE_SELECT || t.game != GAME_PRACTICE)) ||
+	    (!!t.carry != (t.game == GAME_SURVIVAL && t.mode == MODE_FIGHT)) ||
+	    t.carry > (uint32_t)a->chr[t.chr[0] < a->characters ? t.chr[0] : 0].stats.life)
+		return 0;
+	for (int i = 0; i < 2; i++)
+		if (t.damage[i] > MAX_COMBO_DAMAGE || t.last[i] > MAX_COMBO_DAMAGE ||
+		    (!t.combo[i] && t.damage[i]) || (t.combo[i] && t.damage[i] != t.last[i]) ||
+		    ((t.mode != MODE_FIGHT || t.timer < ROUND_TICKS) && t.last[i]))
+			return 0;
 	if (t.list > 1 || t.level >= LEVELS)
 		return 0;
 	unsigned n = a->characters;
 	uint32_t all = n >= 32 ? 0xffffffffu : (1u << n) - 1u;
 	if (t.paused > 1 || t.stress > 3 || t.boxes > 1 || t.automatic > 1 || t.mode >= MODES ||
-	    t.timer > 255 || (t.beaten & ~all) || t.stage > n || t.wins[0] >= ROUNDS_TO_WIN ||
-	    t.wins[1] >= ROUNDS_TO_WIN || t.chr[0] >= n || t.chr[1] >= n || t.pal[0] > 1 ||
+	    t.timer > 255 || (t.beaten & ~all) || t.stage > n || t.wins[0] >= rounds(&t) ||
+	    t.wins[1] >= rounds(&t) || t.chr[0] >= n || t.chr[1] >= n || t.pal[0] > 1 ||
 	    t.pal[1] > 1 || t.tone > 2400 || t.phase >= 48000 || t.ended > KO_TICKS ||
 	    (t.ended && t.mode != MODE_FIGHT))
 		return 0;
@@ -2366,13 +2844,23 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 		uint32_t opp = opponents(a, t.chr[0]);
 		if (t.timer > BANNER_END || (t.timer < ROUND_TICKS && (t.ended || t.shake || t.flash)))
 			return 0;
-		/* A mirror is always a valid fight (tests and versus set one up). */
-		if (t.pal[0] || t.pal[1] != (t.chr[0] == t.chr[1]) ||
-		    (!((opp >> t.chr[1]) & 1) && t.chr[0] != t.chr[1]) ||
-		    (t.beaten & ~opp) || ((t.beaten >> t.chr[1]) & 1) ||
-		    t.stage != count(t.beaten) + 1)
+		/* The clock: none in practice, full until FIGHT, out only once
+		 * ended; a match's rounds so far bound its wins. */
+		if (t.clock > CLOCK_TICKS || (t.game == GAME_PRACTICE && t.clock) ||
+		    (t.timer < ROUND_TICKS && t.clock && t.clock != CLOCK_TICKS) || !t.bout ||
+		    t.bout > 2 * rounds(&t) - 1 || t.wins[0] >= t.bout || t.wins[1] >= t.bout)
 			return 0;
-	}
+		/* A mirror is always a valid fight (tests and versus set one up);
+		 * practice takes any dummy, only the ladder beats anyone. */
+		if (t.pal[0] || t.pal[1] != (t.chr[0] == t.chr[1]) ||
+		    (t.game != GAME_PRACTICE && !((opp >> t.chr[1]) & 1) &&
+		     t.chr[0] != t.chr[1]) ||
+		    (t.game == GAME_ARCADE ? (t.beaten & ~opp) || ((t.beaten >> t.chr[1]) & 1) ||
+						     t.stage != count(t.beaten) + 1
+					   : t.beaten || t.stage != 1))
+			return 0;
+	} else if (t.clock || t.bout)
+		return 0;
 	for (int i = 0; i < 2; i++) {
 		int32_t *v[FIGHTER_WORDS];
 		fighter_fields(&t.p[i], v);
@@ -2384,6 +2872,11 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 	for (int i = 0; i < 2; i++)
 		if (t.combo[i] && !in_hitstun(&t.p[1 - i]))
 			return 0;
+	/* A survival fight starts from carry; practice never empties a bar. */
+	if ((t.carry && t.p[0].hp > (int32_t)t.carry) ||
+	    (t.game == GAME_PRACTICE && t.mode == MODE_FIGHT &&
+	     (t.p[0].hp < 1 || t.p[1].hp < 1 || t.ended)))
+		return 0;
 	/* A thrower holds the other fighter, facing it, for as long. */
 	for (int i = 0; i < 2; i++)
 		if (throwing(&t.p[i]) != (t.p[1 - i].grab == GRAB_HELD) ||
@@ -2412,7 +2905,7 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 	}
 	/* Nothing moves during the versus card and READY. */
 	for (int i = 0; t.mode == MODE_FIGHT && t.timer < ROUND_TICKS && i < 2; i++)
-		if (t.p[i].move || t.p[i].stun || t.p[i].down || t.p[i].grab || t.p[i].buffer ||
+		if (t.p[i].move || t.p[i].stun || t.p[i].down || t.p[i].grab || t.p[i].buffer || t.p[i].dash ||
 		    owned[i])
 			return 0;
 	*s = t;

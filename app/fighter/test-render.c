@@ -1,9 +1,9 @@
 /* Renderer and pack-decoder regression for the fighter core, linked into the
- * callback harness (test.c). It writes its own FIGHTP10 packs from known
+ * callback harness (test.c). It writes its own FIGHTP11 packs from known
  * bitmaps, two system profiles, two spark anims and a three-layer stage,
  * checks that malformed or truncated packs (including bad systems, stats,
- * classes, class defaults, sparks, walls, effect sets, slash and home
- * fields and stages, layers and stage anims) are rejected, that stats
+ * classes, class defaults, sparks, walls, effect sets, throw and dash
+ * rules, slash and home fields and stages, layers and stage anims) are rejected, that stats
  * resolve from the system plus overrides, that class defaults fill
  * hitstun/blockstun/hitstop and the damage scale applies, and compares
  * fight_render pixel for pixel with an independent per-pixel reference
@@ -274,7 +274,8 @@ enum field {
 	/* Sparks (the first one), walls and effect sets, slash and home. */
 	F_SPARKS, F_STAGES, F_SPARK_BLEND, F_SPARK_ALPHA, F_SPARK_STEPS, F_SPARK_FRAME,
 	F_SPARK_PALETTE, F_SPARK_TICKS, F_SYS_MARGIN, F_SYS_PLAY, F_SYS_EFFECT, F_SYS_WAKEUP, F_SYS_THROW_RANGE,
-	F_SYS_THROW_TECH_STUN, F_MOVE_FLAGS, F_CHAR_SLASH,
+	F_SYS_THROW_TECH_STUN, F_SYS_DASH_WINDOW, F_SYS_DASH_SCALE, F_SYS_DASH_AIR,
+	F_SYS_DASH_INVULN, F_MOVE_FLAGS, F_CHAR_SLASH,
 	F_CHAR_HOME,
 	/* The stage, its first layer and that layer's first anim step. */
 	F_STAGE_NAME_LEN, F_STAGE_NAME_CHAR, F_STAGE_WIDTH, F_STAGE_GROUND, F_STAGE_SYSTEM,
@@ -404,6 +405,19 @@ static void systems(struct pack *p)
 				MARK(F_SYS_THROW_TECH_STUN);
 			put(p, throw_rule[k][j], 2);
 		}
+		/* Run and backdash: window, run scale, run startup, min, grace,
+		 * stop; backdash startup, air, stop, distance, height, invuln. */
+		static const unsigned dash_rule[2][12] = {
+		    {10, 2100, 3, 10, 0, 3, 3, 18, 3, 72, 16, 0},
+		    {10, 2700, 2, 0, 3, 4, 0, 20, 6, 80, 20, 2}};
+		for (int j = 0; j < 12; j++) {
+			static const int mark[12] = {F_SYS_DASH_WINDOW, F_SYS_DASH_SCALE, -1, -1, -1,
+						     -1, -1, F_SYS_DASH_AIR, -1, -1, -1,
+						     F_SYS_DASH_INVULN};
+			if (!k && mark[j] >= 0)
+				p->at[mark[j]] = p->len;
+			put(p, dash_rule[k][j], 2);
+		}
 	}
 }
 /* One character "SYN" on system 0 with its own walk 10 and height high:
@@ -517,7 +531,7 @@ static int syn_hurts(unsigned i) { return i < 14; }
 static void build(struct pack *p, int automatic)
 {
 	memset(p, 0, sizeof(*p));
-	memcpy(p->data, "FIGHTP10", 8);
+	memcpy(p->data, "FIGHTP11", 8);
 	p->len = 16;
 	MARK(F_FLAGS);
 	put(p, (unsigned)automatic, 4);
@@ -914,6 +928,9 @@ static void malformed(void)
 	    {F_SYS_PLAY, FW + 1, 2},	    {F_SYS_EFFECT, 3, 2},
 	    {F_SYS_WAKEUP, 0, 2},	    {F_SYS_WAKEUP, MAX_WAKEUP + 1, 2},
 	    {F_SYS_THROW_RANGE, MAX_THROW_RANGE + 1, 2}, {F_SYS_THROW_TECH_STUN, 0, 2},
+	    {F_SYS_DASH_WINDOW, 1, 2},	    {F_SYS_DASH_WINDOW, HISTORY, 2},
+	    {F_SYS_DASH_SCALE, 999, 2},	    {F_SYS_DASH_AIR, 0, 2},
+	    {F_SYS_DASH_AIR, MAX_DASH_TICKS + 1, 2}, {F_SYS_DASH_INVULN, 25, 2},
 	    {F_MOVE_FLAGS, FLAG_MASK + 1, 2}, {F_PROJ_FLAGS, FLAG_OTG, 2},
 	    {F_CHAR_SLASH, 32, 2},	    {F_CHAR_HOME, 2, 2},
 	    /* Stages, layers and stage anims. */
@@ -965,6 +982,9 @@ static void malformed(void)
 		bad.data[7] = (uint8_t)v; /* FIGHTP01..09: retired formats */
 		assert(!load(&assets_a, &bad));
 	}
+	bad = good;
+	bad.data[7] = '0'; /* FIGHTP10, before run and backdash */
+	assert(!load(&assets_a, &bad));
 	bad = good;
 	bad.data[good.at[F_INDEX] + 3] ^= 1;
 	assert(!load(&assets_a, &bad));
@@ -1201,6 +1221,15 @@ static void synthetic_moves(struct assets *a)
 	       tr->hit.pushback == 40 && tr->hit.hitstop == 8 && tr->hit.cls == CLASS_THROW &&
 	       tr->hit.flags == FLAG_KNOCKDOWN && ts->range == 12 && !ts->tech &&
 	       ts->hit.damage == 176 && ts->wakeup_safe == 17 && ts->stun_safe == 17);
+	/* Run and backdash; SYN runs at its walk 10 times 2.1, the system at
+	 * its own walk 7 times 2.1 (14.7, rounded). */
+	const struct dash_rule *dk = &a->sys[0].dash, *ds = &a->sys[1].dash;
+	assert(dk->window == 10 && dk->run_scale == 2100 && dk->run_startup == 3 &&
+	       dk->run_min == 10 && !dk->run_grace && dk->run_stop == 3 && dk->back_startup == 3 &&
+	       dk->back_air == 18 && dk->back_stop == 3 && dk->back_distance == 72 &&
+	       dk->back_height == 16 && !dk->back_invuln && ds->run_grace == 3 &&
+	       ds->back_invuln == 2 && !ds->back_startup && ch->stats.run == 21 &&
+	       a->sys[0].stats.run == 15);
 	/* Stats: system "kof" with SYN's own walk 10 and height high; the jump
 	 * -48/3 peaks at 96 px and a fall from MAX_HEIGHT reaches vy 87. */
 	const struct stats *st = &ch->stats;
@@ -1613,7 +1642,7 @@ static void incremental_cache(struct assets *full, struct assets *lazy)
 	unsigned intros = 0, moves = 0;
 	for (int automatic = 0; automatic < 2; automatic++) {
 		fight_reset(&st, automatic);
-		for (unsigned n = 0; n < (automatic ? 9000u : 120u); n++) {
+		for (unsigned n = 0; n < (automatic ? 12000u : 120u); n++) {
 			uint32_t keys = !automatic && n % 2 == 0 ? 1u << 7 : 0; /* RIGHT */
 			uint32_t before = st.chr[0];
 			fight_step(&st, lazy, keys, 0, 0);

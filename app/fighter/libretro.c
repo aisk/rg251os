@@ -1,8 +1,8 @@
-/* Standard libretro fighter core: FIGHTP10 content, input, deterministic
- * FGSTAT13 saves, audio and software frames. Timing below measures work only;
- * the frontend owns pacing. Logs the system profiles (wake-up and throw
- * rules), the roster with each
- * character's system and resolved stats, every move's frame data and class
+/* Standard libretro fighter core: FIGHTP11 content, input, deterministic
+ * FGSTAT16 saves, audio and software frames. Timing below measures work only;
+ * the frontend owns pacing. Logs the system profiles (wake-up, throw, run and
+ * backdash rules), the roster with each
+ * character's system and resolved stats (run speed included), every move's frame data and class
  * (specials with their name)
  * (follow-ups with their parent and window) and the resident memory at
  * load, and the stages and spark sets. The render cache is filled a slice
@@ -16,9 +16,13 @@
  * each scene (0 = two fighters, 1-3 = +8, +24, +48 requested alpha/additive
  * effects, capped by the per-frame effect pixel budget) every 600 runs,
  * also with debug off: logic/render/audio/cache times, how many effects
- * were drawn of those requested, and the ladder, special/clash, throw/tech
- * and max combo counters; each KO logs the round with both lives, max
- * combos and the throw counts.
+ * were drawn of those requested, and the ladder, special/clash, throw/tech,
+ * run/backdash and max combo counters with the game mode and wins; each KO
+ * logs the round with both lives, max combos, the throw and run/backdash
+ * counts and the game mode (and so does a time over, with the bout, the
+ * match score and the clock). Changing the game mode or the practice dummy is
+ * logged, and so is each run's end (lost, cleared or quit) with its rounds,
+ * wins and the survival best.
  *
  * Sound comes from the bank next to the content (<pack>.fightsnd, found
  * from retro_game_info's path; audio.c): after each unpaused tick the rule
@@ -41,12 +45,16 @@
  * motions plus a punch (Terry: 236 Power Wave, 214 Burn Knuckle, hold down
  * then up Rising Tackle; Iori's 214 Aoi Hana takes 214+P twice more as
  * it hits). Forward or back with X or A next to the opponent throws it
- * that way; X or A right after being grabbed breaks the throw. Back guards
+ * that way; X or A right after being grabbed breaks the throw. Forward twice
+ * (66) runs, back twice (44) backdashes. Back guards
  * (down-back guards low), UP jumps, L
- * toggles the hurt/hit box overlay, R cycles the stress scene, START
- * pauses (showing P1's command list); A or B skips the KO screen. In the
- * select screen the d-pad moves, any attack button picks, R cycles the CPU
- * level and START shows or hides the highlighted character's command list. The desktop option fight_players=two lets
+ * toggles the hurt/hit box overlay, R cycles the stress scene (in practice
+ * the dummy: stand, crouch, guard all, CPU), START pauses (showing P1's
+ * command list) and B in the pause quits to the select screen; A or B skips
+ * the KO screen. In the select screen the d-pad moves, any attack button
+ * picks (in practice P1 first, then the dummy), L cycles the game mode
+ * (arcade, survival, practice), R cycles the CPU level and START shows or
+ * hides the highlighted character's command list. The desktop option fight_players=two lets
  * port 1 drive the ladder's opponent; the device only has port 0. */
 #include "libretro.h"
 #include "audio.h"
@@ -80,6 +88,8 @@ static int loaded, format32, two_players;
 static unsigned level = LEVEL_NORMAL;
 static int level_changed;
 static const char *const level_names[LEVELS] = {"easy", "normal", "hard"};
+static const char *const game_names[GAMES] = {"arcade", "survival", "practice"};
+static const char *const dummy_names[DUMMIES] = {"stand", "crouch", "guard", "cpu"};
 static unsigned devices[2] = {RETRO_DEVICE_JOYPAD, RETRO_DEVICE_JOYPAD};
 static unsigned benchmark_runs;
 static uint64_t samples[4][600];
@@ -193,11 +203,13 @@ static void report(void)
 		       state.cam, sample_count);
 		logger(RETRO_LOG_INFO,
 		       "fight: tick %u round %u hits %u guards %u specials %u clashes %u "
-		       "throws %u techs %u max combo %u/%u difficulty %s mode %u run %u stage %u "
+		       "throws %u techs %u runs %u backdashes %u max combo %u/%u difficulty %s "
+		       "game %s wins %u best %u mode %u run %u stage %u "
 		       "beaten %08x %s vs %s; frontend perf measures rotate/present/audio output\n",
 		       state.tick, state.round, state.hits, state.guards, state.specials,
-		       state.clashes, state.throws, state.techs, state.best[0], state.best[1],
-		       level_names[state.level],
+		       state.clashes, state.throws, state.techs, state.runs, state.backdashes,
+		       state.best[0], state.best[1],
+		       level_names[state.level], game_names[state.game], state.streak, state.record,
 		       state.mode, state.run,
 		       state.stage, state.beaten, assets.chr[state.chr[0]].name,
 		       assets.chr[state.chr[1]].name);
@@ -355,7 +367,7 @@ bool retro_load_game(const struct retro_game_info *g)
 	if (!g || !fight_assets(&assets, g->data, g->size, &automatic)) {
 		if (logger)
 			logger(RETRO_LOG_ERROR,
-			       "fight: invalid FIGHTP10 package (magic, length, hash, "
+			       "fight: invalid FIGHTP11 package (magic, length, hash, "
 			       "limits, frame, palette, system, stats, character, move, "
 			       "projectile or step data)\n");
 		return false;
@@ -381,7 +393,7 @@ bool retro_load_game(const struct retro_game_info *g)
 	benchmark_runs = 0;
 	if (logger) {
 		logger(RETRO_LOG_INFO,
-		       "fight: FIGHTP10 package %08x, %u characters, %u frames, %u "
+		       "fight: FIGHTP11 package %08x, %u characters, %u frames, %u "
 		       "palettes, %u steps, %u boxes, 480x320 60Hz 48kHz, software %s, %s, "
 		       "difficulty %s; L boxes R stress START pause\n",
 		       assets.hash, assets.characters, assets.frames, assets.palettes,
@@ -437,6 +449,14 @@ bool retro_load_game(const struct retro_game_info *g)
 			       sy->throw.hit.pushback, sy->throw.hit.hitstop, sy->throw.tech,
 			       sy->throw.tech_stun, sy->throw.tech_push, sy->throw.wakeup_safe,
 			       sy->throw.stun_safe);
+			const struct dash_rule *d = &sy->dash;
+			logger(RETRO_LOG_INFO,
+			       "fight: system %u %s dash window %u run scale %u startup/min/grace/stop "
+			       "%u/%u/%u/%u backdash startup/air/stop %u/%u/%u distance %u height %u "
+			       "invuln %u\n",
+			       k, sy->name, d->window, d->run_scale, d->run_startup, d->run_min,
+			       d->run_grace, d->run_stop, d->back_startup, d->back_air, d->back_stop,
+			       d->back_distance, d->back_height, d->back_invuln);
 		}
 		for (unsigned c = 0; c < assets.characters; c++) {
 			const struct character *ch = &assets.chr[c];
@@ -448,10 +468,10 @@ bool retro_load_game(const struct retro_game_info *g)
 			       ch->images);
 			logger(RETRO_LOG_INFO,
 			       "fight: %s system %s life %d defense %d weight %d height %s "
-			       "walk %d/%d jump vy %d gravity %d drift %d/%d prejump %d "
+			       "walk %d/%d run %d jump vy %d gravity %d drift %d/%d prejump %d "
 			       "peak %d\n",
 			       ch->name, assets.sys[ch->system].name, st->life, st->defense,
-			       st->weight, heights[st->height], st->walk, st->walk_back,
+			       st->weight, heights[st->height], st->walk, st->walk_back, st->run,
 			       st->jump.vy, st->jump.gravity, st->jump.vx, st->jump.vx_back,
 			       st->jump.prejump, st->jump.peak);
 			for (unsigned k = 0; k < ch->moves; k++) {
@@ -514,20 +534,39 @@ void retro_run(void)
 				if (input(p, RETRO_DEVICE_JOYPAD, 0, k))
 					keys[p] |= 1u << k;
 	apply_level(0);
-	uint32_t old_tick = state.tick, old_ended = state.ended, old_level = state.level;
+	uint32_t old_tick = state.tick, old_ended = state.ended, old_level = state.level,
+		 old_game = state.game, old_dummy = state.dummy, old_mode = state.mode;
 	uint64_t t0 = tick_us();
 	fight_step(&state, &assets, keys[0], keys[1], two_players);
 	uint64_t t1 = tick_us();
+	if (state.game != old_game && logger)
+		logger(RETRO_LOG_INFO, "fight: game %s (select screen L)\n", game_names[state.game]);
+	if (state.dummy != old_dummy && logger)
+		logger(RETRO_LOG_INFO, "fight: practice dummy %s\n", dummy_names[state.dummy]);
+	if (old_mode == MODE_FIGHT && state.mode != MODE_FIGHT && logger)
+		logger(RETRO_LOG_INFO, "fight: %s run over (%s) after %u rounds, %u wins, best %u\n",
+		       game_names[state.game],
+		       state.mode == MODE_RESULT  ? "lost"
+		       : state.mode == MODE_CLEAR ? "cleared"
+						  : "quit",
+		       state.round,
+		       state.game == GAME_SURVIVAL ? state.streak
+						   : (unsigned)__builtin_popcount(state.beaten),
+		       state.record);
 	if (state.level != old_level && logger)
 		logger(RETRO_LOG_INFO, "fight: difficulty %s (select screen R)\n",
 		       level_names[state.level]);
 	if (!old_ended && state.ended && logger)
 		logger(RETRO_LOG_INFO,
-		       "fight: KO stage %u round %u %s vs %s life %d/%d, max combo %u/%u, "
-		       "throws %u techs %u, difficulty %s, tick %u\n",
-		       state.stage, state.round + 1, assets.chr[state.chr[0]].name,
+		       "fight: %s stage %u round %u (bout %u, %u-%u, clock %u) %s vs %s life %d/%d, "
+		       "max combo %u/%u, throws %u techs %u, runs %u backdashes %u, difficulty %s, "
+		       "%s wins %u, tick %u\n",
+		       state.p[0].hp && state.p[1].hp ? "time over" : "KO", state.stage,
+		       state.round + 1, state.bout, state.wins[0], state.wins[1],
+		       (state.clock + COUNT_TICKS - 1) / COUNT_TICKS, assets.chr[state.chr[0]].name,
 		       assets.chr[state.chr[1]].name, state.p[0].hp, state.p[1].hp, state.best[0],
-		       state.best[1], state.throws, state.techs, level_names[state.level],
+		       state.best[1], state.throws, state.techs, state.runs, state.backdashes,
+		       level_names[state.level], game_names[state.game], state.streak,
 		       state.tick);
 	if (state.automatic && state.tick != old_tick && ++benchmark_runs == 36000 &&
 	    logger)
@@ -607,7 +646,7 @@ bool retro_serialize(void *data, size_t size)
 	uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	fight_encode(&state, w);
-	memcpy(p, "FGSTAT13", 8);
+	memcpy(p, "FGSTAT16", 8);
 	put32(p + 8, assets.hash);
 	put32(p + 12, state.automatic);
 	for (int i = 0; i < STATE_WORDS; i++)
@@ -620,7 +659,7 @@ bool retro_unserialize(const void *data, size_t size)
 	const uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	if (!loaded || !p || size != retro_serialize_size() ||
-	    memcmp(p, "FGSTAT13", 8) || get32(p + 8) != assets.hash ||
+	    memcmp(p, "FGSTAT16", 8) || get32(p + 8) != assets.hash ||
 	    get32(p + 12) != state.automatic)
 		return false;
 	for (int i = 0; i < STATE_WORDS; i++)

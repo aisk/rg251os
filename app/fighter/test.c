@@ -9,8 +9,14 @@
  * the buffer, expiry, contact, the move clock across a state load; May
  * Lee's Tatsuo Kyaku branches by held direction), the arcade ladder (the
  * versus card and READY freezing the rules, held buttons no press at FIGHT,
- * the banner, select, opponents, loss, clear, Auto rotation, replay), state
- * round-trip and rejection, the AI's use of every move, the difficulty
+ * the banner, select, opponents, loss, clear, Auto rotation, replay), the
+ * survival and practice modes (carried life, heal, streak and record; the
+ * dummy picked and its four behaviours, refilled life, combo damage; B
+ * quitting from a pause), the round clock, time over and best of three,
+ * state
+ * round-trip and rejection, run and backdash (taps, phases, speeds, the
+ * arc, cancels, throw and strike invulnerability, samsho5sp's coast), the
+ * AI's use of every move (and of runs and backdashes), the difficulty
  * (R on the select screen, Easy damage, guards, specials and Hard's cancels per level), and
  * the stats: each character's system and resolved stats, walk speeds, jump
  * arcs and prejump, life, defense, weight, push distance, guard range, input
@@ -27,7 +33,8 @@
  * stage. Expected numbers come from assets/fighter/terry.json,
  * haohmaru.json and systems.json. Fighter x is in quarter pixels (QX). It
  * also writes preview PPMs of the select, Power Wave (boxes on), result and
- * clear screens and a hit on each stage. test-render.c adds the pack
+ * clear screens, a hit on each stage, ROUND 2 and the clock, the survival
+ * select, the dummy pick and the practice HUD. test-render.c adds the pack
  * decoder, box, stage and pixel-exact renderer checks. ASan/UBSan run this
  * without a window or device. */
 #include "audio.h"
@@ -135,7 +142,7 @@ static uint32_t get_word(const uint8_t *p, int k)
 /* ---- rules on exact ticks; expected numbers come from terry.json ---- */
 #define K(k) (1u << RETRO_DEVICE_ID_JOYPAD_##k)
 /* Words per fighter in a saved state, mirroring FIGHTER_WORDS in fighter.c. */
-#define FIGHTER_WORDS_T 30
+#define FIGHTER_WORDS_T 31
 static struct assets pack;
 static unsigned terry;
 enum { POWER_WAVE = MOVES, BURN_KNUCKLE, RISING_TACKLE };
@@ -850,8 +857,11 @@ static void intro(struct fight_state *s)
 	step2(s, K(A), 0);
 	assert(!s->p[0].move);
 }
+/* Win (or lose) a whole match: rounds until the next opponent, the result
+ * or clear screen. */
 static void win_round(struct fight_state *s, int winner)
 {
+again:
 	if (s->timer < ROUND_TICKS)
 		intro(s);
 	/* Stand LP into a 10 hp loser: KO within a few calls, round over 180 later. */
@@ -863,6 +873,8 @@ static void win_round(struct fight_state *s, int winner)
 	/* Slower jabs (a sword LP) KO a few ticks later. */
 	for (int n = 0; n < 60 && s->mode == MODE_FIGHT && s->p[1 - winner].hp <= 0; n++)
 		step2(s, 0, 0);
+	if (s->mode == MODE_FIGHT && s->bout > 1)
+		goto again;
 }
 static void ladder(void)
 {
@@ -894,7 +906,7 @@ static void ladder(void)
 		order = order * 4 + s.chr[1];
 		unsigned beaten = s.beaten | 1u << s.chr[1];
 		win_round(&s, 0);
-		assert(s.beaten == beaten && s.round == stage);
+		assert(s.beaten == beaten && s.round == 2 * stage);
 	}
 	assert(s.mode == MODE_CLEAR && s.beaten == 0xd);
 	/* The same inputs from the saved state meet the same opponents. */
@@ -1022,7 +1034,7 @@ static void round_start(void)
 }
 /* The combo words in a saved state (COMBO_AT in fighter.c): combo, shown,
  * show and best, two each. */
-#define COMBO_W 171
+#define COMBO_W (19 + 2 * FIGHTER_WORDS_T + 6 * MAX_PROJECTILES + 7 + 4 + 5 * SPARK_SLOTS + 1 + MAX_SOUND_EVENTS)
 #define LIST_W (COMBO_W + 8)
 #define LEVEL_W (LIST_W + 1)
 #define THROWS_W (LEVEL_W + 1)
@@ -1342,6 +1354,194 @@ static int per_mille(int v, int factor)
 	int r = (v * factor + 500) / 1000;
 	return v && !r ? 1 : r;
 }
+/* The game mode words in a saved state (GAME_AT in fighter.c): game,
+ * picking, dummy, streak, record, carry, damage and last per side. */
+#define GAME_W (COMBO_W + 14)
+/* One tick with port 1 left to the rules (the CPU or the practice dummy). */
+static void solo(struct fight_state *s, uint32_t k) { fight_step(s, &pack, k, 0, 0); }
+/* Game modes. L cycles them on the select screen (the box overlay stays).
+ * Survival: random opponents in a row, never the same twice, P1's life
+ * carried with SURVIVAL_HEAL back per win (capped at full), the streak and
+ * the session record on the result screen and kept across runs. Practice:
+ * P1 and then the dummy picked (both cast), the dummy standing, crouching,
+ * guarding high and low or the CPU (R), the life bar never emptied and
+ * refilled once a combo ends, the last combo's damage shown. B in a pause
+ * quits to select. Each state round-trips and impossible game words are
+ * rejected. */
+static void game_modes(void)
+{
+	static struct scene sc;
+	struct fight_state s, t;
+	uint32_t w[STATE_WORDS], v[STATE_WORDS];
+	const int life = pack.chr[terry].stats.life;
+	fight_reset(&s, 0);
+	for (unsigned k = 1; k <= GAMES; k++) {
+		step2(&s, K(L), 0);
+		step2(&s, 0, 0);
+		assert(s.game == k % GAMES && !s.boxes && s.mode == MODE_SELECT);
+		fight_scene(&s, &pack, &sc);
+	}
+	/* Survival from Terry. */
+	step2(&s, K(L), 0);
+	s.chr[0] = s.chr[1] = terry;
+	step2(&s, K(Y), 0);
+	assert(s.mode == MODE_FIGHT && s.game == GAME_SURVIVAL && !s.streak && !s.record &&
+	       s.carry == (uint32_t)life && s.p[0].hp == life && s.chr[1] != terry &&
+	       s.stage == 1 && !s.beaten && !s.timer);
+	fight_encode(&s, w);
+	assert(fight_decode(&t, &pack, w));
+	fight_encode(&t, v);
+	assert(!memcmp(w, v, sizeof(w)));
+	unsigned previous = s.chr[1];
+	intro(&s);
+	fight_scene(&s, &pack, &sc);
+	s.p[0].hp = 300;
+	win_round(&s, 0);
+	int healed = 300 + life * SURVIVAL_HEAL / 1000;
+	assert(s.mode == MODE_FIGHT && s.streak == 1 && s.record == 1 &&
+	       s.carry == (uint32_t)healed && s.p[0].hp == healed && s.chr[1] != previous &&
+	       s.chr[1] != terry && !s.timer && s.round == 1);
+	fight_encode(&s, w);
+	assert(fight_decode(&t, &pack, w));
+	/* A win at almost full life heals up to full only. */
+	s.p[0].hp = life - 10;
+	win_round(&s, 0);
+	assert(s.streak == 2 && s.carry == (uint32_t)life && s.p[0].hp == life);
+	win_round(&s, 1);
+	assert(s.mode == MODE_RESULT && s.streak == 2 && s.record == 2 && !s.carry);
+	fight_scene(&s, &pack, &sc);
+	for (int n = 1; n <= 21; n++)
+		step2(&s, n == 21 ? K(A) : 0, 0);
+	assert(s.mode == MODE_SELECT && s.game == GAME_SURVIVAL && s.record == 2);
+	step2(&s, K(Y), 0);
+	assert(s.mode == MODE_FIGHT && !s.streak && s.record == 2);
+	/* Bad survival words: carry above P1's life or under its life now,
+	 * a streak past the record. */
+	fight_encode(&s, w);
+	static const struct {
+		int at;
+		uint32_t value;
+	} bad_survival[] = {{5, 5000}, {5, 1}, {3, 3}, {5, 0}};
+	for (size_t i = 0; i < sizeof(bad_survival) / sizeof(bad_survival[0]); i++) {
+		memcpy(v, w, sizeof(v));
+		v[GAME_W + bad_survival[i].at] = bad_survival[i].value;
+		assert(!fight_decode(&t, &pack, v));
+	}
+	/* B in a pause quits to select. */
+	step2(&s, K(START), 0);
+	step2(&s, K(B), 0);
+	assert(s.mode == MODE_SELECT && !s.paused && !s.carry);
+	/* Practice: P1, then the dummy (both sides wanted by the cache). */
+	step2(&s, K(L), 0);
+	assert(s.game == GAME_PRACTICE);
+	s.chr[0] = s.chr[1] = terry;
+	step2(&s, K(Y), 0);
+	assert(s.mode == MODE_SELECT && s.picking &&
+	       s.chr[1] == (terry + 1) % pack.characters && s.chr[0] == terry);
+	fight_want(&pack, &s);
+	assert(pack.wanted == 3);
+	fight_scene(&s, &pack, &sc);
+	fight_encode(&s, w);
+	assert(fight_decode(&t, &pack, w));
+	step2(&s, K(RIGHT), 0);
+	assert(s.chr[1] == (terry + 2) % pack.characters && s.chr[0] == terry);
+	/* L goes back to the arcade and to picking P1. */
+	step2(&s, K(L), 0);
+	assert(!s.picking && s.game == GAME_ARCADE && s.chr[1] == terry);
+	step2(&s, 0, 0);
+	step2(&s, K(L), 0);
+	step2(&s, 0, 0);
+	step2(&s, K(L), 0);
+	step2(&s, K(Y), 0);
+	s.chr[1] = terry;
+	s.pal[1] = 1;
+	step2(&s, 0, 0);
+	step2(&s, K(Y), 0);
+	assert(s.mode == MODE_FIGHT && s.game == GAME_PRACTICE && s.chr[1] == terry &&
+	       s.pal[1] == 1 && !s.picking && s.stage == 1 && s.dummy == DUMMY_STAND);
+	intro(&s);
+	/* A standing dummy takes a jab; the damage shows, the bar refills when
+	 * the combo ends. */
+	s.p[0].x = QX(200);
+	s.p[1].x = QX(250);
+	int n = 0;
+	unsigned hits = s.hits, guards = s.guards;
+	solo(&s, K(Y));
+	while (s.hits == hits && n++ < 30)
+		solo(&s, 0);
+	assert(s.hits == hits + 1 && s.guards == guards && s.p[1].hp < life && s.last[0] == (uint32_t)(life - s.p[1].hp));
+	uint32_t dealt = s.last[0];
+	fight_scene(&s, &pack, &sc);
+	fight_encode(&s, w);
+	assert(fight_decode(&t, &pack, w));
+	while (s.p[1].stun && n++ < 100)
+		solo(&s, 0);
+	assert(s.p[1].hp == life && s.last[0] == dealt && !s.damage[0]);
+	/* Nearly empty: the bar stops at 1 and nothing ends. */
+	s.p[1].hp = 2;
+	solo(&s, K(X));
+	for (n = 0; n < 40 && s.hits < hits + 2; n++)
+		solo(&s, 0);
+	assert(s.hits == hits + 2 && s.p[1].hp >= 1 && !s.ended && s.last[0] > 1);
+	fight_encode(&s, w);
+	memcpy(v, w, sizeof(v));
+	v[19 + FIGHTER_WORDS_T + 3] = 0; /* the dummy's life */
+	assert(!fight_decode(&t, &pack, v));
+	for (n = 0; n < 120; n++)
+		solo(&s, 0);
+	assert(s.p[1].hp == life && s.p[0].hp == life);
+	/* R: crouching. */
+	solo(&s, K(R));
+	solo(&s, 0);
+	assert(s.dummy == DUMMY_CROUCH && s.p[1].crouch);
+	/* R: guarding, standing for a high and crouching for a low. */
+	solo(&s, K(R));
+	assert(s.dummy == DUMMY_GUARD);
+	for (n = 0; n < 30; n++)
+		solo(&s, 0);
+	s.p[0].x = QX(200);
+	s.p[1].x = QX(250);
+	guards = s.guards;
+	solo(&s, K(Y));
+	for (n = 0; n < 30 && s.guards == guards; n++)
+		solo(&s, 0);
+	assert(s.guards == guards + 1 && !s.p[1].crouch && s.p[1].block == 1);
+	for (n = 0; n < 40; n++)
+		solo(&s, 0);
+	s.p[0].x = QX(200);
+	s.p[1].x = QX(250);
+	guards = s.guards;
+	hits = s.hits;
+	solo(&s, K(DOWN) | K(B));
+	for (n = 0; n < 30 && s.guards == guards; n++)
+		solo(&s, K(DOWN));
+	assert(s.guards == guards + 1 && s.hits == hits + 1 && s.p[1].crouch && s.p[1].block == 1);
+	/* R: the CPU fights back; R again: standing. */
+	solo(&s, K(R));
+	assert(s.dummy == DUMMY_CPU);
+	for (n = 0; n < 900; n++) {
+		solo(&s, n % 7 ? 0 : K(Y));
+		assert(s.mode == MODE_FIGHT && s.p[0].hp >= 1 && s.p[1].hp >= 1 && !s.ended);
+	}
+	solo(&s, K(R));
+	assert(s.dummy == DUMMY_STAND);
+	fight_scene(&s, &pack, &sc);
+	/* Bad game words. */
+	fight_encode(&s, w);
+	static const struct {
+		int at;
+		uint32_t value;
+	} bad[] = {{0, GAMES}, {1, 1}, {2, DUMMIES}, {4, MAX_STREAK + 1}, {5, 100}, {6, 5}};
+	for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		memcpy(v, w, sizeof(v));
+		v[GAME_W + bad[i].at] = bad[i].value;
+		struct fight_state keep = t;
+		assert(!fight_decode(&t, &pack, v) && !memcmp(&keep, &t, sizeof(t)));
+	}
+	step2(&s, K(START), 0);
+	step2(&s, K(B), 0);
+	assert(s.mode == MODE_SELECT && s.game == GAME_PRACTICE && !s.picking);
+}
 /* Difficulty: the level round-trips and 3 is rejected; on Easy every CPU
  * strike on an idle P1 deals 3/4 of its damage (human port 1 or Normal:
  * full); AI vs AI runs per level guard more and start more specials from
@@ -1557,6 +1757,178 @@ static int heard(const struct fight_state *s, int id, int side)
 	for (unsigned k = 0; k < s->sounds; k++)
 		n += s->sound[k].id == id && (side < 0 || s->sound[k].side == side);
 	return n;
+}
+/* Run the clock out now: the next tick is time over. */
+static void time_over(struct fight_state *s)
+{
+	s->clock = 1;
+	step2(s, 0, 0);
+	assert(s->ended == 1 && !s->clock && s->p[0].hp > 0 && s->p[1].hp > 0);
+}
+/* The KO or time over plays out into the next round. */
+static void round_end(struct fight_state *s)
+{
+	for (int n = 0; n < 181 && s->ended; n++)
+		step2(s, 0, 0);
+	assert(!s->ended);
+}
+/* The round clock and best of three. The clock is full through the versus
+ * card and READY, counts down from FIGHT, holds in a pause and runs out
+ * into time over: the larger share of life wins (the loser's KO sound),
+ * equal shares are a draw (no sound). An arcade match takes two rounds,
+ * the next round starts at READY (ROUND N) with full life and the clock
+ * full, a draw scores for both and two at once is a loss. Survival decides
+ * a time over by life too (a draw replays the fight from the carried
+ * life); practice has no clock. Every state round-trips and an impossible
+ * clock or bout is rejected. */
+static void round_clock(void)
+{
+	static struct scene sc;
+	struct fight_state s, t;
+	uint32_t w[STATE_WORDS], v[STATE_WORDS];
+	fight_reset(&s, 0);
+	s.chr[0] = s.chr[1] = terry;
+	step2(&s, K(Y), 0);
+	assert(s.mode == MODE_FIGHT && s.game == GAME_ARCADE && s.clock == CLOCK_TICKS &&
+	       s.bout == 1 && !s.wins[0] && !s.wins[1]);
+	/* Bad clocks before FIGHT: anything but full. */
+	fight_encode(&s, w);
+	memcpy(v, w, sizeof(v));
+	v[GAME_W + 10] = CLOCK_TICKS - 1;
+	assert(!fight_decode(&t, &pack, v));
+	intro(&s);
+	assert(s.clock == CLOCK_TICKS - 1);
+	for (int n = 0; n < 59; n++)
+		step2(&s, 0, 0);
+	assert(s.clock == CLOCK_TICKS - COUNT_TICKS && !s.ended);
+	fight_scene(&s, &pack, &sc);
+	/* A pause holds the clock. */
+	step2(&s, K(START), 0);
+	for (int n = 0; n < 30; n++)
+		step2(&s, 0, 0);
+	assert(s.paused && s.clock == CLOCK_TICKS - COUNT_TICKS);
+	step2(&s, K(START), 0);
+	assert(!s.paused);
+	/* Bad running words: the clock past full, no bout, a fourth bout, a
+	 * win in the first. */
+	fight_encode(&s, w);
+	assert(fight_decode(&t, &pack, w));
+	static const struct {
+		int at;
+		uint32_t value;
+	} bad[] = {{GAME_W + 10, CLOCK_TICKS + 1}, {GAME_W + 11, 0}, {GAME_W + 11, 4}, {13, 1},
+		   {14, 1}};
+	for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		memcpy(v, w, sizeof(v));
+		v[bad[i].at] = bad[i].value;
+		struct fight_state keep = t;
+		assert(!fight_decode(&t, &pack, v) && !memcmp(&keep, &t, sizeof(t)));
+	}
+	/* Round 1: a draw on time, a point each. */
+	const int life0 = pack.chr[s.chr[0]].stats.life, life1 = pack.chr[s.chr[1]].stats.life;
+	time_over(&s);
+	assert(!heard(&s, SOUND_KO, -1));
+	fight_scene(&s, &pack, &sc);
+	fight_encode(&s, w);
+	assert(fight_decode(&t, &pack, w));
+	round_end(&s);
+	assert(s.mode == MODE_FIGHT && s.wins[0] == 1 && s.wins[1] == 1 && s.bout == 2 &&
+	       s.timer == INTRO_TICKS && s.clock == CLOCK_TICKS && s.p[0].hp == life0 &&
+	       s.p[1].hp == life1 && s.stage == 1);
+	fight_scene(&s, &pack, &sc);
+	fight_encode(&s, w);
+	assert(fight_decode(&t, &pack, w));
+	/* Round 2: P1 ahead on life share when time runs out takes the match. */
+	unsigned first = s.chr[1];
+	intro(&s);
+	s.p[0].hp = life0 * 3 / 4;
+	s.p[1].hp = life1 / 2;
+	time_over(&s);
+	assert(heard(&s, SOUND_KO, 1) == 1);
+	round_end(&s);
+	assert(s.mode == MODE_FIGHT && s.stage == 2 && s.beaten == 1u << first && s.bout == 1 &&
+	       !s.wins[0] && !s.wins[1] && s.timer == 0 && s.clock == CLOCK_TICKS);
+	/* Stage 2: two draws, two points each at once, are a loss. */
+	intro(&s);
+	time_over(&s);
+	round_end(&s);
+	assert(s.wins[0] == 1 && s.wins[1] == 1 && s.bout == 2);
+	intro(&s);
+	time_over(&s);
+	round_end(&s);
+	assert(s.mode == MODE_RESULT && !s.clock && !s.bout && !s.wins[0] && !s.wins[1]);
+	fight_encode(&s, w);
+	memcpy(v, w, sizeof(v));
+	v[GAME_W + 11] = 1;
+	assert(!fight_decode(&t, &pack, v));
+	memcpy(v, w, sizeof(v));
+	v[GAME_W + 10] = 1;
+	assert(!fight_decode(&t, &pack, v));
+	/* A KO in a round of a match: P2 takes a round, the next starts. */
+	for (int n = 1; n <= 21; n++)
+		step2(&s, n == 21 ? K(A) : 0, 0);
+	assert(s.mode == MODE_SELECT);
+	step2(&s, K(Y), 0);
+	intro(&s);
+	s.p[0].x = QX(200);
+	s.p[1].x = QX(260);
+	s.p[0].hp = 10;
+	step2(&s, 0, K(Y));
+	for (int n = 0; n < 60 && !s.ended; n++)
+		step2(&s, 0, 0);
+	assert(s.ended && !s.p[0].hp && s.clock);
+	round_end(&s);
+	assert(s.mode == MODE_FIGHT && !s.wins[0] && s.wins[1] == 1 && s.bout == 2);
+	/* Survival: one round each, decided by life on time; a draw replays
+	 * from the carried life. */
+	step2(&s, K(START), 0);
+	step2(&s, K(B), 0);
+	step2(&s, K(L), 0);
+	step2(&s, 0, 0);
+	s.chr[0] = s.chr[1] = terry;
+	step2(&s, K(Y), 0);
+	assert(s.mode == MODE_FIGHT && s.game == GAME_SURVIVAL && s.clock == CLOCK_TICKS);
+	const int life = pack.chr[terry].stats.life;
+	intro(&s);
+	s.p[0].hp = life - 300;
+	s.p[1].hp = pack.chr[s.chr[1]].stats.life / 2;
+	time_over(&s);
+	round_end(&s);
+	int carried = life - 300 + life * SURVIVAL_HEAL / 1000;
+	carried = carried < life ? carried : life;
+	assert(s.mode == MODE_FIGHT && s.streak == 1 && s.carry == (uint32_t)carried &&
+	       s.bout == 1 && !s.wins[0] && !s.wins[1] && s.clock == CLOCK_TICKS);
+	unsigned opponent = s.chr[1];
+	intro(&s);
+	s.p[1].hp = (int32_t)((int64_t)s.p[0].hp * pack.chr[s.chr[1]].stats.life / life);
+	if ((int64_t)s.p[1].hp * life == (int64_t)s.p[0].hp * pack.chr[s.chr[1]].stats.life) {
+		time_over(&s);
+		round_end(&s);
+		assert(s.mode == MODE_FIGHT && s.streak == 1 && s.chr[1] == opponent &&
+		       s.p[0].hp == carried && s.timer == 0);
+		intro(&s);
+	}
+	s.p[0].hp = 100;
+	time_over(&s);
+	round_end(&s);
+	assert(s.mode == MODE_RESULT && s.streak == 1);
+	/* Practice: no clock. */
+	for (int n = 1; n <= 21; n++)
+		step2(&s, n == 21 ? K(A) : 0, 0);
+	step2(&s, K(L), 0);
+	step2(&s, K(Y), 0);
+	step2(&s, 0, 0);
+	step2(&s, K(Y), 0);
+	assert(s.mode == MODE_FIGHT && s.game == GAME_PRACTICE && !s.clock && s.bout == 1);
+	intro(&s);
+	for (int n = 0; n < 100; n++)
+		step2(&s, 0, 0);
+	assert(!s.clock && !s.ended);
+	fight_scene(&s, &pack, &sc);
+	fight_encode(&s, w);
+	memcpy(v, w, sizeof(v));
+	v[GAME_W + 10] = 5;
+	assert(!fight_decode(&t, &pack, v));
 }
 static const struct sound_event *event(const struct fight_state *s, int id)
 {
@@ -1939,6 +2311,7 @@ static void stage_state(void)
 	/* Outside a fight the arena, camera, shake, flash and sparks are 0. */
 	staged(&s, korea, terry, terry, 150, 210);
 	s.mode = MODE_RESULT;
+	s.bout = 0;
 	s.p[0].x = QX(200);
 	s.p[1].x = QX(260);
 	s.arena = s.cam = 0;
@@ -2143,6 +2516,197 @@ static void stat_tests(void)
  * window breaks it, two at once break each other; nobody in blockstun, a
  * prejump or its safe ticks is thrown (the press is the normal then); no
  * tech on the samsho5sp system; the AI throws and techs. */
+/* Run and backdash (KOF 2002 for Terry, Samurai Shodown for Haohmaru):
+ * 66 runs at walk speed for run_startup ticks then at run speed, holds
+ * through run_min, skids run_stop ticks with a falling speed once forward
+ * is let go; attacks and UP cancel a run and a run never throws. 44
+ * waits back_startup ticks, flies back_air ticks back exactly
+ * back_distance pixels on its arc and lands for back_stop; it cannot be
+ * thrown, guard is impossible and a strike knocks it out of the air;
+ * samsho5sp coasts run_grace ticks and evades strikes for back_invuln
+ * ticks. Mid-run and mid-backdash states round-trip, bad ones are
+ * rejected. */
+static void dashes(void)
+{
+	const struct character *t = &pack.chr[terry];
+	const struct dash_rule *d = &pack.sys[t->system].dash;
+	const struct stats *st = &t->stats;
+	struct fight_state s, u;
+	uint32_t w[STATE_WORDS], v[STATE_WORDS];
+	assert(st->run == (st->walk * d->run_scale + 500) / 1000 && st->run > st->walk);
+	assert(t->action[RUN].count && t->action[BACKDASH].count);
+	/* A tap needs a release in between and both taps within the window. */
+	duel(&s, 100, 400);
+	step2(&s, K(RIGHT), 0);
+	step2(&s, K(RIGHT), 0);
+	assert(!s.p[0].dash && s.p[0].walk == 1);
+	duel(&s, 100, 400);
+	step2(&s, K(RIGHT), 0);
+	for (unsigned n = 0; n < d->window; n++)
+		step2(&s, 0, 0);
+	step2(&s, K(RIGHT), 0);
+	assert(!s.p[0].dash && !s.runs);
+	/* 6, 5, 6: running from the third tick. */
+	duel(&s, 100, 400);
+	step2(&s, K(RIGHT), 0);
+	step2(&s, 0, 0);
+	int x = s.p[0].x;
+	step2(&s, K(RIGHT), 0);
+	assert(s.p[0].dash == DASH_RUN && !s.p[0].elapsed && s.runs == 1 &&
+	       s.p[0].x == x + st->walk && in_action(&s, 0, RUN) && !s.p[0].walk);
+	for (int n = 1; n < 30; n++) {
+		x = s.p[0].x;
+		/* Let go before run_startup + run_min: it keeps running. */
+		step2(&s, n == 5 ? 0 : K(RIGHT), 0);
+		assert(s.p[0].dash == DASH_RUN && s.p[0].elapsed == n &&
+		       s.p[0].x - x == (n < d->run_startup ? st->walk : st->run));
+	}
+	fight_encode(&s, w);
+	assert(fight_decode(&u, &pack, w));
+	fight_encode(&u, v);
+	assert(!memcmp(w, v, sizeof(w)));
+	/* Let go: the skid slows down, then the fighter is free. */
+	for (int n = 0; n < d->run_stop; n++) {
+		x = s.p[0].x;
+		step2(&s, 0, 0);
+		assert(s.p[0].dash == DASH_STOP && s.p[0].elapsed == n &&
+		       s.p[0].x - x == st->run * (d->run_stop - n) / (d->run_stop + 1));
+	}
+	x = s.p[0].x;
+	step2(&s, 0, 0);
+	assert(!s.p[0].dash && s.p[0].x == x);
+	/* An attack cancels the run; so does UP (into a jump). */
+	duel(&s, 100, 400);
+	step2(&s, K(RIGHT), 0);
+	step2(&s, 0, 0);
+	for (int n = 0; n < 8; n++)
+		step2(&s, K(RIGHT), 0);
+	step2(&s, K(RIGHT) | K(Y), 0);
+	assert(!s.p[0].dash && s.p[0].move == STAND_LP + 1);
+	duel(&s, 100, 400);
+	step2(&s, K(RIGHT), 0);
+	step2(&s, 0, 0);
+	step2(&s, K(RIGHT), 0);
+	step2(&s, K(RIGHT) | K(UP), 0);
+	assert(!s.p[0].dash && s.p[0].squat);
+	/* Running into a throwable opponent with forward + HP is the normal. */
+	const int body = st->push;
+	duel(&s, 200, 200 + body);
+	s.p[0].dash = DASH_RUN;
+	s.p[0].elapsed = 20;
+	step2(&s, K(RIGHT) | K(X), 0);
+	assert(!s.p[0].grab && !s.p[1].grab && s.p[0].move == STAND_HP + 1);
+	/* 4, 5, 4: the backdash, from its start tick to landing. */
+	duel(&s, 200, 400);
+	step2(&s, K(LEFT), 0);
+	step2(&s, 0, 0);
+	x = s.p[0].x;
+	int total = d->back_startup + d->back_air + d->back_stop, air = 0;
+	for (int n = 0; n < total; n++) {
+		step2(&s, n ? 0 : K(LEFT), 0);
+		int j = n - d->back_startup;
+		assert(s.p[0].dash == DASH_BACK && s.p[0].elapsed == n && in_action(&s, 0, BACKDASH));
+		assert(heard(&s, SOUND_JUMP, 0) == (j == 0) && heard(&s, SOUND_LAND, 0) == (j == d->back_air - 1));
+		if (j >= 0 && j < d->back_air - 1) {
+			assert(s.p[0].y < 0 || (j == 0 && s.p[0].y == 0));
+			air++;
+		} else
+			assert(!s.p[0].y);
+		if (n == d->back_startup + 6) {
+			fight_encode(&s, w);
+			assert(fight_decode(&u, &pack, w));
+			fight_encode(&u, v);
+			assert(!memcmp(w, v, sizeof(w)));
+		}
+	}
+	assert(air == d->back_air - 1 && s.p[0].x == x - QX(d->back_distance) && s.backdashes == 1);
+	step2(&s, 0, 0);
+	assert(!s.p[0].dash && !s.p[0].y && !s.p[0].vy);
+	/* Bad dash words: past the phases, a skid too long, a backdash off its
+	 * arc, running in the air, KOF has no coast. */
+	{
+		const int P = 19, D = 30, Y = 1, E = 9;
+		static const struct {
+			int field;
+			uint32_t value;
+		} bad[] = {{D, DASH_PHASES}, {D, (uint32_t)-1}, {E, 255}, {Y, (uint32_t)-1},
+			   {D, DASH_COAST}};
+		fight_decode(&u, &pack, w);
+		for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+			memcpy(v, w, sizeof(v));
+			v[P + bad[i].field] = bad[i].value;
+			struct fight_state keep = u;
+			assert(!fight_decode(&u, &pack, v) && !memcmp(&keep, &u, sizeof(u)));
+		}
+		memcpy(v, w, sizeof(v));
+		v[P + D] = DASH_STOP;
+		v[P + E] = d->run_stop;
+		v[P + Y] = 0;
+		assert(!fight_decode(&u, &pack, v));
+	}
+	/* A backdash cannot be thrown, even on the ground in its startup, and
+	 * cannot guard; a strike knocks it out of the air. */
+	duel(&s, 200, 200 + body);
+	step2(&s, 0, K(RIGHT));
+	step2(&s, 0, 0);
+	step2(&s, 0, K(RIGHT));
+	step2(&s, K(RIGHT) | K(X), 0);
+	assert(s.p[1].dash == DASH_BACK && s.p[1].elapsed == 1 && !s.p[0].grab &&
+	       s.p[0].move == STAND_HP + 1);
+	int airborne_hit = 0;
+	for (int gap = body; gap < body + 60 && !airborne_hit; gap += 4)
+		for (int press = 1; press < 12 && !airborne_hit; press++) {
+			duel(&s, 200, 200 + gap);
+			for (int n = 1; n < 40 && !s.hits; n++) {
+				int y = s.p[1].y;
+				step2(&s, n == press ? K(X) : 0, n == 1 || n == 3 ? K(RIGHT) : 0);
+				if (s.hits && y < 0) {
+					assert(!s.guards && !s.p[1].dash && s.p[1].stun);
+					airborne_hit = 1;
+				}
+			}
+		}
+	assert(airborne_hit);
+	for (int n = 0; n < 60 && s.p[1].y; n++)
+		step2(&s, 0, 0);
+	assert(!s.p[1].y && !s.p[1].vy);
+	/* samsho5sp: a held dash coasts run_grace ticks and forward again keeps
+	 * it running; the first back_invuln backdash ticks evade strikes. */
+	const struct dash_rule *ds = &pack.sys[pack.chr[haohmaru].system].dash;
+	assert(ds->run_grace && ds->back_invuln && !ds->back_startup);
+	match(&s, haohmaru, haohmaru, 100, 400);
+	step2(&s, K(RIGHT), 0);
+	step2(&s, 0, 0);
+	for (int n = 0; n < 12; n++)
+		step2(&s, K(RIGHT), 0);
+	step2(&s, 0, 0);
+	assert(s.p[0].dash == DASH_COAST);
+	step2(&s, K(RIGHT), 0);
+	assert(s.p[0].dash == DASH_RUN);
+	for (int n = 0; n <= ds->run_grace; n++)
+		step2(&s, 0, 0);
+	assert(s.p[0].dash == DASH_STOP);
+	/* Haohmaru's stand LP from 90 px lands on its first active tick; a
+	 * backdash begun on that tick is not hit then or on the next. */
+	const struct move *lp = &pack.chr[haohmaru].move[STAND_LP];
+	int gap = 0;
+	for (; gap < 200; gap++) {
+		match(&s, haohmaru, haohmaru, 200, 200 + gap);
+		for (int n = 0; n <= lp->startup && !s.hits; n++)
+			step2(&s, n ? 0 : K(Y), 0);
+		if (!s.hits)
+			break;
+	}
+	assert(gap > 0 && lp->startup >= 2);
+	match(&s, haohmaru, haohmaru, 200, 200 + gap - 1);
+	for (int n = 0; n <= lp->startup + 1; n++) {
+		uint32_t back = n == lp->startup - 2 || n == lp->startup ? K(RIGHT) : 0;
+		step2(&s, n ? 0 : K(Y), back);
+		if (n == lp->startup)
+			assert(s.p[1].dash == DASH_BACK && !s.p[1].elapsed);
+		assert(!s.hits);
+	}
+}
 static void throws(void)
 {
 	const struct character *t = &pack.chr[terry];
@@ -2279,7 +2843,16 @@ static void ai_coverage(void)
 	uint32_t w[STATE_WORDS], v[STATE_WORDS];
 	struct fight_state twin;
 	fight_reset(&s, 1);
-	for (int t = 0; t < 30000 + 15000 * (int)pack.characters; t++) {
+	/* Charge specials are often cut short by a hit, so a roster that has
+	 * not started everything by then gets up to as many ticks again. */
+	const int base = 30000 + 15000 * (int)pack.characters;
+	int missing = 1;
+	for (int t = 0; t < base || (missing && t < 2 * base); t++) {
+		if (t >= base && t % 1000 == 0) {
+			missing = 0;
+			for (unsigned c = 0; c < pack.characters; c++)
+				missing |= started[c] != (1u << pack.chr[c].moves) - 1;
+		}
 		struct fight_state before = s;
 		fight_step(&s, &pack, 0, 0, 0);
 		/* A copy decoded mid-run replays every tick word for word: camera,
@@ -2337,6 +2910,10 @@ static void ai_coverage(void)
 		throwers += pack.chr[c].projectiles > 0;
 	assert(blocks > 20 && hits > 20 && crouch_blocks > 5 && crouch_hits > 5 && s.round > 3 &&
 	       s.run > 0 && (shots > 0 || !throwers) && s.specials > 20);
+	/* The AI runs in from afar and backdashes from swings it does not
+	 * guard. */
+	printf("ai: %u runs and %u backdashes\n", s.runs, s.backdashes);
+	assert(s.runs > 20 && s.backdashes > 20);
 	/* Every stage hosted fights; the common sound events and both effect
 	 * sets (KOF hits and guards, Samurai Shodown slashes and blood) were
 	 * seen. */
@@ -2435,6 +3012,47 @@ static void previews(void)
 		win_round(&s, 0);
 	assert(s.mode == MODE_CLEAR);
 	snapshot(&s, "clear");
+	/* ROUND 2 after P1 took the first round (its win mark lit), then the
+	 * clock in the last ten. */
+	fight_reset(&s, 0);
+	step2(&s, K(Y), 0);
+	intro(&s);
+	s.p[1].hp = 1;
+	s.p[0].x = QX(200);
+	s.p[1].x = QX(260);
+	step2(&s, K(Y), 0);
+	while (s.mode == MODE_FIGHT && s.bout == 1)
+		step2(&s, 0, 0);
+	while (s.timer < INTRO_TICKS + 10)
+		step2(&s, 0, 0);
+	snapshot(&s, "round2");
+	while (s.timer < BANNER_END)
+		step2(&s, 0, 0);
+	s.clock = 9 * COUNT_TICKS;
+	snapshot(&s, "clock");
+	/* Survival on the select screen, then picking a practice dummy and
+	 * the practice HUD with a combo's damage. */
+	fight_reset(&s, 0);
+	step2(&s, K(L), 0);
+	s.record = 12;
+	snapshot(&s, "survival");
+	step2(&s, 0, 0);
+	step2(&s, K(L), 0);
+	step2(&s, K(Y), 0);
+	assert(s.picking);
+	snapshot(&s, "dummy");
+	step2(&s, 0, 0);
+	step2(&s, K(Y), 0);
+	assert(s.game == GAME_PRACTICE && s.mode == MODE_FIGHT);
+	intro(&s);
+	while (s.timer < BANNER_END)
+		step2(&s, 0, 0);
+	s.p[0].x = QX(200);
+	s.p[1].x = QX(250);
+	step2(&s, K(Y), 0);
+	while (!s.last[0])
+		step2(&s, 0, 0);
+	snapshot(&s, "practice");
 	/* A KOF hit spark on Korea and a slash with blood on the Mizuki shrine,
 	 * two ticks after the contact. */
 	static const char *const stages[2] = {"KOREA", "MIZUKI"};
@@ -2510,12 +3128,15 @@ static void logic_tests(const uint8_t *data, size_t len)
 	rising_tackle();
 	follow_ups();
 	ladder();
+	game_modes();
+	round_clock();
 	round_start();
 	combos();
 	move_lists();
 	difficulty();
 	knockdowns();
 	throws();
+	dashes();
 	state_words();
 	stat_tests();
 	pack.stages = stages;
@@ -2630,6 +3251,15 @@ int main(int argc, char **argv)
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
 	memcpy(copy, "FGSTAT12", 8); /* before throws */
+	assert(!retro_unserialize(copy, n));
+	memcpy(copy, end, n);
+	memcpy(copy, "FGSTAT13", 8); /* before run and backdash */
+	assert(!retro_unserialize(copy, n));
+	memcpy(copy, end, n);
+	memcpy(copy, "FGSTAT14", 8); /* before the game modes */
+	assert(!retro_unserialize(copy, n));
+	memcpy(copy, end, n);
+	memcpy(copy, "FGSTAT15", 8); /* before the clock and best of three */
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
 	memset(copy + 16 + 8 * 4, 0xff, 4);
@@ -2767,7 +3397,7 @@ int main(int argc, char **argv)
 	     "effect budget, camera and walls, sparks, sound events, content, "
 	     "RGB565/XRGB8888, audio, ports, replay, pause, state validation, frame "
 	     "data, hit/block/hitstop ticks, pushback and corner, guard heights, "
-	     "trades, combos, knockdowns, throws, move lists, difficulty, commands, buffer, prejump, cancels, follow-ups, projectiles and clash, "
+	     "trades, combos, knockdowns, throws, run and backdash, survival and practice, round clock, move lists, difficulty, commands, buffer, prejump, cancels, follow-ups, projectiles and clash, "
 	     "specials, ladder, systems and stats, AI coverage and stress cycle "
 	     "passed");
 	return 0;
