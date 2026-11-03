@@ -57,7 +57,7 @@ for scene in 0 1 2 3; do
     grep -q "fight: scene $scene effects drawn/requested .* sparks [0-9]*, .*stage [A-Z]* cam [0-9]*" "$f"
 done
 grep -q 'fight: TERRY stand LP startup/active/recovery 3/3/6' "$f"
-grep -q 'fight: TERRY special 236+3 startup/active/recovery 0/0/41' "$f"
+grep -q 'fight: TERRY special POWER WAVE 236+3 startup/active/recovery 0/0/41' "$f"
 grep -q 'fight: tick .* specials .* run .* stage' "$f"
 grep -q 'fight: cast .* vs .* on [A-Z]* ready in [0-9]* runs (fight)' "$f"
 grep -q 'fight: scene 0 sound starts [1-9].* music [a-z]*-[a-z0-9]* .* MP2 frames [1-9]' "$f"
