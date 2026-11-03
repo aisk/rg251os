@@ -1566,7 +1566,11 @@ static uint32_t dummy(struct fight_state *s, const struct assets *a)
 		if (sh->kind && !sh->owner && abs(sh->x - px(p)) < range)
 			guard = guard == GUARD_LOW ? guard : shot_type(s, a, sh)->hit.guard;
 	}
-	return guard < 0 ? 0 : back_key(p) | (guard == GUARD_LOW ? KEY(DOWN) : 0u);
+	/* A standing guard lets go of back through down-back, so holding back
+	 * again for the next swing is no 44 backdash. */
+	if (guard < 0)
+		return numpad(history_at(p, 0), p->face) == 4 ? back_key(p) | KEY(DOWN) : 0;
+	return back_key(p) | (guard == GUARD_LOW ? KEY(DOWN) : 0u);
 }
 /* ---- ladder ---- */
 /* Characters P1 meets in a run: everyone else, or itself in a one-character

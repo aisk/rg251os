@@ -1542,6 +1542,33 @@ static void game_modes(void)
 	step2(&s, K(B), 0);
 	assert(s.mode == MODE_SELECT && s.game == GAME_PRACTICE && !s.picking);
 }
+/* The guard-all dummy guards every normal in its guard range at any
+ * pace: letting go of back between swings and holding it again is no 44
+ * backdash. */
+static void guard_dummy(void)
+{
+	static const uint32_t press[4] = {K(Y), K(X), K(B), K(A)};
+	struct fight_state s;
+	for (unsigned c = 0; c < pack.characters; c++)
+		for (int period = 6; period < 40; period += 3)
+			for (int b = 0; b < 4; b++) {
+				match(&s, c, c, 200, 250);
+				s.game = GAME_PRACTICE;
+				s.dummy = DUMMY_GUARD;
+				unsigned missed = 0;
+				for (int n = 0; n < 300; n++) {
+					int near = abs(s.p[1].x - s.p[0].x) / 4 < pack.chr[c].stats.guard_range;
+					unsigned open = s.hits - s.guards;
+					solo(&s, n % period ? 0 : press[b]);
+					missed += near && s.hits - s.guards != open;
+				}
+				if (s.backdashes || missed) {
+					fprintf(stderr, "guard dummy %s every %d ticks: %u backdashes, %u hits\n",
+						pack.chr[c].name, period, s.backdashes, missed);
+					abort();
+				}
+			}
+}
 /* Difficulty: the level round-trips and 3 is rejected; on Easy every CPU
  * strike on an idle P1 deals 3/4 of its damage (human port 1 or Normal:
  * full); AI vs AI runs per level guard more and start more specials from
@@ -3129,6 +3156,7 @@ static void logic_tests(const uint8_t *data, size_t len)
 	follow_ups();
 	ladder();
 	game_modes();
+	guard_dummy();
 	round_clock();
 	round_start();
 	combos();
