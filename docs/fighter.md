@@ -1,6 +1,6 @@
 # 格斗引擎：POC 实现、验证和后续计划
 
-2026-11-03。设备优先的 480×320、1 对 1、标准 libretro 软件渲染原型。当前交付用于验证核心和宿主集成；已完成首轮合成负载真机测试，普通场景可满速，高压力场景超时；P0 的持续稳定性与真实素材验收、原作素材导入以及 P1 的完整格斗规则仍待完成。设计取舍见[方案调研](fighting-engine-research.md)，方案包含未来设计，实际完成范围以本文和代码为准。
+2026-11-03。设备优先的 480×320、1 对 1、标准 libretro 软件渲染原型。当前交付用于验证核心和宿主集成；已完成首轮合成负载真机测试，普通场景可满速，高压力场景超时；P0 的持续稳定性与真实素材验收、原作素材导入以及 P1 的完整格斗规则仍待完成。设计取舍见[方案调研](fighting-engine-research.md)，数值、属性和多作品体系的设计见[数值设计](fighter-stats.md)，方案包含未来设计，实际完成范围以本文和代码为准。
 
 ## 目标和约束
 
@@ -152,7 +152,8 @@ python3 tools/fighter/report.py /path/to/log/boot-NNNN/
    5. 投技、倒地和起身。
    选人和简单闯关已完成。之后是其他角色的必杀技、多局制和计时、可重放规则。
 5. **角色：能找到的都做进去。** 盘点结果在本机 `build/fighter/source/INVENTORY.md`（不提交）：Sprite Database 可直接导入的约 30 个（KOF 2002 约 11、KOF 2003 约 15、月华剑士 4），侍魂只有 4 张不完整的 SS4 小图，没有霸王丸；龙虎、饿狼 2/3、Real Bout、KOF 94–97 也没有，Spriters Resource 对脚本请求返回 403。优先导入 KOF02 的 Chris、Vice、Mature、Shermie、May Lee、Chin，KOF03 的 Iori、Joe 或 Mai，持刀角色用月华剑士的 Shinnosuke 和 Hibiki。已导入 KOF02 的 Chin、Chris、Mature、May Lee、Shermie、Vice（只有普通动作和八个普通技）。还在找更好的来源：Chin 的图集没有防御帧，现在借用了重拳起手和盘坐帧；侍魂霸王丸也还没有。不同作品保持原像素 1:1。
-6. **有能实际打的内容后集中一次上机**：必须 `make image`、`make frontend-test` 零 warning 后再提交。同一次开机测 Max/Adaptive、真实对局负载、新 blit 计时、持续十分钟、恢复/休眠与主观手感和延迟。初始正常对战总工作目标 p99<12ms。
+6. **数值体系（2026-11-03 设计）**：按[数值设计](fighter-stats.md)的分阶段实施推进，第一步是每角色属性、数值来源字段和以 KOF 2002 为参考尺度的系统档案。现有数值都是估计，不平衡优先、娱乐性优先。
+7. **有能实际打的内容后集中一次上机**：必须 `make image`、`make frontend-test` 零 warning 后再提交。同一次开机测 Max/Adaptive、真实对局负载、新 blit 计时、持续十分钟、恢复/休眠与主观手感和延迟。初始正常对战总工作目标 p99<12ms。
 
 ## 开发注意事项
 
