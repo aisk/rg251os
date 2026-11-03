@@ -1,19 +1,24 @@
 /* Renderer and pack-decoder regression for the fighter core, linked into the
- * callback harness (test.c). It writes its own FIGHTP05 packs from known
- * bitmaps and two system profiles, checks that malformed or truncated packs
- * (including bad systems, stats, classes and class defaults) are rejected,
- * that stats resolve from the system plus overrides, that class defaults
- * fill hitstun/blockstun/hitstop and the damage scale applies, and
- * compares fight_render pixel for pixel with an independent per-pixel
- * reference (straight formulas, divisions, no spans) on fixed edge scenes,
- * seeded random scenes and real game scenes (with projectiles and the
- * select and ladder screens). It also rejects malformed palette, frame,
- * name, box, step, motion, move, special and projectile data, checks the
- * loader's derived frame data, the cast (resident images follow the
- * state's fighters and palettes), that boxes mirror with the sprite pixel
- * for pixel, the L box overlay and the effect pixel budget. FIGHTER_BENCH=1
- * also prints host render times per stress scene; host numbers only show
- * relative change. */
+ * callback harness (test.c). It writes its own FIGHTP06 packs from known
+ * bitmaps, two system profiles, two spark anims and a three-layer stage,
+ * checks that malformed or truncated packs (including bad systems, stats,
+ * classes, class defaults, sparks, walls, effect sets, slash and home
+ * fields and stages, layers and stage anims) are rejected, that stats
+ * resolve from the system plus overrides, that class defaults fill
+ * hitstun/blockstun/hitstop and the damage scale applies, and compares
+ * fight_render pixel for pixel with an independent per-pixel reference
+ * (straight formulas, divisions, no spans; stage layer images through
+ * their own edge rules) on fixed edge scenes, seeded random scenes and real
+ * game scenes (with stages, sparks, projectiles and the select and ladder
+ * screens). The synthetic stage is also drawn per screen pixel from its
+ * layers (parallax, every edge rule, anims) for many cameras, shakes and
+ * ticks. It also rejects malformed palette, frame, name, box, step,
+ * motion, move, special and projectile data, checks the loader's derived
+ * frame data, the cast (resident images follow the state's fighters,
+ * palettes and stage), that boxes mirror with the sprite pixel for pixel,
+ * the L box overlay and the effect pixel budget. FIGHTER_BENCH=1 also
+ * prints host render times and written pixels per stress scene and per
+ * stage; host numbers only show relative change. */
 #include "fighter.h"
 #include "test-render.h"
 #include <assert.h>
@@ -40,7 +45,7 @@ static void decode(const uint8_t *p, size_t size, struct decoded *d)
 {
 	d->palettes = get32le(p + 20);
 	d->frames = get32le(p + 24);
-	size_t at = 40;
+	size_t at = 48;
 	for (unsigned i = 0; i < d->palettes; i++) {
 		d->pal_n[i] = get16(p + at + 2);
 		at += 4;
@@ -94,22 +99,84 @@ static uint16_t ref_pixel(uint16_t dst, uint16_t src, unsigned a, int blend)
 	}
 	return (uint16_t)(d[0] << 11 | d[1] << 5 | d[2]);
 }
+/* Edge rule applied to layer coordinate v of an axis n long, written with
+ * loops instead of the loader's modulo: -1 transparent, -2 fill colour. */
+static int ref_edge(int v, int n, int edge)
+{
+	if (v >= 0 && v < n)
+		return v;
+	switch (edge) {
+	case EDGE_EXTEND:
+		return v < 0 ? 0 : n - 1;
+	case EDGE_REPEAT:
+		while (v < 0)
+			v += n;
+		while (v >= n)
+			v -= n;
+		return v;
+	case EDGE_MIRROR:
+		while (v < 0)
+			v += 2 * n;
+		while (v >= 2 * n)
+			v -= 2 * n;
+		return v < n ? v : 2 * n - 1 - v;
+	case EDGE_COLOR:
+		return -2;
+	default:
+		return -1;
+	}
+}
+/* Colour of layer l at layer pixel (u, v), -1 where transparent. The frame
+ * sits at minus its anchor inside the layer rectangle. */
+static int ref_layer(const struct decoded *dec, const struct layer *l, int u, int v)
+{
+	int x = ref_edge(u, l->w, l->edge[0]), y = ref_edge(v, l->h, l->edge[1]);
+	if (x == -1 || y == -1)
+		return -1;
+	if (x == -2 || y == -2)
+		return l->color;
+	const struct bitmap *b = &dec->frame[l->frame];
+	x += b->ax;
+	y += b->ay;
+	if (x < 0 || x >= b->w || y < 0 || y >= b->h || b->px[y * b->w + x] < 0)
+		return -1;
+	return dec->pal[l->palette][b->px[y * b->w + x]];
+}
+/* The cast stage layer whose expanded image is image, or -1. */
+static int layer_of(const struct assets *a, int image)
+{
+	if (a->cast_stage < 0)
+		return -1;
+	const struct stage *st = &a->stage[a->cast_stage];
+	for (unsigned i = 0; i < st->layers; i++)
+		if (a->layer_image[i] == image)
+			return (int)i;
+	return -1;
+}
 static void reference(const struct assets *a, const struct decoded *dec,
 		      const struct scene *s, uint16_t *fb)
 {
 	for (unsigned k = 0; k < s->count; k++) {
 		const struct command *c = &s->cmd[k];
 		const struct bitmap *b = NULL;
+		const struct layer *l = NULL;
 		const uint16_t *pal = NULL;
-		int w = c->w, h = c->h;
+		int w = c->w, h = c->h, layer = -1;
 		if (c->op == SPRITE) {
 			if (c->image < 0 || (unsigned)c->image >= a->images)
 				continue;
 			const struct image *im = &a->image[c->image];
-			b = &dec->frame[im->frame];
-			pal = dec->pal[im->palette];
-			w = b->w;
-			h = b->h;
+			layer = layer_of(a, c->image);
+			if (layer >= 0) {
+				l = &a->layer[a->stage[a->cast_stage].first_layer + (unsigned)layer];
+				w = im->w;
+				h = im->h;
+			} else {
+				b = &dec->frame[im->frame];
+				pal = dec->pal[im->palette];
+				w = b->w;
+				h = b->h;
+			}
 		}
 		int y0 = c->y > 0 ? c->y : 0, x0 = c->x > 0 ? c->x : 0;
 		for (int y = y0; y < FH && y < c->y + h; y++)
@@ -118,8 +185,15 @@ static void reference(const struct assets *a, const struct decoded *dec,
 				if (!c->alpha)
 					continue;
 				uint16_t src = c->color;
-				if (b) {
-					int v = b->px[ly * w + (c->flip ? w - 1 - lx : lx)];
+				int sx = c->flip ? w - 1 - lx : lx;
+				if (l) {
+					int v = ref_layer(dec, l, a->layer_x0[layer] + sx,
+							  a->layer_y0[layer] + ly);
+					if (v < 0)
+						continue;
+					src = (uint16_t)v;
+				} else if (b) {
+					int v = b->px[ly * w + sx];
 					if (v < 0)
 						continue;
 					src = pal[v];
@@ -186,7 +260,16 @@ enum field {
 	F_SYS_QUARTER, F_SYS_DRAGON, F_SYS_CHARGE, F_SYS_GRACE, F_SYS_RELEASE,
 	F_SYS_LIGHT_HITSTUN, F_SYS_LIGHT_BLOCKSTUN, F_SYS_LIGHT_HITSTOP, F_SYS_LIGHT_HAS,
 	F_SYS_THROW_HITSTUN, F_SYS_THROW_HAS, F_CHAR_SYSTEM, F_STATS_MASK, F_STAT_LIFE,
-	F_STAT_WALK, F_STAT_HEIGHT, F_DEF_HITSTUN, F_DEF_CLASS, F_DEF_DEFAULTS, FIELDS
+	F_STAT_WALK, F_STAT_HEIGHT, F_DEF_HITSTUN, F_DEF_CLASS, F_DEF_DEFAULTS,
+	/* Sparks (the first one), walls and effect sets, slash and home. */
+	F_SPARKS, F_STAGES, F_SPARK_BLEND, F_SPARK_ALPHA, F_SPARK_STEPS, F_SPARK_FRAME,
+	F_SPARK_PALETTE, F_SPARK_TICKS, F_SYS_MARGIN, F_SYS_PLAY, F_SYS_EFFECT, F_CHAR_SLASH,
+	F_CHAR_HOME,
+	/* The stage, its first layer and that layer's first anim step. */
+	F_STAGE_NAME_LEN, F_STAGE_NAME_CHAR, F_STAGE_WIDTH, F_STAGE_GROUND, F_STAGE_SYSTEM,
+	F_STAGE_LAYERS, F_LAYER_FRAME, F_LAYER_PALETTE, F_LAYER_W, F_LAYER_H, F_LAYER_X,
+	F_LAYER_Y, F_LAYER_NUM, F_LAYER_DEN, F_LAYER_EX, F_LAYER_EY, F_LAYER_COLOR,
+	F_LAYER_ANIMS, F_ANIM_STEPS, F_ASTEP_FRAME, F_ASTEP_X, F_ASTEP_Y, F_ASTEP_TICKS, FIELDS
 };
 struct pack {
 	uint8_t data[1 << 16];
@@ -211,14 +294,18 @@ static void seal(struct pack *p)
 		h = (h ^ p->data[i]) * 16777619u;
 	set(p, 12, h, 4);
 }
+/* Frames 0..4 are the character's, 5 the stage layer art (at 2,3 inside
+ * its layers) and 6 a stage anim frame. */
 #define SYN_FRAMES 5
-static struct bitmap syn[SYN_FRAMES];
-static int16_t syn_px[SYN_FRAMES][4096];
-static const int syn_size[SYN_FRAMES][4] = {
-    {13, 7, 6, 7}, {1, 1, 0, 1}, {40, 30, 20, 30}, {600, 3, 300, 3}, {17, 64, -5, 70}};
+#define SYN_ALL 7
+static struct bitmap syn[SYN_ALL];
+static int16_t syn_px[SYN_ALL][4096];
+static const int syn_size[SYN_ALL][4] = {{13, 7, 6, 7},	   {1, 1, 0, 1},  {40, 30, 20, 30},
+					 {600, 3, 300, 3}, {17, 64, -5, 70}, {48, 40, -2, -3},
+					 {8, 6, 0, 0}};
 static void make_bitmaps(void)
 {
-	for (int f = 0; f < SYN_FRAMES; f++) {
+	for (int f = 0; f < SYN_ALL; f++) {
 		struct bitmap *b = &syn[f];
 		b->w = syn_size[f][0];
 		b->h = syn_size[f][1];
@@ -231,7 +318,9 @@ static void make_bitmaps(void)
 				/* Holes, an asymmetric notch and a ring exercise spans. */
 				if ((f == 0 && ((x * 3 + y * 5) % 7 == 0 || (y == 2 && x > 8))) ||
 				    (f == 2 && (x - 20) * (x - 20) + (y - 15) * (y - 15) < 60) ||
-				    (f == 3 && x % 50 > 44) || (f == 4 && x == 16 && y < 63))
+				    (f == 3 && x % 50 > 44) || (f == 4 && x == 16 && y < 63) ||
+				    (f == 5 && ((x + y) % 9 == 0 || (x > 30 && y > 25))) ||
+				    (f == 6 && x == y))
 					v = -1;
 				b->px[y * b->w + x] = (int16_t)v;
 			}
@@ -255,6 +344,9 @@ static const unsigned syn_sys[2][1 + 11 + 8] = {
 static const unsigned syn_class[2][CLASSES - 1][4] = {
     {{11, 9, 6, 3}, {19, 17, 9, 3}, {19, 17, 0, 1}, {19, 17, 10, 3}, {19, 17, 12, 3}, {0, 0, 0, 0}},
     {{12, 10, 7, 3}, {22, 20, 12, 3}, {20, 18, 11, 3}, {20, 18, 11, 3}, {22, 20, 14, 3}, {0, 0, 0, 0}}};
+/* Walls (margin, play width) and effect sets: spark + 1 per FX_ key. */
+static const unsigned syn_fx[2][FX_KEYS] = {{1, 1, 2, 1, 0, 0, 0, 0, 0, 0, 0},
+					    {0, 0, 0, 0, 2, 2, 2, 1, 2, 2, 2}};
 static void systems(struct pack *p)
 {
 	for (int k = 0; k < 2; k++) {
@@ -278,6 +370,15 @@ static void systems(struct pack *p)
 					p->at[j ? F_SYS_THROW_HAS : F_SYS_THROW_HITSTUN] = p->len;
 				put(p, syn_class[k][c][j], 2);
 			}
+		if (!k)
+			MARK(F_SYS_MARGIN), p->at[F_SYS_PLAY] = p->len + 2;
+		put(p, k ? 16 : 24, 2);
+		put(p, k ? 400 : FW, 2);
+		for (int j = 0; j < FX_KEYS; j++) {
+			if (!k && !j)
+				MARK(F_SYS_EFFECT);
+			put(p, syn_fx[k][j], 2);
+		}
 	}
 }
 /* One character "SYN" on system 0 with its own walk 10 and height high:
@@ -285,26 +386,128 @@ static void systems(struct pack *p)
  * HK is class heavy and takes hitstun, blockstun and hitstop from it),
  * 12..13 for one 236+P special that rises 4 px for 2 ticks, lands, hits on
  * 13 and launches the projectile on 12; 14..15 are the projectile's
- * (hitboxes only, class special with its hitstop from the class). Two
- * palettes on sheet 0, plus a third on sheet 1 that no frame uses. */
+ * (hitboxes only, class special with its hitstop from the class). Weapon
+ * moves are the LP-button normals and the special; its home stage is DOJO.
+ * Two palettes on sheet 0, plus a third on sheet 1 that no frame uses. */
 #define SYN_STEPS 16
+/* Spark 0 opaque: frame 0 palette 0 for 2 ticks, frame 1 palette 1 for 3;
+ * spark 1 additive 200: frame 4 for 4 ticks. */
+static void sparks(struct pack *p)
+{
+	MARK(F_SPARK_BLEND);
+	put(p, OPAQUE, 1);
+	MARK(F_SPARK_ALPHA);
+	put(p, 255, 1);
+	MARK(F_SPARK_STEPS);
+	put(p, 2, 2);
+	MARK(F_SPARK_FRAME);
+	put(p, 0, 2);
+	MARK(F_SPARK_PALETTE);
+	put(p, 0, 2);
+	MARK(F_SPARK_TICKS);
+	put(p, 2, 2);
+	put(p, 1, 2);
+	put(p, 1, 2);
+	put(p, 3, 2);
+	put(p, ADD, 1);
+	put(p, 200, 1);
+	put(p, 1, 2);
+	put(p, 4, 2);
+	put(p, 0, 2);
+	put(p, 4, 2);
+}
+/* Stage "DOJO", 600 wide, ground row 200, walls from system "ss". Layers
+ * (frame 5 each): 0 at y -20 moving cam/3, repeated across and filled
+ * 0x1234 above and below, with a two-step anim (frame 6 at 4,5 for 3
+ * ticks, then nothing for 2); 1 at x 100, y 60 fixed to the world,
+ * extended across and clipped vertically, palette 1; 2 at x -30, y 100
+ * moving against the camera (-cam/2), mirrored across and extended
+ * vertically, with frame 6 at -3,40 always. */
+struct syn_layer {
+	unsigned palette, w, h;
+	int x, y, num;
+	unsigned den, ex, ey, color, anims;
+};
+static const struct syn_layer syn_layers[3] = {
+    {0, 52, 45, 0, -20, 1, 3, EDGE_REPEAT, EDGE_COLOR, 0x1234, 1},
+    {1, 50, 44, 100, 60, 1, 1, EDGE_EXTEND, EDGE_NONE, 0, 0},
+    {0, 50, 43, -30, 100, -1, 2, EDGE_MIRROR, EDGE_EXTEND, 0, 1}};
+static void stage(struct pack *p)
+{
+	MARK(F_STAGE_NAME_LEN);
+	put(p, 4, 1);
+	MARK(F_STAGE_NAME_CHAR);
+	for (const char *c = "DOJO"; *c; c++)
+		put(p, (unsigned char)*c, 1);
+	MARK(F_STAGE_WIDTH);
+	put(p, 600, 2);
+	MARK(F_STAGE_GROUND);
+	put(p, 200, 2);
+	MARK(F_STAGE_SYSTEM);
+	put(p, 1, 2);
+	MARK(F_STAGE_LAYERS);
+	put(p, 3, 2);
+	for (int i = 0; i < 3; i++) {
+		const struct syn_layer *l = &syn_layers[i];
+		const unsigned v[12] = {5,
+					l->palette,
+					l->w,
+					l->h,
+					(uint16_t)l->x,
+					(uint16_t)l->y,
+					(uint16_t)l->num,
+					l->den,
+					l->ex,
+					l->ey,
+					l->color,
+					l->anims};
+		for (int j = 0; j < 12; j++) {
+			if (!i)
+				p->at[F_LAYER_FRAME + j] = p->len;
+			put(p, v[j], j == 8 || j == 9 ? 1 : 2);
+		}
+		if (!l->anims)
+			continue;
+		if (!i)
+			MARK(F_ANIM_STEPS);
+		put(p, i ? 1 : 2, 2);
+		if (!i)
+			MARK(F_ASTEP_FRAME), p->at[F_ASTEP_X] = p->len + 2,
+					     p->at[F_ASTEP_Y] = p->len + 4,
+					     p->at[F_ASTEP_TICKS] = p->len + 6;
+		put(p, 6, 2);
+		put(p, (uint16_t)(i ? -3 : 4), 2);
+		put(p, i ? 40 : 5, 2);
+		put(p, i ? 5 : 3, 2);
+		if (i)
+			continue;
+		put(p, 0xffff, 2);
+		put(p, 0, 2);
+		put(p, 0, 2);
+		put(p, 2, 2);
+	}
+}
 static int syn_hits(unsigned i) { return i == 9 || i == 10 || i >= 13; }
 static int syn_hurts(unsigned i) { return i < 14; }
 static void build(struct pack *p, int automatic)
 {
 	memset(p, 0, sizeof(*p));
-	memcpy(p->data, "FIGHTP05", 8);
+	memcpy(p->data, "FIGHTP06", 8);
 	p->len = 16;
 	MARK(F_FLAGS);
 	put(p, (unsigned)automatic, 4);
 	MARK(F_PALETTES);
 	put(p, 3, 4);
-	put(p, SYN_FRAMES, 4);
+	put(p, SYN_ALL, 4);
 	MARK(F_CHARACTERS);
 	put(p, 1, 4); /* characters */
 	put(p, 3, 4); /* effects */
 	MARK(F_SYSTEMS);
 	put(p, 2, 4);
+	MARK(F_SPARKS);
+	put(p, 2, 4);
+	MARK(F_STAGES);
+	put(p, 1, 4);
 	for (int c = 0; c < 3; c++) {
 		if (!c)
 			MARK(F_PAL_SHEET);
@@ -315,7 +518,7 @@ static void build(struct pack *p, int automatic)
 		for (int i = 0; i < 16; i++)
 			put(p, syn_pal[c & 1][i], 2);
 	}
-	for (int f = 0; f < SYN_FRAMES; f++) {
+	for (int f = 0; f < SYN_ALL; f++) {
 		const struct bitmap *b = &syn[f];
 		if (f == 1)
 			MARK(F_FRAME_SHEET);
@@ -367,6 +570,7 @@ static void build(struct pack *p, int automatic)
 			if (b->px[i] >= 0)
 				put(p, (unsigned)b->px[i], 1);
 	}
+	sparks(p);
 	systems(p);
 	unsigned boxes = 0;
 	for (unsigned i = 0; i < SYN_STEPS; i++)
@@ -505,6 +709,10 @@ static void build(struct pack *p, int automatic)
 			put(p, 6, 2);
 		}
 	}
+	MARK(F_CHAR_SLASH);
+	put(p, 1u | 1u << 4, 2); /* LP-button normals and the special */
+	MARK(F_CHAR_HOME);
+	put(p, 1, 2);
 	static const unsigned effects[3][2] = {{2, 1}, {3, 0}, {4, 1}};
 	for (int i = 0; i < 3; i++) {
 		if (i == 2) {
@@ -514,6 +722,7 @@ static void build(struct pack *p, int automatic)
 		put(p, effects[i][0], 2);
 		put(p, effects[i][1], 2);
 	}
+	stage(p);
 	seal(p);
 }
 static struct assets assets_a, assets_b;
@@ -540,8 +749,8 @@ static void malformed(void)
 	    {F_ROW_COUNT, 9, 2},	    {F_SPAN_LEN, 0, 2},
 	    {F_SPAN_X, 12, 2},		    {F_SPAN2_X, 0, 2},
 	    {F_INDEX, 16, 1},		    {F_ACTION_COUNT, 0, 2},
-	    {F_ACTION_FIRST, SYN_STEPS, 2},    {F_STEP_FRAME, SYN_FRAMES, 2},
-	    {F_STEP_TICKS, 0, 2},	    {F_EFFECT_FRAME, SYN_FRAMES, 2},
+	    {F_ACTION_FIRST, SYN_STEPS, 2},    {F_STEP_FRAME, SYN_ALL, 2},
+	    {F_STEP_TICKS, 0, 2},	    {F_EFFECT_FRAME, SYN_ALL, 2},
 	    {F_EFFECT_PALETTE, 3, 2},	    {F_EFFECT_PALETTE, 2, 2},
 	    /* Characters and names. */
 	    {F_CHARACTERS, 0, 4},	    {F_CHARACTERS, MAX_CHARACTERS + 1, 4},
@@ -625,6 +834,37 @@ static void malformed(void)
 	    {F_DEF_DEFAULTS, 8, 2},	    {F_PROJ_CLASS, CLASSES, 2},
 	    {F_PROJ_DEFAULTS, DEFAULT_HITSTOP | DEFAULT_HITSTUN, 2},
 	    {F_PROJ_CLASS, CLASS_NONE, 2},
+	    /* Sparks, walls, effect sets, slash and home. */
+	    {F_SPARKS, MAX_SPARKS + 1, 4},  {F_SPARKS, 3, 4},
+	    {F_SPARKS, 1, 4},		    {F_STAGES, MAX_STAGES + 1, 4},
+	    {F_STAGES, 2, 4},		    {F_STAGES, 0, 4}, /* SYN's home */
+	    {F_SPARK_BLEND, BLENDS, 1},	    {F_SPARK_ALPHA, 0, 1},
+	    {F_SPARK_STEPS, 0, 2},	    {F_SPARK_STEPS, MAX_SPARK_STEPS + 1, 2},
+	    {F_SPARK_FRAME, SYN_ALL, 2},    {F_SPARK_PALETTE, 3, 2},
+	    {F_SPARK_PALETTE, 2, 2},	    {F_SPARK_TICKS, 0, 2},
+	    {F_SPARK_TICKS, 256, 2},	    {F_SYS_MARGIN, MIN_MARGIN - 1, 2},
+	    {F_SYS_MARGIN, MAX_MARGIN + 1, 2}, {F_SYS_PLAY, MIN_PLAY_WIDTH - 1, 2},
+	    {F_SYS_PLAY, FW + 1, 2},	    {F_SYS_EFFECT, 3, 2},
+	    {F_CHAR_SLASH, 32, 2},	    {F_CHAR_HOME, 2, 2},
+	    /* Stages, layers and stage anims. */
+	    {F_STAGE_NAME_LEN, 0, 1},	    {F_STAGE_NAME_LEN, MAX_NAME + 1, 1},
+	    {F_STAGE_NAME_CHAR, 'd', 1},    {F_STAGE_WIDTH, FW - 1, 2},
+	    {F_STAGE_WIDTH, MAX_STAGE_WIDTH + 1, 2}, {F_STAGE_GROUND, MAX_SIDE + 1, 2},
+	    {F_STAGE_SYSTEM, 2, 2},	    {F_STAGE_LAYERS, 0, 2},
+	    {F_STAGE_LAYERS, MAX_LAYERS + 1, 2}, {F_STAGE_LAYERS, 2, 2},
+	    {F_STAGE_LAYERS, 4, 2},	    {F_LAYER_FRAME, SYN_ALL, 2},
+	    {F_LAYER_FRAME, 0, 2}, /* anchor outside the layer */
+	    {F_LAYER_PALETTE, 3, 2},	    {F_LAYER_PALETTE, 2, 2},
+	    {F_LAYER_W, 0, 2},		    {F_LAYER_W, 49, 2}, /* frame spills right */
+	    {F_LAYER_W, MAX_SIDE + 1, 2},   {F_LAYER_H, 42, 2},
+	    {F_LAYER_X, MAX_SIDE + 1, 2},   {F_LAYER_Y, (uint16_t)-(MAX_SIDE + 1), 2},
+	    {F_LAYER_NUM, MAX_SIDE + 1, 2}, {F_LAYER_NUM, MAX_SIDE, 2}, /* cover too wide */
+	    {F_LAYER_DEN, 0, 2},	    {F_LAYER_DEN, MAX_STAGE_WIDTH + 1, 2},
+	    {F_LAYER_EX, EDGES, 1},	    {F_LAYER_EY, EDGES, 1},
+	    {F_LAYER_ANIMS, MAX_LAYER_ANIMS + 1, 2}, {F_ANIM_STEPS, 0, 2},
+	    {F_ANIM_STEPS, MAX_ANIM_STEPS + 1, 2}, {F_ASTEP_FRAME, SYN_ALL, 2},
+	    {F_ASTEP_X, MAX_SIDE + 1, 2},   {F_ASTEP_Y, (uint16_t)-(MAX_SIDE + 1), 2},
+	    {F_ASTEP_TICKS, 0, 2},
 	};
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
 		bad = good;
@@ -649,9 +889,9 @@ static void malformed(void)
 	bad.data[bad.len++] = 0;
 	seal(&bad);
 	assert(!load(&assets_a, &bad));
-	for (char v = '1'; v <= '4'; v++) {
+	for (char v = '1'; v <= '5'; v++) {
 		bad = good;
-		bad.data[7] = (uint8_t)v; /* FIGHTP01..04: retired formats */
+		bad.data[7] = (uint8_t)v; /* FIGHTP01..05: retired formats */
 		assert(!load(&assets_a, &bad));
 	}
 	bad = good;
@@ -661,12 +901,38 @@ static void malformed(void)
 	int automatic = -1;
 	assert(fight_assets(&assets_a, bad.data, bad.len, &automatic) && automatic == 1);
 }
-/* Resident images must reproduce the source bitmaps through the palettes. */
+/* Resident images must reproduce the source bitmaps through the palettes
+ * (stage layer images are checked against their layers instead). */
 static void roundtrip(const struct assets *a, const struct decoded *dec,
 		      const struct bitmap *src)
 {
 	for (unsigned i = 0; i < a->images; i++) {
 		const struct image *im = &a->image[i];
+		int layer = layer_of(a, (int)i);
+		if (layer >= 0) {
+			const struct layer *l =
+			    &a->layer[a->stage[a->cast_stage].first_layer + (unsigned)layer];
+			uint32_t count = 0;
+			for (int y = 0; y < im->h; y++) {
+				int x = 0;
+				for (uint32_t k = a->row[im->first_row + y];
+				     k < a->row[im->first_row + y + 1]; k++) {
+					const struct span *s = &a->span[k];
+					for (; x < s->x; x++)
+						assert(ref_layer(dec, l, a->layer_x0[layer] + x,
+								 a->layer_y0[layer] + y) < 0);
+					for (unsigned j = 0; j < s->len; j++, x++, count++)
+						assert(a->pixel[im->pixels + s->pixel + j] ==
+						       ref_layer(dec, l, a->layer_x0[layer] + x,
+								 a->layer_y0[layer] + y));
+				}
+				for (; x < im->w; x++)
+					assert(ref_layer(dec, l, a->layer_x0[layer] + x,
+							 a->layer_y0[layer] + y) < 0);
+			}
+			assert(count == im->count);
+			continue;
+		}
 		const struct bitmap *b = &dec->frame[im->frame];
 		assert(im->w == b->w && im->h == b->h && im->ax == b->ax && im->ay == b->ay);
 		if (src)
@@ -857,12 +1123,14 @@ static void synthetic_moves(struct assets *a)
 	       st->dragon == 20 && st->charge == 30 && st->grace == 10 && st->release == 4);
 	assert(a->sys[0].stats.walk == 7 && a->sys[0].stats.height == HEIGHT_MID &&
 	       a->sys[0].cls[CLASS_COMMAND].has == 1 && !a->sys[0].cls[CLASS_THROW].has);
-	/* The cast follows the state: normal and alternate palette images of
-	 * every frame the character uses (all five), recast only on change. */
+	/* The cast follows the state: the stage's images, then normal and
+	 * alternate palette images of every frame the character uses (all
+	 * five), recast only on change. */
 	struct fight_state s;
 	fight_reset(&s, 0);
 	assert(a->cast[0][0] == -1 && fight_cast(a, &s) && !fight_cast(a, &s));
-	assert(a->images == a->effect_images + 2 * SYN_FRAMES &&
+	assert(a->cast_stage == 0 &&
+	       a->images == a->effect_images + a->stage[0].images + 2 * SYN_FRAMES &&
 	       a->cast_pixels[0] == ch->pixels && a->cast_pixels[1] == ch->pixels);
 	for (int i = 0; i < 2; i++)
 		for (unsigned f = 0; f < SYN_FRAMES; f++) {
@@ -879,6 +1147,129 @@ static void synthetic_moves(struct assets *a)
 	assert(r.x == 90 && r.y == GROUND - 36 && r.w == 20 && r.h == 20);
 	assert(l.x == 90 && l.y == r.y);
 	assert(hr.x == 105 && hl.x == 100 - 5 - 21 && hl.w == 21 && hl.y == GROUND - 15);
+}
+/* The synthetic sparks, walls, effect sets, slash mask, home and stage as
+ * loaded, then the stage drawn from its scene commands against the same
+ * stage computed per screen pixel from the layers for many cameras, shakes
+ * and anim ticks. */
+static void synthetic_stage(struct assets *a, const struct decoded *dec)
+{
+	const struct character *ch = &a->chr[0];
+	assert(a->sparks == 2 && a->spark[0].count == 2 && a->spark[0].total == 5 &&
+	       a->spark[0].blend == OPAQUE && a->spark[0].alpha == 255 &&
+	       a->spark[1].count == 1 && a->spark[1].total == 4 && a->spark[1].blend == ADD &&
+	       a->spark[1].alpha == 200);
+	const struct image *s0 = &a->image[a->spark_step[a->spark[0].first + 1].image],
+			   *s1 = &a->image[a->spark_step[a->spark[1].first].image];
+	assert(s0->frame == 1 && s0->palette == 1 && s1->frame == 4 && s1->palette == 0 &&
+	       a->spark_step[a->spark[0].first].ticks == 2);
+	assert(a->sys[0].margin == 24 && a->sys[0].play_width == FW && a->sys[1].margin == 16 &&
+	       a->sys[1].play_width == 400);
+	for (int k = 0; k < FX_KEYS; k++)
+		assert(a->sys[0].effect[k] == syn_fx[0][k] && a->sys[1].effect[k] == syn_fx[1][k]);
+	assert(ch->slash == 0x11 && ch->home == 1 && ch->move[MOVES].slash);
+	for (int t = 0; t < MOVES; t++)
+		assert(ch->move[t].slash == (t % 4 == 0));
+	const struct stage *st = &a->stage[0];
+	assert(a->stages == 1 && !strcmp(st->name, "DOJO") && st->width == 600 &&
+	       st->ground == 200 && st->system == 1 && st->layers == 3 && a->layers == 3 &&
+	       a->anims == 2 && a->stage_steps == 3 && st->images == 3 + 2);
+	for (int i = 0; i < 3; i++) {
+		const struct layer *l = &a->layer[st->first_layer + (unsigned)i];
+		const struct syn_layer *w = &syn_layers[i];
+		assert(l->frame == 5 && l->palette == w->palette && l->w == w->w && l->h == w->h &&
+		       l->x == w->x && l->y == w->y && l->num == w->num && l->den == w->den &&
+		       l->edge[0] == w->ex && l->edge[1] == w->ey && l->color == w->color &&
+		       l->anims == w->anims);
+	}
+	/* Parallax rounds down, also moving against the camera. */
+	const struct layer *l0 = &a->layer[st->first_layer], *l2 = l0 + 2;
+	assert(fight_layer_x(l0, 2) == 0 && fight_layer_x(l0, 3) == -1 &&
+	       fight_layer_x(l2, 1) == -29 && fight_layer_x(l2, 4) == -28);
+	/* Walls come from the stage's system "ss": a 400 wide play area with
+	 * 16 px margins. */
+	struct fight_state s;
+	fight_reset(&s, 0);
+	fight_start(&s, a, 0, 0);
+	assert(s.arena == 0 && fight_width(&s, a) == 600);
+	int lo, hi;
+	s.cam = 50;
+	fight_walls(&s, a, &lo, &hi);
+	assert(lo == 50 + 40 + 16 && hi == 50 + FW - 40 - 16);
+	static struct scene sc;
+	static uint16_t fb[FW * FH], want[FW * FH];
+	static const int cams[] = {0, 1, 2, 3, 37, 59, 60, 119, 120};
+	static const struct {
+		uint32_t shake;
+		int dy;
+	} shakes[] = {{0, 0}, {1, -2}, {2, 2}, {9, -SHAKE_MAX}, {10, SHAKE_MAX}};
+	unsigned checked = 0;
+	for (unsigned ci = 0; ci < sizeof(cams) / sizeof(cams[0]); ci++)
+		for (unsigned si = 0; si < sizeof(shakes) / sizeof(shakes[0]); si++)
+			for (uint32_t tick = 0; tick < 6; tick++) {
+				s.cam = (uint32_t)cams[ci];
+				s.shake = shakes[si].shake;
+				s.flash = 0;
+				s.tick = tick;
+				fight_cast(a, &s);
+				assert(a->cast_stage == 0 && a->stage_pixels == st->pixels);
+				fight_scene(&s, a, &sc);
+				/* Three layers, the first anim showing 3 of its 5 ticks. */
+				assert(sc.layers == 3 + 1 + (tick % 5 < 3));
+				sc.count = sc.layers;
+				noise(fb);
+				memcpy(want, fb, sizeof(fb));
+				fight_render(a, &sc, fb);
+				int dy = shakes[si].dy, cam = cams[ci];
+				for (int i = 0; i < 3; i++) {
+					const struct layer *l = &a->layer[st->first_layer + (unsigned)i];
+					int m = cam * l->num, q = m / (int)l->den;
+					if (q * (int)l->den > m)
+						q--;
+					int ox = l->x - q, oy = GROUND - st->ground + l->y + dy;
+					for (int y = 0; y < FH; y++)
+						for (int x = 0; x < FW; x++) {
+							int c = ref_layer(dec, l, x - ox, y - oy);
+							if (c >= 0)
+								want[y * FW + x] = (uint16_t)c;
+						}
+					if (!l->anims)
+						continue;
+					const struct stage_anim *an = &a->anim[l->first_anim];
+					unsigned k = an->first;
+					for (uint32_t t = tick % an->total; t >= a->stage_step[k].ticks;)
+						t -= a->stage_step[k++].ticks;
+					const struct stage_step *sp = &a->stage_step[k];
+					if (sp->frame == 0xffff)
+						continue;
+					const struct bitmap *b = &dec->frame[sp->frame];
+					for (int y = 0; y < b->h; y++)
+						for (int x = 0; x < b->w; x++) {
+							int X = ox + sp->x - b->ax + x,
+							    Y = oy + sp->y - b->ay + y, v = b->px[y * b->w + x];
+							if (v >= 0 && X >= 0 && X < FW && Y >= 0 && Y < FH)
+								want[Y * FW + X] = dec->pal[l->palette][v];
+						}
+				}
+				for (int i = 0; i < FW * FH; i++)
+					if (fb[i] != want[i]) {
+						fprintf(stderr,
+							"stage mismatch cam %d dy %d tick %u at %d,%d: "
+							"%04x != %04x\n",
+							cam, dy, tick, i % FW, i / FW, fb[i], want[i]);
+						abort();
+					}
+				checked++;
+			}
+	assert(checked == 9 * 5 * 6);
+	/* A full scene on the stage (fighters, then a spark of each kind) also
+	 * matches the command-level reference. */
+	s.cam = 60;
+	s.shake = 0;
+	s.spark[0] = (struct spark_slot){1, 300, 200, 3, 1};
+	s.spark[1] = (struct spark_slot){2, 320, 180, 1, 0};
+	fight_scene(&s, a, &sc);
+	assert(sc.sparks == 2 && compare(a, dec, &sc, "synthetic stage scene"));
 }
 /* Every real step's boxes cover the same sprite pixels in both facings.
  * The idle step is pointed at each frame in turn so fight_scene places the
@@ -926,9 +1317,10 @@ static void box_flip(struct assets *a)
 			fight_start(&st, a, 0, 0);
 			st.p[0].x = QX(240);
 			st.p[0].face = f ? -1 : 1;
+			st.cam = 0; /* world and screen columns agree */
 			assert(fight_pose(&st, a, 0) == idle);
 			fight_scene(&st, a, &s);
-			unsigned cmd = 0;
+			unsigned cmd = s.layers; /* the stage comes first */
 			while (cmd < s.count && s.cmd[cmd].op != SPRITE)
 				cmd++;
 			assert(cmd < s.count && s.cmd[cmd].image == a->look[0][step->frame] &&
@@ -1026,28 +1418,74 @@ static void effect_cap(const struct assets *a)
 				assert(blended >= 10 && blended < want[m]);
 		}
 }
-static void bench(const struct assets *a)
+/* Pixels the commands of a scene write (each command alone on two
+ * backgrounds, so overdraw counts). */
+static uint32_t written(const struct assets *a, const struct scene *s)
+{
+	static struct scene one;
+	static uint16_t fb[2][FW * FH];
+	uint32_t n = 0;
+	for (unsigned k = 0; k < s->count; k++) {
+		one.count = 1;
+		one.cmd[0] = s->cmd[k];
+		for (int b = 0; b < 2; b++) {
+			for (int i = 0; i < FW * FH; i++)
+				fb[b][i] = b ? 0xffff : 0;
+			fight_render(a, &one, fb[b]);
+		}
+		for (int i = 0; i < FW * FH; i++)
+			n += fb[0][i] != 0 || fb[1][i] != 0xffff;
+	}
+	return n;
+}
+static void time_scene(const struct assets *a, const struct scene *s, const char *what)
+{
+	static uint16_t fb[FW * FH];
+	struct timespec t0, t1;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	for (int i = 0; i < 2000; i++)
+		fight_render(a, s, fb);
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	printf("fighter-bench: %s render %.1f us/frame (%u commands, %u layers, %u sparks, "
+	       "%u px written)\n",
+	       what,
+	       ((double)(t1.tv_sec - t0.tv_sec) * 1e9 + (double)(t1.tv_nsec - t0.tv_nsec)) / 2000 /
+		   1000,
+	       s->count, s->layers, s->sparks, written(a, s));
+}
+/* The four stress scenes, then a fight on every stage (with the camera
+ * where the rules put it) and on the flat fallback. */
+static void bench(struct assets *a)
 {
 	static struct scene s;
-	static uint16_t fb[FW * FH];
+	char what[64];
 	struct fight_state st;
 	fight_reset(&st, 0);
 	fight_start(&st, a, 0, 0);
 	for (int i = 0; i < 300; i++)
 		fight_step(&st, a, 0, 0, 0);
+	fight_cast(a, &st);
 	for (unsigned m = 0; m < 4; m++) {
 		st.stress = m;
 		fight_scene(&st, a, &s);
-		struct timespec t0, t1;
-		clock_gettime(CLOCK_MONOTONIC, &t0);
-		for (int i = 0; i < 2000; i++)
-			fight_render(a, &s, fb);
-		clock_gettime(CLOCK_MONOTONIC, &t1);
-		printf("fighter-bench: scene %u render %.1f us/frame (%u commands)\n", m,
-		       ((double)(t1.tv_sec - t0.tv_sec) * 1e9 +
-			(double)(t1.tv_nsec - t0.tv_nsec)) /
-			   2000 / 1000,
-		       s.count);
+		snprintf(what, sizeof(what), "scene %u (%s)", m, a->stage[st.arena].name);
+		time_scene(a, &s, what);
+	}
+	unsigned stages = a->stages;
+	for (unsigned k = 0; k <= stages; k++) {
+		fight_reset(&st, 0);
+		if (k == stages)
+			a->stages = 0;
+		fight_start(&st, a, 0, 0);
+		st.arena = k < stages ? k : 0;
+		for (int i = 0; i < 300; i++)
+			fight_step(&st, a, 0, 0, 0);
+		fight_cast(a, &st);
+		fight_scene(&st, a, &s);
+		snprintf(what, sizeof(what), "stage %s cam %u", k < stages ? a->stage[k].name : "FLAT",
+			 st.cam);
+		time_scene(a, &s, what);
+		a->stages = stages;
 	}
 }
 /* SYN moved to system "ss": damage and chip scaled by 800 per mille
@@ -1098,6 +1536,7 @@ void render_tests(const uint8_t *real, size_t real_len)
 	synthetic_moves(&assets_b);
 	decode(syn_pack.data, syn_pack.len, &dec);
 	roundtrip(&assets_b, &dec, syn);
+	synthetic_stage(&assets_b, &dec);
 	fixed_scenes(&assets_b, &dec);
 	random_scenes(&assets_b, &dec, 300, "random synthetic scene");
 	release(&dec);

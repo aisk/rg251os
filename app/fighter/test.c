@@ -1,20 +1,31 @@
 /* Native libretro callback harness: malformed content, deterministic state,
- * output formats, audio and a complete automated scene cycle, plus the rules
- * on exact ticks: frame data, hit/block/hitstop/hitstun timing, pushback and
- * corner transfer, guard heights, trades, motion and charge commands, the
- * input buffer and prejump, special and chain cancels, Power Wave flight,
- * hits, guard and clash, Burn Knuckle motion, Rising Tackle height, the
- * arcade ladder (select, opponents, loss, clear, Auto rotation, replay),
- * state round-trip and rejection, the AI's use of every move, and the
- * stats: each character's system and resolved stats, walk speeds, jump arcs
- * and prejump, life, defense, weight, push distance, guard range, input
+ * output formats, audio (the sound bank next to the pack, replayed after a
+ * state load to the same samples) and a complete automated scene cycle, plus
+ * the rules on exact ticks: frame data, hit/block/hitstop/hitstun timing,
+ * pushback and corner transfer, guard heights, trades, motion and charge
+ * commands, the input buffer and prejump, special and chain cancels, Power
+ * Wave flight, hits, guard and clash, Burn Knuckle motion, Rising Tackle
+ * height, the arcade ladder (select, opponents, loss, clear, Auto rotation,
+ * replay), state round-trip and rejection, the AI's use of every move, and
+ * the stats: each character's system and resolved stats, walk speeds, jump
+ * arcs and prejump, life, defense, weight, push distance, guard range, input
  * windows and the samsho5sp damage scale changing the fight by exact
- * amounts. Expected numbers come from assets/fighter/terry.json,
+ * amounts. Those run on the flat fallback arena (480 wide, camera at 0).
+ * On the pack's stages it checks the ladder's stage choice, the camera
+ * (start, following the midpoint, clamped to the stage), the screen and
+ * stage walls (also with a narrower play width), corners at both stage
+ * ends, a pushback transfer at a screen wall, projectiles leaving the
+ * camera's window, hit/guard/slash sparks and blood at the contact point,
+ * the spark pool, shake and KO flash, every sound event, and that camera,
+ * sparks and sound events survive save/load, replay identically and reject
+ * impossible values; the AI run keeps both fighters on screen on every
+ * stage. Expected numbers come from assets/fighter/terry.json,
  * haohmaru.json and systems.json. Fighter x is in quarter pixels (QX). It
- * also writes
- * preview PPMs of the select, Power Wave (boxes on), result and clear
- * screens. test-render.c adds the pack decoder, box and pixel-exact
- * renderer checks. ASan/UBSan run this without a window or device. */
+ * also writes preview PPMs of the select, Power Wave (boxes on), result and
+ * clear screens and a hit on each stage. test-render.c adds the pack
+ * decoder, box, stage and pixel-exact renderer checks. ASan/UBSan run this
+ * without a window or device. */
+#include "audio.h"
 #include "fighter.h"
 #include "libretro.h"
 #include "test-render.h"
@@ -27,10 +38,12 @@
 static uint32_t keys[2], image_hash, sound_hash;
 static unsigned video_count, audio_count, formats;
 static bool use32, reject_formats;
-static unsigned benchmark_complete;
+static unsigned benchmark_complete, sound_banks;
 static void log_line(enum retro_log_level level, const char *fmt, ...)
 {
 	(void)level;
+	if (strstr(fmt, "fight: sound bank"))
+		sound_banks++;
 	if (strstr(fmt, "benchmark complete:"))
 		benchmark_complete++;
 }
@@ -110,7 +123,9 @@ static struct assets pack;
 static unsigned terry;
 enum { POWER_WAVE = MOVES, BURN_KNUCKLE, RISING_TACKLE };
 static unsigned haohmaru;
-/* Characters c0 and c1 at pixel columns x0 and x1. */
+static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+/* Characters c0 and c1 at world columns x0 and x1, the camera on their
+ * midpoint. */
 static void match(struct fight_state *s, unsigned c0, unsigned c1, int x0, int x1)
 {
 	fight_reset(s, 0);
@@ -118,6 +133,7 @@ static void match(struct fight_state *s, unsigned c0, unsigned c1, int x0, int x
 	s->stage = 1;
 	s->p[0].x = QX(x0);
 	s->p[1].x = QX(x1);
+	s->cam = (uint32_t)clampi((x0 + x1) / 2 - FW / 2, 0, fight_width(s, &pack) - FW);
 }
 static void duel(struct fight_state *s, int x0, int x1) { match(s, terry, terry, x0, x1); }
 static void step2(struct fight_state *s, uint32_t k0, uint32_t k1)
@@ -255,24 +271,44 @@ static void block_timing(void)
 	assert(!s.p[1].stun && !s.p[1].block && s.p[1].x == QX(278) + 2 * back);
 }
 /* In the corner the defender cannot slide: the attacker moves back the
- * same 14 pixels on the same ticks. */
-static void corner(void)
+ * same 14 pixels on the same ticks. Walls of the state's camera; on a stage
+ * (arena k) the corner is the stage's right end, then its left end. */
+static void staged(struct fight_state *s, unsigned k, unsigned c0, unsigned c1, int x0, int x1);
+static void corner_at(int k)
 {
-	static const int slide[7] = {366, 363, 361, 359, 358, 357, 356};
+	static const int slide[7] = {4, 7, 9, 11, 12, 13, 14};
 	struct fight_state s;
-	duel(&s, 370, WALL_RIGHT);
+	int lo, hi, width = k < 0 ? FW : pack.stage[k].width;
+	if (k < 0)
+		duel(&s, 0, 0);
+	else
+		staged(&s, (unsigned)k, terry, terry, width - 100, width - 40);
+	s.cam = (uint32_t)(width - FW);
+	fight_walls(&s, &pack, &lo, &hi);
+	assert(hi == width - pack.sys[pack.chr[terry].system].margin || k >= 0);
+	s.p[0].x = QX(hi - 60);
+	s.p[1].x = QX(hi);
 	for (int n = 1; n <= 20; n++) {
 		run(&s, n, K(Y), 0, 0);
-		assert(s.p[1].x == QX(WALL_RIGHT) && s.p[1].hp == (n < 4 ? 1000 : 970));
-		assert(s.p[0].x == QX(n <= 10 ? 370 : n <= 17 ? slide[n - 11] : 356));
+		assert(s.p[1].x == QX(hi) && s.p[1].hp == (n < 4 ? 1000 : 970));
+		assert(s.p[0].x == QX(hi - 60 - (n <= 10 ? 0 : n <= 17 ? slide[n - 11] : 14)));
+		assert(s.cam == (uint32_t)(width - FW));
 	}
 	/* Mirrored: P1 attacks P0 pinned at the left wall. */
-	duel(&s, WALL_LEFT, WALL_LEFT + 60);
+	if (k < 0)
+		duel(&s, 0, 0);
+	else
+		staged(&s, (unsigned)k, terry, terry, 40, 100);
+	s.cam = 0;
+	fight_walls(&s, &pack, &lo, &hi);
+	s.p[0].x = QX(lo);
+	s.p[1].x = QX(lo + 60);
 	for (int n = 1; n <= 20; n++)
 		step2(&s, 0, n == 1 ? K(Y) : 0);
-	assert(s.p[0].x == QX(WALL_LEFT) && s.p[1].x == QX(WALL_LEFT + 60 + 14) &&
-	       s.p[0].hp == 970);
+	assert(s.p[0].x == QX(lo) && s.p[1].x == QX(lo + 60 + 14) && s.p[0].hp == 970 &&
+	       s.cam == 0);
 }
+static void corner(void) { corner_at(-1); }
 /* High, low and overhead against standing and crouching guard. */
 static void guard_types(void)
 {
@@ -755,8 +791,8 @@ static void state_words(void)
 	    {0, 1, W_SLIDE, MAX_SLIDE + 1},  {0, 1, W_KEYS, 0x10000},	   {0, 1, W_CROUCH, 2},	       {0, 1, W_BLOCK, 3},
 	    {0, 0, W_ELAPSED, 100},	   {0, 0, W_HIT, 2},	       {0, 0, W_STUN, 5},
 	    {0, 0, W_BLOCK, 1},	   {0, 1, W_HIT, 1},	       {0, 1, W_ELAPSED, 256},
-	    {0, 0, W_X, QX(WALL_LEFT) - 1}, {0, 0, W_FACE, 0},	       {0, 1, W_HP, 1001},
-	    {0, 1, W_X, QX(WALL_RIGHT) + 1},
+	    {0, 0, W_X, QX(24) - 1},	   {0, 0, W_FACE, 0},	       {0, 1, W_HP, 1001},
+	    {0, 1, W_X, QX(FW - 24) + 1},
 	    {0, 0, W_WALK, 2},		   {0, 1, W_VY, 61},	       {0, 0, W_Y, (uint32_t)-30},
 	    {0, 0, W_VY, 3},		   {0, 1, W_CORNER, 1},	       {0, 1, W_SQUAT, 3 + 1},
 	    {0, 0, W_SQUAT, 1},	   {0, 0, W_BUFFER, MOVES + 4}, {0, 0, W_AGE, 4 + 1},
@@ -773,7 +809,8 @@ static void state_words(void)
 	    /* Projectile words. */
 	    {2, 0, 0, 2},		   {2, 0, 1, 2},
 	    {2, 0, 4, 0},		   {2, 0, 5, 120},	       {2, 0, 5, (uint32_t)-1},
-	    {2, 0, 2, FW + 65},	   {2, 0, 0, 0},
+	    {2, 0, 2, 2 * FW + 65},	   {2, 0, 2, (uint32_t)(-FW - 65)},
+	    {2, 0, 0, 0},
 	};
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
 		memcpy(bad, w, sizeof(w));
@@ -806,6 +843,416 @@ static void state_words(void)
 	memcpy(bad, w, sizeof(w));
 	bad[P + 26 + W_CROUCH] = 1;
 	bad[P + 26 + W_Y] = (uint32_t)-10;
+	assert(!fight_decode(&t, &pack, bad));
+}
+/* ---- camera, walls, sparks and sound events on the pack's stages ---- */
+static unsigned stage_index(const char *name)
+{
+	for (unsigned k = 0; k < pack.stages; k++)
+		if (!strcmp(pack.stage[k].name, name))
+			return k;
+	abort();
+}
+static int heard(const struct fight_state *s, int id, int side)
+{
+	int n = 0;
+	for (unsigned k = 0; k < s->sounds; k++)
+		n += s->sound[k].id == id && (side < 0 || s->sound[k].side == side);
+	return n;
+}
+static const struct sound_event *event(const struct fight_state *s, int id)
+{
+	for (unsigned k = 0; k < s->sounds; k++)
+		if (s->sound[k].id == id)
+			return &s->sound[k];
+	return NULL;
+}
+/* Both fighters inside the camera's walls, the walls inside the screen and
+ * the camera inside the stage. */
+static void on_screen(const struct fight_state *s)
+{
+	int lo, hi;
+	fight_walls(s, &pack, &lo, &hi);
+	assert(s->cam <= (uint32_t)(fight_width(s, &pack) - FW));
+	assert(lo >= (int)s->cam && hi <= (int)s->cam + FW);
+	for (int i = 0; i < 2; i++)
+		assert(s->p[i].x >= QX(lo) && s->p[i].x <= QX(hi));
+}
+/* Characters c0 and c1 at world columns x0 and x1 on stage k, the camera on
+ * their midpoint as the rules leave it; the state must decode. */
+static void staged(struct fight_state *s, unsigned k, unsigned c0, unsigned c1, int x0, int x1)
+{
+	match(s, c0, c1, x0, x1);
+	s->arena = k;
+	s->cam = (uint32_t)clampi((x0 + x1) / 2 - FW / 2, 0, fight_width(s, &pack) - FW);
+	uint32_t w[STATE_WORDS];
+	fight_encode(s, w);
+	assert(fight_decode(s, &pack, w));
+}
+/* Strength tier of a hit as the sound and spark tables use it. */
+static int tier_of(const struct hit *h, int k)
+{
+	if (h->cls == CLASS_LIGHT)
+		return 0;
+	if (h->cls == CLASS_HEAVY || h->cls == CLASS_COMMAND || h->cls == CLASS_THROW)
+		return 1;
+	if (h->cls == CLASS_SPECIAL || h->cls == CLASS_SUPER)
+		return 2;
+	return k < 0 || k >= MOVES ? 2 : k % 2;
+}
+/* The ladder's stage, the start camera, walking apart into the screen wall
+ * (or the stage wall), the stage ends, corners at both stage ends, a
+ * pushback transfer at a screen wall and projectiles leaving the camera's
+ * window. */
+static void camera_tests(void)
+{
+	struct fight_state s;
+	for (unsigned c = 0; c < pack.characters; c++) {
+		fight_reset(&s, 0);
+		fight_start(&s, &pack, terry, c);
+		unsigned want = pack.chr[c].home ? pack.chr[c].home - 1u : c % pack.stages;
+		int w = pack.stage[want].width;
+		assert(s.arena == want && fight_width(&s, &pack) == w &&
+		       s.cam == (uint32_t)(w / 2 - FW / 2) && s.p[0].x == QX(w / 2 - 100) &&
+		       s.p[1].x == QX(w / 2 + 100));
+		assert(s.sounds == 1 && s.sound[0].id == SOUND_ROUND_START);
+		on_screen(&s);
+	}
+	unsigned korea = stage_index("KOREA"), mizuki = stage_index("MIZUKI");
+	assert(pack.chr[haohmaru].home == mizuki + 1);
+	for (unsigned k = 0; k < pack.stages; k++) {
+		const struct stage *st = &pack.stage[k];
+		struct system *sy = &pack.sys[st->system];
+		uint16_t saved = sy->play_width;
+		for (int narrow = 0; narrow < 2; narrow++) {
+			sy->play_width = narrow ? 384 : saved;
+			int w = st->width, span = sy->play_width - 2 * sy->margin;
+			staged(&s, k, terry, terry, w / 2 - 100, w / 2 + 100);
+			/* P0 backs off: the camera keeps the midpoint centred until the
+			 * window's far wall (or the stage wall) stops P0. */
+			for (int n = 0; n < 400; n++) {
+				step2(&s, K(LEFT), 0);
+				on_screen(&s);
+				int mid = (s.p[0].x + s.p[1].x) / 8;
+				assert(s.cam == (uint32_t)clampi(mid - FW / 2, 0, w - FW));
+			}
+			int stop = w / 2 + 100 - span, lo, hi;
+			if (stop < sy->margin)
+				stop = sy->margin;
+			assert(s.p[1].x == QX(w / 2 + 100) && s.p[0].x == QX(stop));
+			fight_walls(&s, &pack, &lo, &hi);
+			assert(lo == stop);
+			/* Both go left: the stage's left end. */
+			for (int n = 0; n < 900; n++) {
+				step2(&s, K(LEFT), K(LEFT));
+				on_screen(&s);
+			}
+			assert(s.cam == 0 && s.p[0].x == QX(sy->margin + (narrow ? 48 : 0)));
+			/* Both go right: the right end. */
+			for (int n = 0; n < 1500; n++) {
+				step2(&s, K(RIGHT), K(RIGHT));
+				on_screen(&s);
+			}
+			assert(s.cam == (uint32_t)(w - FW) &&
+			       s.p[1].x == QX(w - sy->margin - (narrow ? 48 : 0)));
+		}
+		sy->play_width = saved;
+		corner_at((int)k);
+	}
+	/* A stand LP that reaches 420 px hits P1 6 px from the right screen
+	 * wall in the middle of Korea: P1 slides into the wall and the rest
+	 * pushes P0 back, though neither is near a stage wall. */
+	const struct move *lp = &pack.chr[terry].move[STAND_LP];
+	struct box saved[64];
+	unsigned first = pack.step[lp->anim.first].box, boxes = 0;
+	for (unsigned i = 0; i < lp->anim.count; i++) {
+		const struct step *st = &pack.step[lp->anim.first + i];
+		boxes = st->box + st->hurt + st->hit - first;
+	}
+	assert(boxes <= 64);
+	memcpy(saved, pack.box + first, sizeof(struct box) * boxes);
+	for (unsigned i = 0; i < lp->anim.count; i++) {
+		const struct step *st = &pack.step[lp->anim.first + i];
+		for (unsigned h = 0; h < st->hit; h++)
+			pack.box[st->box + st->hurt + h].w = 500;
+	}
+	staged(&s, korea, terry, terry, 166, 586);
+	int lo, hi;
+	fight_walls(&s, &pack, &lo, &hi);
+	assert(s.cam == 136 && hi == 592);
+	for (int n = 1; n <= 30; n++) {
+		run(&s, n, K(Y), 0, 0);
+		on_screen(&s);
+		assert(s.cam > 0 && s.cam < (uint32_t)(pack.stage[korea].width - FW));
+		fight_walls(&s, &pack, &lo, &hi);
+		if (n == 4)
+			assert(s.p[1].hp < 1000 && s.p[1].corner && s.p[1].slide);
+	}
+	assert(s.p[1].x == QX(hi) && s.p[0].x < QX(166) && s.p[1].x < QX(586 + 14));
+	memcpy(pack.box + first, saved, sizeof(struct box) * boxes);
+	/* Projectiles leave 64 px beyond the camera's window, not the stage's
+	 * first screen. */
+	staged(&s, korea, terry, terry, 276, 476);
+	assert(s.cam == 136);
+	int edge = 136 + FW + 64, speed = pack.chr[terry].projectile[0].speed;
+	s.shot[0] = (struct shot){1, 0, edge - speed, 0, 1, 10};
+	step2(&s, 0, 0);
+	assert(s.cam == 136 && s.shot[0].x == edge);
+	step2(&s, 0, 0);
+	assert(!live_shots(&s));
+	s.shot[0] = (struct shot){1, 0, 136 - 64 + speed, 0, -1, 10};
+	step2(&s, 0, 0);
+	assert(s.shot[0].x == 136 - 64);
+	step2(&s, 0, 0);
+	assert(!live_shots(&s));
+	(void)mizuki;
+}
+/* The spark slot holding kind (spark index + 1), or -1. */
+static int spark_of(const struct fight_state *s, unsigned kind)
+{
+	for (int k = 0; k < SPARK_SLOTS; k++)
+		if (s->spark[k].kind == (int32_t)kind)
+			return k;
+	return -1;
+}
+/* P0 presses button on call 1 against P1 (guarding when guard is set)
+ * 60 px away on stage k; returns the call of the contact, checking the
+ * whoosh, hit or guard events, the sparks at the contact point (inside
+ * P0's active hitbox), the shake and that state words carry it all. */
+static int strike(unsigned k, unsigned c0, unsigned move, uint32_t button, int guard)
+{
+	struct fight_state s, t;
+	uint32_t w[STATE_WORDS], v[STATE_WORDS];
+	int centre = pack.stage[k].width / 2;
+	staged(&s, k, c0, terry, centre - 30, centre + 30);
+	const struct character *c = &pack.chr[c0];
+	const struct move *m = &c->move[move];
+	const struct system *sy = &pack.sys[c->system];
+	int t0 = tier_of(&m->hit, (int)move), slash = m->slash, contact = 0;
+	for (int n = 1; n <= 40 && !contact; n++) {
+		run(&s, n, button, 0, guard ? K(RIGHT) : 0);
+		const struct sound_event *e = event(&s, SOUND_WHOOSH_LIGHT + t0);
+		assert((n == 1) == (e != NULL));
+		if (e)
+			assert(e->side == 0 && e->chr == c0 && e->system == c->system &&
+			       e->move == move + 1 && s.p[0].move == (int)move + 1);
+		if (!s.hits)
+			continue;
+		contact = n;
+		int id = guard ? (slash ? SOUND_SLASH_GUARD : SOUND_GUARD)
+			       : (slash ? SOUND_SLASH_LIGHT : SOUND_HIT_LIGHT) + t0;
+		e = event(&s, id);
+		assert(e && e->side == 0 && e->move == move + 1 && heard(&s, id, -1) == 1);
+		int key = guard ? (slash ? FX_SLASH_GUARD : FX_GUARD)
+				: (slash ? FX_SLASH_LIGHT : FX_HIT_LIGHT) + t0;
+		assert(sy->effect[key]);
+		int slot = spark_of(&s, sy->effect[key]);
+		assert(slot >= 0 && !s.spark[slot].age && s.spark[slot].flip == 0);
+		if (slash && !guard && sy->effect[FX_BLOOD_LIGHT + t0])
+			assert(spark_of(&s, sy->effect[FX_BLOOD_LIGHT + t0]) >= 0);
+		/* P0 is frozen in the step that hit: its hitbox holds the spark. */
+		const struct step *st = &pack.step[fight_pose(&s, &pack, 0)];
+		int inside = 0;
+		for (unsigned h = 0; h < st->hit; h++) {
+			struct area r = fight_box(&pack.box[st->box + st->hurt + h], s.p[0].x / 4,
+						  s.p[0].y, s.p[0].face);
+			inside |= s.spark[slot].x >= r.x && s.spark[slot].x <= r.x + r.w &&
+				  s.spark[slot].y >= r.y && s.spark[slot].y <= r.y + r.h;
+		}
+		assert(inside);
+		assert(s.shake == (!guard && t0 ? (uint32_t)SHAKE_HEAVY : 0u));
+		/* Sparks, shake and sounds survive a save and replay the same. */
+		fight_encode(&s, w);
+		assert(fight_decode(&t, &pack, w));
+		fight_encode(&t, v);
+		assert(!memcmp(w, v, sizeof(w)) && t.sounds == s.sounds && t.shake == s.shake);
+		for (int j = 0; j < 30; j++) {
+			step2(&s, 0, guard ? K(RIGHT) : 0);
+			step2(&t, 0, guard ? K(RIGHT) : 0);
+			fight_encode(&s, w);
+			fight_encode(&t, v);
+			assert(!memcmp(w, v, sizeof(w)));
+		}
+		/* Sparks age every fight tick and leave after their anim. */
+		const struct spark *an = &pack.spark[sy->effect[key] - 1];
+		if (an->total <= 30)
+			assert(spark_of(&s, sy->effect[key]) < 0);
+	}
+	assert(contact);
+	return contact;
+}
+static void spark_sound_tests(void)
+{
+	struct fight_state s, t;
+	unsigned korea = stage_index("KOREA"), mizuki = stage_index("MIZUKI");
+	/* Strikes: KOF hit and guard sparks, Samurai Shodown slash and blood,
+	 * light and heavy. */
+	assert(strike(korea, terry, STAND_LP, K(Y), 0) == 4);
+	assert(strike(korea, terry, STAND_LP, K(Y), 1) == 4);
+	strike(korea, terry, STAND_HP, K(X), 0);
+	assert(pack.chr[haohmaru].move[STAND_LP].slash && pack.chr[haohmaru].move[STAND_HP].slash &&
+	       !pack.chr[haohmaru].move[STAND_LK].slash && !pack.chr[terry].move[STAND_LP].slash);
+	strike(mizuki, haohmaru, STAND_LP, K(Y), 0);
+	strike(mizuki, haohmaru, STAND_LP, K(Y), 1);
+	strike(mizuki, haohmaru, STAND_HP, K(X), 0);
+	strike(mizuki, haohmaru, STAND_LK, K(B), 0);
+	/* A full pool replaces its oldest spark (filled with the longest one). */
+	const struct system *sy = &pack.sys[pack.chr[terry].system];
+	unsigned kind = sy->effect[FX_HIT_LIGHT], longest = 1;
+	for (unsigned k = 1; k <= pack.sparks; k++)
+		if (pack.spark[k - 1].total > pack.spark[longest - 1].total)
+			longest = k;
+	assert(pack.spark[longest - 1].total > 12 && longest != kind);
+	staged(&s, korea, terry, terry, 346, 406);
+	for (int k = 0; k < SPARK_SLOTS; k++)
+		s.spark[k] = (struct spark_slot){(int32_t)longest, 300, 150, k == 5 ? 6 : k % 3, 1};
+	for (int n = 1; n <= 4; n++)
+		run(&s, n, K(Y), 0, 0);
+	assert(s.hits == 1 && s.spark[5].kind == (int32_t)kind && !s.spark[5].age);
+	for (int k = 0; k < SPARK_SLOTS; k++)
+		if (k != 5)
+			assert(s.spark[k].kind == (int32_t)longest && s.spark[k].age == k % 3 + 4);
+	/* Jump and land. */
+	staged(&s, korea, terry, terry, 276, 476);
+	int jumped = 0, landed = 0, air = 0;
+	for (int n = 1; n <= 90; n++) {
+		step2(&s, n <= 2 ? K(UP) : 0, 0);
+		air |= s.p[0].y < 0;
+		jumped += heard(&s, SOUND_JUMP, 0);
+		if (heard(&s, SOUND_JUMP, 0))
+			assert(!landed && event(&s, SOUND_JUMP)->chr == terry);
+		landed += heard(&s, SOUND_LAND, 0);
+		if (heard(&s, SOUND_LAND, 0))
+			assert(jumped && !s.p[0].y);
+		assert(!heard(&s, SOUND_JUMP, 1) && !heard(&s, SOUND_LAND, 1));
+	}
+	assert(jumped == 1 && landed == 1 && air);
+	/* Power Wave: launch on the call the wave appears, then a clash. */
+	staged(&s, korea, terry, terry, 276, 556);
+	int launched = 0, clashed = 0;
+	for (int n = 1; n <= 60; n++) {
+		step2(&s, motion(MOTION_236, n, 5, 1, K(Y)), motion(MOTION_236, n, 5, -1, K(Y)));
+		int now = heard(&s, SOUND_LAUNCH, -1);
+		if (now) {
+			assert(now == 2 && live_shots(&s) == 2 && !launched);
+			assert(event(&s, SOUND_LAUNCH)->move == POWER_WAVE + 1);
+			launched = n;
+		}
+		if (heard(&s, SOUND_CLASH, -1)) {
+			assert(!live_shots(&s) && !clashed);
+			clashed = n;
+		}
+	}
+	assert(launched == 22 && clashed > launched && s.clashes == 1);
+	/* KO: the KO event, the long shake and the white flash, then a new
+	 * round starts with its event. */
+	staged(&s, korea, terry, terry, 346, 406);
+	s.p[1].hp = 10;
+	for (int n = 1; n <= 4; n++)
+		run(&s, n, K(Y), 0, 0);
+	assert(!s.p[1].hp && heard(&s, SOUND_KO, 1) == 1 && s.shake == SHAKE_KO &&
+	       s.flash == FLASH_TICKS);
+	static struct scene sc;
+	fight_cast(&pack, &s);
+	fight_scene(&s, &pack, &sc);
+	assert(sc.cmd[0].op == RECT && sc.cmd[0].color == 0xffff && sc.cmd[0].w == FW &&
+	       !sc.layers && !sc.sparks);
+	for (int n = 0; n < FLASH_TICKS; n++)
+		step2(&s, 0, 0);
+	assert(!s.flash && s.shake == SHAKE_KO - FLASH_TICKS);
+	fight_scene(&s, &pack, &sc);
+	assert(sc.layers > 0);
+	int starts = 0;
+	for (int n = 0; n < 200 && !starts; n++) {
+		step2(&s, 0, 0);
+		starts = heard(&s, SOUND_ROUND_START, 0);
+	}
+	assert(starts == 1 && s.mode == MODE_FIGHT && !s.ended);
+	/* A paused tick emits nothing and changes nothing. */
+	staged(&s, korea, terry, terry, 346, 406);
+	step2(&s, K(START), 0);
+	step2(&s, 0, 0);
+	t = s;
+	step2(&s, K(Y), 0);
+	assert(s.paused && !s.sounds && !s.p[0].move && s.tick == t.tick);
+}
+/* Camera, arena, shake, flash, sparks and sounds in the state words: stage
+ * states round-trip and impossible values are rejected without touching the
+ * destination. */
+static void stage_state(void)
+{
+	struct fight_state s, t, keep;
+	uint32_t w[STATE_WORDS], bad[STATE_WORDS];
+	unsigned korea = stage_index("KOREA");
+	staged(&s, korea, terry, terry, 150, 210);
+	for (int n = 1; n <= 30 && !s.hits; n++)
+		run(&s, n, K(Y), 0, 0);
+	int slot = 0;
+	while (slot < SPARK_SLOTS && !s.spark[slot].kind)
+		slot++;
+	assert(s.hits == 1 && s.sounds && slot < SPARK_SLOTS && s.cam == 0);
+	fight_encode(&s, w);
+	assert(fight_decode(&t, &pack, w));
+	const int S = 19 + 2 * 26, X = S + 6 * MAX_PROJECTILES + 7, SP = X + 4,
+		  SO = SP + 5 * SPARK_SLOTS;
+	assert(w[SP + 5 * slot] == (uint32_t)s.spark[slot].kind && w[SO] == s.sounds &&
+	       w[X] == korea && w[X + 1] == s.cam && w[X + 2] == s.shake);
+	int free_slot = 0;
+	while (s.spark[free_slot].kind)
+		free_slot++;
+	int lo, hi;
+	fight_walls(&s, &pack, &lo, &hi);
+	const struct spark *an = &pack.spark[s.spark[slot].kind - 1];
+	uint32_t ev = w[SO + 1];
+	struct bad_word {
+		int at;
+		uint32_t value;
+	} cases[] = {
+	    {X, pack.stages},
+	    {X + 1, (uint32_t)(pack.stage[korea].width - FW + 1)},
+	    /* P0 left of the camera's left wall */
+	    {X + 1, (uint32_t)(s.p[0].x / 4 - lo + 1)},
+	    {X + 2, SHAKE_KO + 1},
+	    {X + 3, FLASH_TICKS + 1},
+	    {SP + 5 * slot, pack.sparks + 1},
+	    {SP + 5 * slot, (uint32_t)-1},
+	    {SP + 5 * slot + 3, an->total},
+	    {SP + 5 * slot + 4, 2},
+	    {SP + 5 * slot + 1, (uint32_t)(pack.stage[korea].width + MAX_SIDE + 1)},
+	    {SP + 5 * free_slot + 1, 5},
+	    {SO, MAX_SOUND_EVENTS + 1},
+	    {SO + 1 + (int)s.sounds, 1},
+	    {SO + 1, (ev & ~255u) | SOUNDS},
+	    {SO + 1, (ev & ~(127u << 9)) | pack.characters << 9},
+	    {SO + 1, (ev & ~(255u << 16)) | (pack.systems + 1) << 16},
+	    {SO + 1, (ev & 0xffffffu) | 250u << 24},
+	};
+	int n = (int)(sizeof(cases) / sizeof(cases[0]));
+	for (int i = 0; i < n; i++) {
+		memcpy(bad, w, sizeof(w));
+		bad[cases[i].at] = cases[i].value;
+		keep = t;
+		if (fight_decode(&t, &pack, bad)) {
+			fprintf(stderr, "bad stage state case %d accepted\n", i);
+			abort();
+		}
+		assert(!memcmp(&keep, &t, sizeof(t)));
+	}
+	/* Outside a fight the arena, camera, shake, flash and sparks are 0. */
+	staged(&s, korea, terry, terry, 150, 210);
+	s.mode = MODE_RESULT;
+	s.p[0].x = QX(200);
+	s.p[1].x = QX(260);
+	s.arena = s.cam = 0;
+	fight_encode(&s, w);
+	assert(fight_decode(&t, &pack, w));
+	for (int i = 0; i < 4; i++) {
+		memcpy(bad, w, sizeof(w));
+		bad[X + i] = 1;
+		assert(!fight_decode(&t, &pack, bad));
+	}
+	memcpy(bad, w, sizeof(w));
+	bad[SP] = 1;
 	assert(!fight_decode(&t, &pack, bad));
 }
 /* ---- stats and systems (systems.json, terry.json, haohmaru.json) ---- */
@@ -996,13 +1443,42 @@ static void ai_coverage(void)
 {
 	struct fight_state s;
 	unsigned hits = 0, blocks = 0, crouch_blocks = 0, crouch_hits = 0, shots = 0;
-	uint32_t started[MAX_CHARACTERS] = {0};
+	uint32_t started[MAX_CHARACTERS] = {0}, ids = 0, kinds = 0, arenas = 0;
+	uint32_t w[STATE_WORDS], v[STATE_WORDS];
+	struct fight_state twin;
 	fight_reset(&s, 1);
 	for (int t = 0; t < 30000 + 15000 * (int)pack.characters; t++) {
 		struct fight_state before = s;
 		fight_step(&s, &pack, 0, 0, 0);
+		/* A copy decoded mid-run replays every tick word for word: camera,
+		 * sparks, shake and sound events included. */
+		if (t == 20000) {
+			fight_encode(&s, w);
+			assert(fight_decode(&twin, &pack, w));
+		} else if (t > 20000 && t < 26000) {
+			fight_step(&twin, &pack, 0, 0, 0);
+			fight_encode(&s, w);
+			fight_encode(&twin, v);
+			assert(!memcmp(w, v, sizeof(w)));
+		}
+		assert(s.sounds <= MAX_SOUND_EVENTS);
+		for (unsigned k = 0; k < s.sounds; k++) {
+			const struct sound_event *e = &s.sound[k];
+			assert(e->id < SOUNDS && e->chr == s.chr[e->side] &&
+			       e->system == pack.chr[e->chr].system && e->move <= pack.chr[e->chr].moves);
+			ids |= 1u << e->id;
+		}
 		if (s.mode != MODE_FIGHT || before.mode != MODE_FIGHT)
 			continue;
+		on_screen(&s);
+		arenas |= 1u << s.arena;
+		for (int k = 0; k < SPARK_SLOTS; k++)
+			if (s.spark[k].kind && !s.spark[k].age)
+				kinds |= 1u << (s.spark[k].kind - 1);
+		for (int k = 0; k < MAX_PROJECTILES; k++)
+			if (s.shot[k].kind && s.shot[k].age)
+				assert(s.shot[k].x >= (int)before.cam - 64 &&
+				       s.shot[k].x <= (int)before.cam + FW + 64);
 		for (int k = 0; k < MAX_PROJECTILES; k++)
 			shots += s.shot[k].kind && !s.shot[k].age;
 		for (int i = 0; i < 2; i++) {
@@ -1029,6 +1505,28 @@ static void ai_coverage(void)
 		throwers += pack.chr[c].projectiles > 0;
 	assert(blocks > 20 && hits > 20 && crouch_blocks > 5 && crouch_hits > 5 && s.round > 3 &&
 	       s.run > 0 && (shots > 0 || !throwers) && s.specials > 20);
+	/* Every stage hosted fights; the common sound events and both effect
+	 * sets (KOF hits and guards, Samurai Shodown slashes and blood) were
+	 * seen. */
+	const uint32_t need = 1u << SOUND_WHOOSH_LIGHT | 1u << SOUND_WHOOSH_HEAVY |
+			      1u << SOUND_WHOOSH_SPECIAL | 1u << SOUND_HIT_LIGHT |
+			      1u << SOUND_HIT_HEAVY | 1u << SOUND_GUARD | 1u << SOUND_SLASH_LIGHT |
+			      1u << SOUND_SLASH_HEAVY | 1u << SOUND_SLASH_GUARD | 1u << SOUND_LAND |
+			      1u << SOUND_LAUNCH | 1u << SOUND_KO | 1u << SOUND_ROUND_START;
+	if ((ids & need) != need || arenas != (1u << pack.stages) - 1) {
+		fprintf(stderr, "ai: sounds %x arenas %x\n", ids, arenas);
+		abort();
+	}
+	const struct system *kof = &pack.sys[pack.chr[terry].system],
+			    *ss = &pack.sys[pack.chr[haohmaru].system];
+	const int want[] = {kof->effect[FX_HIT_LIGHT], kof->effect[FX_HIT_HEAVY],
+			    kof->effect[FX_GUARD],     ss->effect[FX_SLASH_LIGHT],
+			    ss->effect[FX_SLASH_GUARD], ss->effect[FX_BLOOD_LIGHT]};
+	for (int k = 0; k < 6; k++)
+		if (!want[k] || !((kinds >> (want[k] - 1)) & 1)) {
+			fprintf(stderr, "ai: sparks %x\n", kinds);
+			abort();
+		}
 }
 /* Write the scene of a state as a PPM next to the harness preview. */
 static const char *preview_base;
@@ -1060,8 +1558,8 @@ static void snapshot(const struct fight_state *s, const char *suffix)
 	fight_render(&pack, &scene, fb);
 	write_ppm(path, fb);
 }
-/* Select, a Power Wave in flight with the box overlay, a lost run and a
- * cleared one, for human review. */
+/* Select, a Power Wave in flight with the box overlay, a lost run, a
+ * cleared one and a hit on each stage, for human review. */
 static void previews(void)
 {
 	struct fight_state s;
@@ -1088,6 +1586,21 @@ static void previews(void)
 		win_round(&s, 0);
 	assert(s.mode == MODE_CLEAR);
 	snapshot(&s, "clear");
+	/* A KOF hit spark on Korea and a slash with blood on the Mizuki shrine,
+	 * two ticks after the contact. */
+	static const char *const stages[2] = {"KOREA", "MIZUKI"};
+	for (int k = 0; k < 2; k++) {
+		unsigned arena = stage_index(stages[k]);
+		int centre = pack.stage[arena].width / 2;
+		staged(&s, arena, k ? haohmaru : terry, terry, centre - 30, centre + 30);
+		int n = 1;
+		for (; n <= 40 && !s.hits; n++)
+			run(&s, n, K(X), 0, 0);
+		assert(s.hits);
+		step2(&s, 0, 0);
+		step2(&s, 0, 0);
+		snapshot(&s, k ? "mizuki" : "korea");
+	}
 }
 static void logic_tests(const uint8_t *data, size_t len)
 {
@@ -1099,6 +1612,11 @@ static void logic_tests(const uint8_t *data, size_t len)
 	haohmaru = 0;
 	while (strcmp(pack.chr[haohmaru].name, "HAOHMARU"))
 		assert(++haohmaru < pack.characters);
+	/* The rules on exact ticks run on the flat fallback arena (480 wide,
+	 * the camera fixed at 0); the stage tests put the stages back. */
+	unsigned stages = pack.stages;
+	assert(stages >= 2);
+	pack.stages = 0;
 	frame_data();
 	hit_timing();
 	block_timing();
@@ -1114,6 +1632,10 @@ static void logic_tests(const uint8_t *data, size_t len)
 	ladder();
 	state_words();
 	stat_tests();
+	pack.stages = stages;
+	camera_tests();
+	spark_sound_tests();
+	stage_state();
 	ai_coverage();
 	previews();
 }
@@ -1157,6 +1679,9 @@ int main(int argc, char **argv)
 	reject_formats = false;
 	assert(retro_load_game(&g));
 	assert(formats >= 3);
+	/* The bank next to the pack loads, so the replay below covers music
+	 * and effects (built by make next to argv[1]). */
+	assert(sound_banks == 1);
 	size_t n = retro_serialize_size();
 	uint8_t *start = malloc(n), *end = malloc(n), *copy = malloc(n);
 	assert(start && end && copy);
@@ -1180,7 +1705,7 @@ int main(int argc, char **argv)
 		retro_run();
 	save(copy, n);
 	assert(!memcmp(end, copy, n) && picture == image_hash && sound == sound_hash);
-	assert(n == 16 + STATE_WORDS * 4);
+	assert(n == 16 + STATE_WORDS * 4 + AUDIO_STATE_BYTES);
 	memcpy(copy, end, n);
 	copy[8] ^= 1;
 	assert(!retro_unserialize(copy, n));
@@ -1195,6 +1720,9 @@ int main(int argc, char **argv)
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
 	copy[7] = '4'; /* FGSTATE4, pixel x and fixed stats */
+	assert(!retro_unserialize(copy, n));
+	memcpy(copy, end, n);
+	copy[7] = '5'; /* FGSTATE5, before the camera, sparks and sound events */
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
 	memset(copy + 16 + 8 * 4, 0xff, 4);
@@ -1289,8 +1817,9 @@ int main(int argc, char **argv)
 	free(end);
 	free(copy);
 	free(data);
-	puts("fighter-test: pack decoder, box/move/special/projectile validation, "
-	     "pixel-exact renderer, box flip and overlay, effect budget, content, "
+	puts("fighter-test: pack decoder, box/move/special/projectile/spark/stage "
+	     "validation, pixel-exact renderer and stage layers, box flip and overlay, "
+	     "effect budget, camera and walls, sparks, sound events, content, "
 	     "RGB565/XRGB8888, audio, ports, replay, pause, state validation, frame "
 	     "data, hit/block/hitstop ticks, pushback and corner, guard heights, "
 	     "trades, commands, buffer, prejump, cancels, projectiles and clash, "

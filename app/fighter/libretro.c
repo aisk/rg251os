@@ -1,13 +1,23 @@
-/* Standard libretro fighter core: FIGHTP05 content, input, deterministic
- * FGSTATE5 saves, audio and software frames. Timing below measures work only;
+/* Standard libretro fighter core: FIGHTP06 content, input, deterministic
+ * FGSTATE6 saves, audio and software frames. Timing below measures work only;
  * the frontend owns pacing. Logs the system profiles, the roster with each
  * character's system and resolved stats, every move's frame data and class
- * and the resident memory at load, and each new cast (the two fighters whose
- * RGB565 frames are expanded). Reports each scene (0 = two fighters, 1-3 =
+ * and the resident memory at load, the stages and spark sets, and each new
+ * cast (the two fighters and the stage whose RGB565 frames are expanded). Reports each scene (0 = two fighters, 1-3 =
  * +8, +24, +48 requested alpha/additive effects, capped by the per-frame
  * effect pixel budget) every 600 runs, also with debug off: logic/render/
  * audio times, how many effects were drawn of those requested, and the
  * ladder and special/clash counters.
+ *
+ * Sound comes from the bank next to the content (<pack>.fightsnd, found
+ * from retro_game_info's path; audio.c): after each unpaused tick the rule
+ * events and the mode pick effects and music, and 800 mixed frames go out
+ * per run (silence without a bank, which only logs why). The save state is
+ * the rule state followed by the audio block. At load it logs the bank
+ * (size, CRC, SFX, tracks, cues, resident memory, load time) and each
+ * track; every 600 runs the voices started and stolen, the peak, the music
+ * position and loops and the MP2 frames, seeks and decode time. Options
+ * fight_volume, fight_music_volume and fight_sfx_volume set the levels.
  *
  * Buttons (RetroPad ids; the RG351P shell labels match, SNES layout):
  * Y (left) light punch, X (top) heavy punch, B (bottom) light kick,
@@ -19,6 +29,7 @@
  * and any attack button picks. The desktop option fight_players=two lets
  * port 1 drive the ladder's opponent; the device only has port 0. */
 #include "libretro.h"
+#include "audio.h"
 #include "fighter.h"
 #include <stdbool.h>
 #include <stdio.h>
@@ -38,24 +49,29 @@ static struct scene scene;
 static uint16_t fb[FW * FH];
 static uint32_t xrgb[FW * FH];
 static int16_t audio[1600];
+/* The sound bank, mixer and music next to the pack (audio.c). */
+static struct audio sound;
+static char sound_path[4096];
 static int loaded, format32, two_players;
 static unsigned devices[2] = {RETRO_DEVICE_JOYPAD, RETRO_DEVICE_JOYPAD};
 static unsigned benchmark_runs;
 static uint64_t samples[3][600];
 static unsigned sample_count, scene_mode;
-static uint64_t effects_requested, effects_drawn;
+static uint64_t effects_requested, effects_drawn, sparks_drawn, layers_drawn;
 static unsigned effects_peak;
-/* Expand the state's two fighters if they changed, and log it. */
+/* Expand the state's two fighters and stage if they changed, and log it. */
 static void cast(void)
 {
 	if (fight_cast(&assets, &state) && logger)
 		logger(RETRO_LOG_INFO,
-		       "fight: cast %s palette %u vs %s palette %u, resident RGB565 KiB "
-		       "p1 %u p2 %u effects %u, %u images\n",
+		       "fight: cast %s palette %u vs %s palette %u on %s, resident RGB565 KiB "
+		       "p1 %u p2 %u stage %u effects %u, %u images\n",
 		       assets.chr[state.chr[0]].name, state.pal[0],
 		       assets.chr[state.chr[1]].name, state.pal[1],
+		       assets.cast_stage >= 0 ? assets.stage[assets.cast_stage].name : "FLAT",
 		       assets.cast_pixels[0] * 2 / 1024, assets.cast_pixels[1] * 2 / 1024,
-		       assets.effect_pixels * 2 / 1024, assets.images);
+		       assets.stage_pixels * 2 / 1024, assets.effect_pixels * 2 / 1024,
+		       assets.images);
 }
 static uint64_t tick_us(void)
 {
@@ -94,11 +110,15 @@ static void report(void)
 		}
 		logger(RETRO_LOG_INFO,
 		       "fight: scene %u effects drawn/requested %llu/%llu, "
-		       "dropped %llu, peak %u per frame, budget %u px, %u runs\n",
+		       "dropped %llu, peak %u per frame, budget %u px, sparks %llu, stage "
+		       "sprites %llu, stage %s cam %u, %u runs\n",
 		       scene_mode, (unsigned long long)effects_drawn,
 		       (unsigned long long)effects_requested,
 		       (unsigned long long)(effects_requested - effects_drawn),
-		       effects_peak, EFFECT_PIXEL_BUDGET, sample_count);
+		       effects_peak, EFFECT_PIXEL_BUDGET, (unsigned long long)sparks_drawn,
+		       (unsigned long long)layers_drawn,
+		       assets.cast_stage >= 0 ? assets.stage[assets.cast_stage].name : "FLAT",
+		       state.cam, sample_count);
 		logger(RETRO_LOG_INFO,
 		       "fight: tick %u round %u hits %u guards %u specials %u clashes %u "
 		       "mode %u run %u stage %u beaten %08x %s vs %s; frontend perf "
@@ -107,15 +127,33 @@ static void report(void)
 		       state.clashes, state.mode, state.run, state.stage, state.beaten,
 		       assets.chr[state.chr[0]].name, assets.chr[state.chr[1]].name);
 	}
+	if (logger && sound.bank) {
+		const struct audio_stats *st = &sound.stats;
+		unsigned frames = st->frames ? st->frames : 1;
+		logger(RETRO_LOG_INFO,
+		       "fight: scene %u sound starts %u steals %u silent %u voices peak %u; "
+		       "music %s pos %u loops %u, MP2 frames %u seeks %u restores %u decode "
+		       "us avg/max %llu/%llu, %u runs\n",
+		       scene_mode, st->starts, st->steals, st->silent, st->peak,
+		       sound.s.track ? sound.track[sound.s.track - 1].name : "none",
+		       sound.s.pos, sound.s.loops, st->frames, st->seeks, st->restores,
+		       (unsigned long long)(st->decode_us / frames),
+		       (unsigned long long)st->decode_max_us, sample_count);
+	}
+	audio_stats_reset(&sound);
 	sample_count = 0;
-	effects_requested = effects_drawn = 0;
+	effects_requested = effects_drawn = sparks_drawn = layers_drawn = 0;
 	effects_peak = 0;
 }
 void retro_set_environment(retro_environment_t cb)
 {
 	env = cb;
 	static const struct retro_variable vars[] = {
-	    {"fight_players", "Players; cpu|two"}, {NULL, NULL}};
+	    {"fight_players", "Players; cpu|two"},
+	    {"fight_volume", "Master volume; 100|90|80|70|60|50|40|30|20|10|0"},
+	    {"fight_music_volume", "Music volume; 60|70|80|90|100|0|10|20|30|40|50"},
+	    {"fight_sfx_volume", "Effects volume; 100|90|80|70|60|50|40|30|20|10|0"},
+	    {NULL, NULL}};
 	if (env)
 		env(RETRO_ENVIRONMENT_SET_VARIABLES, (void *)vars);
 }
@@ -134,6 +172,7 @@ void retro_init(void)
 void retro_deinit(void)
 {
 	report();
+	audio_close(&sound);
 	loaded = 0;
 }
 unsigned retro_api_version(void) { return RETRO_API_VERSION; }
@@ -152,11 +191,65 @@ void retro_get_system_av_info(struct retro_system_av_info *i)
 	i->timing.fps = 60;
 	i->timing.sample_rate = 48000;
 }
+/* A volume option in percent; anything but 0..100 gives the default. */
+static unsigned volume(const char *key, unsigned fallback)
+{
+	struct retro_variable v = {key, NULL};
+	char *end;
+	if (!env || !env(RETRO_ENVIRONMENT_GET_VARIABLE, &v) || !v.value || !*v.value)
+		return fallback;
+	unsigned long n = strtoul(v.value, &end, 10);
+	return *end || n > 100 ? fallback : (unsigned)n;
+}
 static void options(void)
 {
 	struct retro_variable v = {"fight_players", NULL};
 	two_players = env && env(RETRO_ENVIRONMENT_GET_VARIABLE, &v) && v.value &&
 		      !strcmp(v.value, "two");
+	sound.master = volume("fight_volume", 100);
+	sound.music_level = volume("fight_music_volume", 60);
+	sound.sfx_level = volume("fight_sfx_volume", 100);
+}
+/* Load the sound bank next to the content; without it the game is silent. */
+static void open_sound(const struct retro_game_info *g)
+{
+	char why[160];
+	uint64_t t0 = tick_us();
+	if (!audio_open(&sound, g->path, &assets, why, sizeof(why), sound_path,
+			sizeof(sound_path))) {
+		if (logger)
+			logger(RETRO_LOG_WARN, "fight: no sound: bank %s: %s; playing silent\n",
+			       *sound_path ? sound_path : "(none)", why);
+		return;
+	}
+	if (!logger)
+		return;
+	uint64_t adpcm = 0, clip_ms = 0, mp2 = 0, seconds = 0;
+	for (unsigned i = 0; i < sound.clips; i++) {
+		adpcm += (sound.clip[i].samples + 255) / 256 * 132;
+		clip_ms += sound.clip[i].samples * 1000ull / sound.clip[i].rate;
+	}
+	for (unsigned i = 0; i < sound.tracks; i++) {
+		mp2 += (uint64_t)sound.track[i].frames * sound.track[i].frame_bytes;
+		seconds += sound.track[i].samples / AUDIO_RATE;
+	}
+	logger(RETRO_LOG_INFO,
+	       "fight: sound bank %s %u KiB crc %08x loaded in %llu ms: %u SFX (%llu KiB "
+	       "ADPCM, %llu.%llu s), %u tracks (%llu KiB MP2, %llu s), %u cues, %u music "
+	       "cues, %u unmatched scopes; resident %u KiB; volume %u music %u sfx %u\n",
+	       sound_path, (unsigned)(sound.size / 1024), sound.crc,
+	       (unsigned long long)((tick_us() - t0) / 1000), sound.clips,
+	       (unsigned long long)(adpcm / 1024), (unsigned long long)(clip_ms / 1000),
+	       (unsigned long long)(clip_ms % 1000 / 100), sound.tracks,
+	       (unsigned long long)(mp2 / 1024), (unsigned long long)seconds, sound.cues,
+	       sound.music, sound.unmatched, (unsigned)(audio_resident(&sound) / 1024),
+	       sound.master, sound.music_level, sound.sfx_level);
+	for (unsigned i = 0; i < sound.tracks; i++)
+		logger(RETRO_LOG_INFO,
+		       "fight: track %u %s %u frames x %u bytes, %s %u..%u, level %u\n", i,
+		       sound.track[i].name, sound.track[i].frames, sound.track[i].frame_bytes,
+		       sound.track[i].loops ? "loop" : "once", sound.track[i].loop_start,
+		       sound.track[i].loop_end, sound.track[i].level);
 }
 bool retro_load_game(const struct retro_game_info *g)
 {
@@ -165,7 +258,7 @@ bool retro_load_game(const struct retro_game_info *g)
 	if (!g || !fight_assets(&assets, g->data, g->size, &automatic)) {
 		if (logger)
 			logger(RETRO_LOG_ERROR,
-			       "fight: invalid FIGHTP05 package (magic, length, hash, "
+			       "fight: invalid FIGHTP06 package (magic, length, hash, "
 			       "limits, frame, palette, system, stats, character, move, "
 			       "projectile or step data)\n");
 		return false;
@@ -180,6 +273,7 @@ bool retro_load_game(const struct retro_game_info *g)
 	}
 	fight_reset(&state, automatic);
 	options();
+	open_sound(g);
 	sample_count = 0;
 	effects_requested = effects_drawn = 0;
 	effects_peak = 0;
@@ -188,7 +282,7 @@ bool retro_load_game(const struct retro_game_info *g)
 	benchmark_runs = 0;
 	if (logger) {
 		logger(RETRO_LOG_INFO,
-		       "fight: FIGHTP05 package %08x, %u characters, %u frames, %u "
+		       "fight: FIGHTP06 package %08x, %u characters, %u frames, %u "
 		       "palettes, %u steps, %u boxes, 480x320 60Hz 48kHz, software %s, %s; "
 		       "L boxes R stress START pause\n",
 		       assets.hash, assets.characters, assets.frames, assets.palettes,
@@ -206,6 +300,20 @@ bool retro_load_game(const struct retro_game_info *g)
 		       (unsigned)(assets.rows * 4 / 1024), rules / 1024,
 		       assets.effect_pixels * 2 / 1024, assets.effects,
 		       (unsigned)(sizeof(assets) / 1024));
+		logger(RETRO_LOG_INFO, "fight: %u spark anims (%u steps), %u stages%s\n",
+		       assets.sparks, assets.spark_steps, assets.stages,
+		       assets.stages ? "" : ", flat background");
+		for (unsigned k = 0; k < assets.stages; k++) {
+			const struct stage *st = &assets.stage[k];
+			unsigned anims = 0;
+			for (unsigned i = 0; i < st->layers; i++)
+				anims += assets.layer[st->first_layer + i].anims;
+			logger(RETRO_LOG_INFO,
+			       "fight: stage %u %s width %u ground %u system %s, %u layers, %u "
+			       "anims, expands to %u KiB RGB565 in %u images, %u spans\n",
+			       k, st->name, st->width, st->ground, assets.sys[st->system].name,
+			       st->layers, anims, st->pixels * 2 / 1024, st->images, st->spans);
+		}
 		static const char *const names[MOVES] = {
 		    "stand LP", "stand HP", "stand LK", "stand HK",
 		    "crouch LP", "crouch HP", "crouch LK", "crouch HK"};
@@ -264,12 +372,14 @@ bool retro_load_game(const struct retro_game_info *g)
 void retro_unload_game(void)
 {
 	report();
+	audio_close(&sound);
 	loaded = 0;
 }
 void retro_reset(void)
 {
 	report();
 	fight_reset(&state, state.automatic);
+	audio_reset(&sound);
 	cast();
 	benchmark_runs = 0;
 }
@@ -307,6 +417,8 @@ void retro_run(void)
 	fight_scene(&state, &assets, &scene);
 	effects_requested += scene.effects_requested;
 	effects_drawn += scene.effects_drawn;
+	sparks_drawn += scene.sparks;
+	layers_drawn += scene.layers;
 	if (scene.effects_requested > effects_peak)
 		effects_peak = scene.effects_requested;
 	fight_render(&assets, &scene, fb);
@@ -317,15 +429,9 @@ void retro_run(void)
 				  (b << 3 | b >> 2);
 		}
 	uint64_t t2 = tick_us();
-	for (int i = 0; i < 800; i++) {
-		int value = 0;
-		if (state.tone && !state.paused) {
-			state.phase = (state.phase + 660) % 48000;
-			value = (state.phase < 24000 ? 1 : -1) * (int)state.tone;
-			state.tone--;
-		}
-		audio[2 * i] = audio[2 * i + 1] = (int16_t)value;
-	}
+	if (!state.paused)
+		audio_tick(&sound, &state, &assets);
+	audio_mix(&sound, audio, 800, !state.paused);
 	uint64_t t3 = tick_us();
 	samples[0][sample_count] = t1 - t0;
 	samples[1][sample_count] = t2 - t1;
@@ -351,7 +457,8 @@ static uint32_t get32(const uint8_t *p)
 	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 |
 	       (uint32_t)p[3] << 24;
 }
-size_t retro_serialize_size(void) { return 16 + STATE_WORDS * 4; }
+/* The rule state, then the audio block (audio.h). */
+size_t retro_serialize_size(void) { return 16 + STATE_WORDS * 4 + AUDIO_STATE_BYTES; }
 bool retro_serialize(void *data, size_t size)
 {
 	if (!loaded || !data || size < retro_serialize_size())
@@ -359,11 +466,12 @@ bool retro_serialize(void *data, size_t size)
 	uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	fight_encode(&state, w);
-	memcpy(p, "FGSTATE5", 8);
+	memcpy(p, "FGSTATE6", 8);
 	put32(p + 8, assets.hash);
 	put32(p + 12, state.automatic);
 	for (int i = 0; i < STATE_WORDS; i++)
 		put32(p + 16 + 4 * i, w[i]);
+	audio_encode(&sound, p + 16 + STATE_WORDS * 4);
 	return true;
 }
 bool retro_unserialize(const void *data, size_t size)
@@ -371,7 +479,7 @@ bool retro_unserialize(const void *data, size_t size)
 	const uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	if (!loaded || !p || size != retro_serialize_size() ||
-	    memcmp(p, "FGSTATE5", 8) || get32(p + 8) != assets.hash ||
+	    memcmp(p, "FGSTATE6", 8) || get32(p + 8) != assets.hash ||
 	    get32(p + 12) != state.automatic)
 		return false;
 	for (int i = 0; i < STATE_WORDS; i++)
@@ -379,7 +487,10 @@ bool retro_unserialize(const void *data, size_t size)
 	if (w[6] != state.automatic)
 		return false;
 	struct fight_state restored;
-	if (!fight_decode(&restored, &assets, w))
+	/* The audio block applies only after the rule state checked out; a
+	 * block saved with another bank (or none) restores as silence. */
+	if (!fight_decode(&restored, &assets, w) ||
+	    !audio_decode(&sound, p + 16 + STATE_WORDS * 4))
 		return false;
 	report();
 	state = restored;

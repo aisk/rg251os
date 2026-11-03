@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a FIGHTP05 content pack from ripped sprite sheets and their manifests.
+"""Build a FIGHTP06 content pack from ripped sprite sheets and their manifests.
 
 Each manifest (assets/fighter/<name>.json) describes one sheet and is the
 source of truth for it: every frame is a hand-checked sheet rectangle plus a
@@ -13,6 +13,10 @@ manifest, which then acts as a roster of its own characters:
   manifests   list of manifest paths relative to the roster; their characters
               appear in the select screen in this order
   effects     the manifest whose "effects" list the stress scenes draw
+  stages      optional list of stage manifests (see below); without any the
+              core draws its flat fallback background
+  sparks      optional {id: spark manifest}; systems.json "effects" names
+              their anims as "id.anim"
 Either way systems.json next to the roster (or manifest) supplies the system
 profiles; every profile goes into the pack (at most 8).
 Subcommands:
@@ -96,6 +100,50 @@ top-level keys such as "notes" are ignored):
               (characters not listed use the first and second palette)
   palettes    name -> {sheet RGB hex: replacement hex}
   effects     [frame, palette] pairs for the effect sprites
+  home_stage  (in a character) optional stage name: the ladder fights this
+              character on it; otherwise opponent c fights on stage
+              c % stages
+  slash       (in a character) optional list of lp/hp/lk/hk/special: the
+              moves that are weapon strikes (slash sparks, blood and slash
+              sounds); defaults to the system's "slash"
+
+Spark manifest (assets/fighter/sparks-*.json): "sheet" (RGBA PNG, alpha 0 is
+transparent), "sha256", optional "sources" and "notes", "frames" name -> [x,
+y, w, h, anchor x, anchor y] and "anims" name -> {"steps": [[frame, ticks],
+...], "blend" (opaque, alpha or add), "alpha" (1..255, blended only), "src"}.
+Frames are trimmed to their opaque pixels; the anchor lands on the contact
+point. One palette per sheet (at most 256 colours).
+
+Stage manifest (assets/fighter/stage-*.json):
+  name        shown in logs (A-Z, 0-9, space, -, at most 12 once upper-cased)
+  system      the systems.json profile whose wall_margin and play_width the
+              rules use on this stage
+  width       world width W in pixels (480..2048); the camera's left edge
+              moves in 0..W-480
+  ground      the row in stage coordinates where feet stand; it is drawn on
+              the core's ground line
+  sheets      id -> {"file", "sha256", optional "background" RGB hex}: PNGs
+              (RGB with a background key colour, or RGBA where alpha 0 is
+              transparent)
+  layers      back to front, at most 8: {"sheet", "rect" [x, y, w, h], "x"
+              (screen x of the layer's left edge at camera 0), "y" (top in
+              stage coordinates), "parallax" ("fit": the layer's two edges
+              meet the screen's at the camera's two ends, i.e. it moves
+              cam * (w - 480) / (W - 480); or [num, den]: moves
+              cam * num / den), "edge" [horizontal, vertical] rules for
+              screen pixels outside the layer (none: leave them to the layers
+              behind, extend: repeat the outermost column/row, repeat: tile,
+              color: fill with "color", mirror: reflect at the edge), optional
+              "color" RGB hex, optional
+              "anims"}. Each layer and its anims share one palette.
+  anims       [{"steps": [[[x, y, w, h], ticks, dx, dy], ...], "diff": bool}]:
+              sheet rectangles drawn over the layer with their top-left at
+              (dx, dy) in layer pixels, cycling with the global tick. With
+              "diff" each frame keeps only the pixels that differ from the
+              layer, so only what changes is stored and drawn; where some
+              frame is transparent over an opaque layer pixel, that pixel is
+              taken out of the layer.
+Stages are 1:1 pixels and scroll horizontally only.
 
 Frame data printed by `data` (all in 60 Hz ticks): startup = ticks before
 the first hitbox (the press tick is elapsed 0, so the first active tick is
@@ -118,19 +166,24 @@ hyper_hop, chip, meters, mechanics, scaling, stun and guard are accepted for
 later steps and not packed.
 
 Pack layout, all little endian (the C loader in app/fighter/render.c checks it):
-  header     "FIGHTP05", u32 size, u32 FNV-1a of bytes 16..size, u32 flags
+  header     "FIGHTP06", u32 size, u32 FNV-1a of bytes 16..size, u32 flags
              (bit 0 automatic), u32 palettes, frames, characters, effects,
-             systems
+             systems, sparks, stages
   palette    u16 sheet, u16 n (1..256), n x u16 RGB565
   frame      u16 sheet, u16 w, h; i16 anchor x, y; u32 spans; h x u16 spans
              per row; spans x (u16 x, u16 len); then sum(len) u8 indices
+  spark      u8 blend, u8 alpha, u16 steps; steps x (u16 frame, u16 palette,
+             u16 ticks)
   system     u8 name length, name bytes; u16 damage scale; 11 stats x u16
              (life, defense, walk, walk_back, i16 jump vy, gravity, vx,
              vx_back, prejump, weight, height 0 low 1 mid 2 high); u16 push
              distance, guard range, buffer, quarter, dragon, charge, grace,
              release; 6 classes (light, heavy, command, special, super,
              throw) x (u16 hitstun, blockstun, hitstop, has: bit 0 the stun
-             pair, bit 1 hitstop; absent values 0)
+             pair, bit 1 hitstop; absent values 0); u16 wall margin, u16
+             play width; 11 x u16 spark + 1 (0 none) for hit_light, hit_heavy,
+             hit_special, guard, slash_light, slash_heavy, slash_special,
+             slash_guard, blood_light, blood_heavy, blood_special
   character  u8 name length, name bytes; u16 normal palette, alternate
              palette; u16 system, u16 override mask (bit per stat), 11 stats
              x u16 as above (0 where the mask bit is clear); u16 steps, boxes,
@@ -146,10 +199,19 @@ Pack layout, all little endian (the C loader in app/fighter/render.c checks it):
              blend, alpha, class, defaults); steps x (u16 frame, u16 ticks,
              u16 first box, u8 hurt boxes, u8 hit boxes, i8 forward, i8 down,
              u8 spawn = projectile + 1 or 0); boxes x (i16 x, i16 y, u16 w,
-             u16 h). Frame indices are global; step and box indices are local
-             to the character. Damage is packed as written; src and sources
-             are not packed.
+             u16 h); u16 slash mask (bit 0..3 lp, hp, lk, hk normals, bit 4
+             specials), u16 home stage + 1 (0 none). Frame indices are
+             global; step and box indices are local to the character. Damage
+             is packed as written; src and sources are not packed.
   effects    u16 frame, u16 palette
+  stage      u8 name length, name bytes; u16 width, ground, system, layers;
+             layers x (u16 frame, palette, w, h; i16 x, y, num; u16 den; u8
+             edge x, edge y (0 none, 1 extend, 2 repeat, 3 color, 4 mirror);
+             u16 color
+             RGB565; u16 anims; anims x (u16 steps; steps x (u16 frame or
+             0xffff for nothing, i16 x, i16 y, u16 ticks))). A layer frame's
+             anchor is minus its trimmed offset inside the layer rectangle;
+             anim frames are drawn with their top-left at (x, y) - anchor.
 """
 import argparse
 import hashlib
@@ -159,7 +221,7 @@ import struct
 import sys
 import zlib
 
-MAGIC = b'FIGHTP05'
+MAGIC = b'FIGHTP06'
 # Order matters: these are the C enums in app/fighter/fighter.h.
 ACTIONS = ['idle', 'walk_forward', 'walk_back', 'jump', 'guard', 'hurt', 'ko',
            'crouch', 'crouch_guard', 'crouch_hurt']
@@ -204,6 +266,24 @@ MAX_GRACE = 60
 MAX_PUSH_DISTANCE = 200
 HISTORY = 32
 SCREEN_WIDTH = 480
+MAX_PALETTES = 64
+MAX_FRAMES = 4096
+EFFECT_KEYS = ['hit_light', 'hit_heavy', 'hit_special', 'guard', 'slash_light', 'slash_heavy',
+               'slash_special', 'slash_guard', 'blood_light', 'blood_heavy', 'blood_special']
+SLASH_KEYS = ['lp', 'hp', 'lk', 'hk', 'special']
+EDGES = ['none', 'extend', 'repeat', 'color', 'mirror']
+MAX_SPARKS = 32
+MAX_SPARK_STEPS = 64
+MAX_STAGES = 16
+MAX_LAYERS = 8
+MAX_LAYER_ANIMS = 8
+MAX_ANIM_STEPS = 64
+MIN_STAGE_WIDTH = SCREEN_WIDTH
+MAX_STAGE_WIDTH = 2048
+MIN_PLAY_WIDTH = 320
+MIN_MARGIN = 8
+MAX_MARGIN = 48
+DEFAULT_MARGIN = 24
 DEFAULT_SYSTEM = 'kof2002'
 CLASSES = ['light', 'heavy', 'command', 'special', 'super', 'throw']
 HEIGHTS = ['low', 'mid', 'high']
@@ -224,8 +304,9 @@ SOURCE_KINDS = ['estimate', 'sheet', 'measured', 'design']
 ESTIMATE_WARNING = 50
 
 
-def read_png(path):
-    """Decode an 8-bit, non-interlaced RGB or RGBA PNG to (w, h, RGB rows)."""
+def read_png(path, alpha=False):
+    """Decode an 8-bit, non-interlaced RGB or RGBA PNG to (w, h, RGB rows);
+    with alpha, RGBA rows are returned as they are (RGB rows get alpha 255)."""
     data = pathlib.Path(path).read_bytes()
     if data[:8] != b'\x89PNG\r\n\x1a\n':
         raise ValueError(f'{path}: not a PNG')
@@ -270,8 +351,12 @@ def read_png(path):
         elif kind:
             raise ValueError(f'{path}: bad filter {kind} on row {y}')
         prev = line
-        rows.append(bytes(line) if bpp == 3 else bytes(
-            b for i in range(0, stride, 4) for b in line[i:i + 3]))
+        if alpha:
+            rows.append(bytes(line) if bpp == 4 else bytes(
+                b for i in range(0, stride, 3) for b in line[i:i + 3] + b'\xff'))
+        else:
+            rows.append(bytes(line) if bpp == 3 else bytes(
+                b for i in range(0, stride, 4) for b in line[i:i + 3]))
     return w, h, rows
 
 
@@ -567,7 +652,8 @@ class Systems:
             raise ValueError(f'{what}: names are 1..{MAX_NAME} of a-z, 0-9 and _')
         need = {'life', 'damage_scale', 'walk', 'walk_back', 'jump', 'stun_table',
                 'hitstop_table', 'input', 'push_distance', 'guard_range'}
-        known = need | {'defense', 'weight', 'height', 'src', 'notes'} | LATER_SYSTEM_KEYS
+        known = need | {'defense', 'weight', 'height', 'src', 'notes', 'wall_margin',
+                        'play_width', 'slash', 'effects'} | LATER_SYSTEM_KEYS
         if not isinstance(p, dict) or need - set(p) or set(p) - known:
             raise ValueError(f'{what}: needs {sorted(need)}, may have '
                              f'{sorted(known - need)}')
@@ -599,7 +685,18 @@ class Systems:
                                                                f'{what}: {table} {cls}')
         if 'src' in p:
             check_src(p['src'], what, set(p) - {'src', 'notes'}, {})
+        effects = p.get('effects', {})
+        if not isinstance(effects, dict) or set(effects) - set(EFFECT_KEYS) or not all(
+                isinstance(v, str) and v.count('.') == 1 for v in effects.values()):
+            raise ValueError(f'{what}: effects is {{key: "sparks_id.anim"}} with keys among '
+                             f'{EFFECT_KEYS}')
         return {'name': name,
+                'margin': check_int(p.get('wall_margin', DEFAULT_MARGIN), MIN_MARGIN, MAX_MARGIN,
+                                    f'{what}: wall_margin'),
+                'play_width': check_int(p.get('play_width', SCREEN_WIDTH), MIN_PLAY_WIDTH,
+                                        SCREEN_WIDTH, f'{what}: play_width'),
+                'slash': slash_mask(p.get('slash', []), what),
+                'effects': effects,
                 'damage_scale': check_int(p['damage_scale'], MIN_SCALE, MAX_PERMILLE,
                                           f'{what}: damage_scale'),
                 'stats': st, 'inputs': inputs,
@@ -619,7 +716,10 @@ class Systems:
             raise ValueError(f'{character}: system {written} but systems.json assigns {mapped}')
         return self.profile[written or mapped or DEFAULT_SYSTEM]
 
-    def pack(self):
+    def pack(self, sparks=None):
+        """The system records; sparks maps "id.anim" to its pack index (every
+        name an effect table uses must be in it)."""
+        sparks = sparks or {}
         out = b''
         for n in self.names:
             p = self.profile[n]
@@ -631,7 +731,20 @@ class Systems:
                 has = ('hitstun' in row) | ('hitstop' in row) << 1
                 out += struct.pack('<4H', row.get('hitstun', 0), row.get('blockstun', 0),
                                    row.get('hitstop', 0), has)
+            out += struct.pack('<2H', p['margin'], p['play_width'])
+            for k in EFFECT_KEYS:
+                ref = p['effects'].get(k)
+                if ref is not None and ref not in sparks:
+                    raise ValueError(f'systems.json {n}: effect {k} names unknown spark anim {ref}')
+                out += struct.pack('<H', sparks[ref] + 1 if ref is not None else 0)
         return out
+
+
+def slash_mask(v, what):
+    """Weapon moves: bits 0..3 the lp/hp/lk/hk normals, bit 4 the specials."""
+    if not isinstance(v, list) or not set(v) <= set(SLASH_KEYS):
+        raise ValueError(f'{what}: slash is a list of {SLASH_KEYS}')
+    return sum(1 << SLASH_KEYS.index(k) for k in set(v))
 
 
 def button_mask(b, what):
@@ -670,12 +783,18 @@ class Character:
         self.hits, self.projectile_hits = [], []
         hurt = m['hurtboxes']
         index = {f: base + i for i, f in enumerate(frame_names)}
-        known = {'actions', 'moves', 'projectiles', 'system', 'stats'}
+        known = {'actions', 'moves', 'projectiles', 'system', 'stats', 'home_stage', 'slash'}
         if set(ch) - known:
             raise ValueError(f'{name}: unknown keys {sorted(set(ch) - known)}')
         sources = check_sources(m, name)
         self.system = systems.of(name, ch.get('system'))
         self.system_index = systems.names.index(self.system['name'])
+        self.slash = slash_mask(ch['slash'], name) if 'slash' in ch else self.system['slash']
+        self.home_stage = ch.get('home_stage')
+        if self.home_stage is not None and not isinstance(self.home_stage, str):
+            raise ValueError(f'{name}: home_stage is a stage name')
+        # Index + 1 of the home stage in the pack, set by build().
+        self.home_index = 0
         given = ch.get('stats', {})
         if not isinstance(given, dict) or set(given) - STAT_SRC_KEYS - LATER_STAT_KEYS - {'src'}:
             raise ValueError(f'{name}: stats may have {sorted(STAT_SRC_KEYS | LATER_STAT_KEYS)} '
@@ -848,7 +967,7 @@ class Character:
             out += struct.pack('<3H2B2bB', *s)
         for b in self.boxes:
             out += struct.pack('<hhHH', *b)
-        return out
+        return out + struct.pack('<2H', self.slash, self.home_index)
 
     def frame_data(self, k):
         """(startup, active, recovery, total, hits) of a move, as the core sees it."""
@@ -884,6 +1003,282 @@ def palettes_of(m, name):
     return picks
 
 
+def encode_frame(sid, pix, ax, ay, index):
+    """A packed frame: rows of opaque spans of palette indices (None is
+    transparent)."""
+    h, w = len(pix), len(pix[0])
+    counts, spans, data = [], [], bytearray()
+    for row in pix:
+        k, x = 0, 0
+        while x < w:
+            if row[x] is None:
+                x += 1
+                continue
+            start = x
+            while x < w and row[x] is not None:
+                data.append(index[row[x]])
+                x += 1
+            spans.append((start, x - start))
+            k += 1
+        counts.append(k)
+    return (struct.pack('<HHHhhI', sid, w, h, ax, ay, len(spans)) +
+            struct.pack(f'<{h}H', *counts) + b''.join(struct.pack('<HH', *sp) for sp in spans) +
+            data)
+
+
+def trim(pix):
+    """(trimmed rows, left, top) of a pixel block, or None if all transparent."""
+    used_rows = [j for j, row in enumerate(pix) if any(p is not None for p in row)]
+    if not used_rows:
+        return None
+    used_cols = [i for i in range(len(pix[0])) if any(row[i] is not None for row in pix)]
+    t, b, l, r = used_rows[0], used_rows[-1] + 1, used_cols[0], used_cols[-1] + 1
+    return [row[l:r] for row in pix[t:b]], l, t
+
+
+class Image:
+    """An RGB or RGBA PNG checked against its SHA256; pixels are transparent
+    where alpha is 0 or the colour equals the background key."""
+
+    def __init__(self, path, sha256, background=None):
+        self.path = pathlib.Path(path)
+        digest = hashlib.sha256(self.path.read_bytes()).hexdigest()
+        if digest != sha256:
+            raise ValueError(f'{path}: SHA256 {digest} does not match the manifest')
+        self.w, self.h, self.rows = read_png(path, alpha=True)
+        self.key = bytes.fromhex(background) if background else None
+
+    def block(self, rect, what):
+        x, y, w, h = rect
+        if not all(isinstance(v, int) for v in rect) or w < 1 or h < 1 or x < 0 or y < 0 or \
+                x + w > self.w or y + h > self.h or w > MAX_SIDE or h > MAX_SIDE:
+            raise ValueError(f'{what}: rectangle {rect} outside {self.path.name} or too large')
+        out = []
+        for j in range(h):
+            row = self.rows[y + j]
+            line = []
+            for i in range(x, x + w):
+                p = row[i * 4:i * 4 + 4]
+                line.append(None if p[3] == 0 or p[:3] == self.key else p[:3])
+            out.append(line)
+        return out
+
+
+def palette_of(blocks, what):
+    colors = sorted({c for pix in blocks for row in pix for c in row if c is not None})
+    if not colors:
+        raise ValueError(f'{what}: no opaque pixels')
+    if len(colors) > 256:
+        raise ValueError(f'{what}: {len(colors)} colours; 256 per sheet is the limit')
+    return colors
+
+
+class Sparks:
+    """A spark manifest: hit/guard/slash/blood animations on one RGBA sheet."""
+
+    def __init__(self, path, ident):
+        path = pathlib.Path(path)
+        m = json.loads(path.read_text())
+        what = path.name
+        if not isinstance(m, dict) or set(m) - {'sheet', 'sha256', 'frames', 'anims', 'sources',
+                                                 'notes'} or not {'sheet', 'sha256', 'frames',
+                                                                  'anims'} <= set(m):
+            raise ValueError(f'{what}: needs sheet, sha256, frames and anims')
+        self.ident = ident
+        sources = check_sources(m, what)
+        img = Image(path.parent / m['sheet'], m['sha256'])
+        self.names = list(m['frames'])
+        self.frames = []
+        for n in self.names:
+            f = m['frames'][n]
+            if not isinstance(f, list) or len(f) != 6 or not all(isinstance(v, int) for v in f):
+                raise ValueError(f'{what} {n}: a frame is [x, y, w, h, anchor x, anchor y]')
+            t = trim(img.block(f[:4], f'{what} {n}'))
+            if t is None:
+                raise ValueError(f'{what} {n}: empty frame')
+            pix, l, top = t
+            ax, ay = f[4] - l, f[5] - top
+            if not -MAX_SIDE <= ax <= MAX_SIDE or not -MAX_SIDE <= ay <= MAX_SIDE:
+                raise ValueError(f'{what} {n}: anchor out of range')
+            self.frames.append((pix, ax, ay))
+        self.colors = palette_of([f[0] for f in self.frames], what)
+        self.anims = {}
+        for name, an in m['anims'].items():
+            w = f'{what} {name}'
+            if not isinstance(an, dict) or set(an) - {'steps', 'blend', 'alpha', 'src'} or \
+                    not {'steps', 'blend'} <= set(an) or an['blend'] not in BLENDS:
+                raise ValueError(f'{w}: an anim is {{steps, blend, alpha (blended), src}}')
+            if 'src' in an:
+                check_src(an['src'], w, {'steps'}, sources)
+            blend = BLENDS.index(an['blend'])
+            alpha = check_int(an.get('alpha', 255), 1, 255, f'{w}: alpha')
+            steps = an['steps']
+            if not isinstance(steps, list) or not 1 <= len(steps) <= MAX_SPARK_STEPS:
+                raise ValueError(f'{w}: 1..{MAX_SPARK_STEPS} steps')
+            out = []
+            for st in steps:
+                if not isinstance(st, list) or len(st) != 2 or st[0] not in self.names:
+                    raise ValueError(f'{w}: a step is [frame, ticks]')
+                out.append((self.names.index(st[0]), check_int(st[1], 1, 255, f'{w}: ticks')))
+            self.anims[name] = (blend, alpha, out)
+
+
+LAYER_KEYS = {'sheet', 'rect', 'x', 'y', 'parallax', 'edge', 'color', 'anims'}
+
+
+class Stage:
+    """A stage manifest: parallax layers and their animated sub-rectangles,
+    each layer one palette (see the docstring above)."""
+
+    def __init__(self, path, systems):
+        path = pathlib.Path(path)
+        m = json.loads(path.read_text())
+        what = path.name
+        need = {'name', 'system', 'width', 'ground', 'sheets', 'layers'}
+        if not isinstance(m, dict) or need - set(m) or set(m) - need - {'sources', 'notes'}:
+            raise ValueError(f'{what}: needs {sorted(need)}, may have sources and notes')
+        check_sources(m, what)
+        self.name = m['name']
+        self.display = display_name(m['name'])
+        if m['system'] not in systems.profile:
+            raise ValueError(f'{what}: unknown system {m["system"]}')
+        self.system = systems.names.index(m['system'])
+        self.width = check_int(m['width'], MIN_STAGE_WIDTH, MAX_STAGE_WIDTH, f'{what}: width')
+        self.ground = check_int(m['ground'], 0, MAX_SIDE, f'{what}: ground')
+        sheets = m['sheets']
+        if not isinstance(sheets, dict) or not sheets:
+            raise ValueError(f'{what}: sheets is {{id: {{file, sha256, background}}}}')
+        images = {}
+        for k, v in sheets.items():
+            if not isinstance(v, dict) or set(v) - {'file', 'sha256', 'background'} or \
+                    not {'file', 'sha256'} <= set(v):
+                raise ValueError(f'{what}: sheet {k} needs file and sha256')
+            images[k] = Image(path.parent / v['file'], v['sha256'], v.get('background'))
+        layers = m['layers']
+        if not isinstance(layers, list) or not 1 <= len(layers) <= MAX_LAYERS:
+            raise ValueError(f'{what}: 1..{MAX_LAYERS} layers')
+        self.layers = []
+        for n, ly in enumerate(layers):
+            w = f'{what} layer {n}'
+            if not isinstance(ly, dict) or set(ly) - LAYER_KEYS or \
+                    not {'sheet', 'rect', 'x', 'y', 'edge'} <= set(ly) or ly['sheet'] not in images:
+                raise ValueError(f'{w}: needs a known sheet, rect, x, y and edge')
+            img = images[ly['sheet']]
+            if not isinstance(ly['rect'], list) or len(ly['rect']) != 4:
+                raise ValueError(f'{w}: rect is [x, y, w, h]')
+            base = img.block(ly['rect'], w)
+            lw, lh = ly['rect'][2], ly['rect'][3]
+            x = check_int(ly['x'], -MAX_SIDE, MAX_SIDE, f'{w}: x')
+            y = check_int(ly['y'], -MAX_SIDE, MAX_SIDE, f'{w}: y')
+            par = ly.get('parallax', 'fit')
+            if par == 'fit':
+                num, den = (lw - SCREEN_WIDTH, self.width - SCREEN_WIDTH) \
+                    if self.width > SCREEN_WIDTH else (0, 1)
+            elif isinstance(par, list) and len(par) == 2:
+                num = check_int(par[0], -MAX_SIDE, MAX_SIDE, f'{w}: parallax num')
+                den = check_int(par[1], 1, MAX_STAGE_WIDTH, f'{w}: parallax den')
+            else:
+                raise ValueError(f'{w}: parallax is "fit" or [num, den]')
+            edge = ly['edge']
+            if not isinstance(edge, list) or len(edge) != 2 or not set(edge) <= set(EDGES):
+                raise ValueError(f'{w}: edge is [horizontal, vertical] of {EDGES}')
+            if 'color' in edge and 'color' not in ly:
+                raise ValueError(f'{w}: edge color needs "color"')
+            color = rgb565(bytes.fromhex(ly['color'])) if 'color' in ly else 0
+            raw = []
+            for k, an in enumerate(ly.get('anims', [])):
+                aw = f'{w} anim {k}'
+                if not isinstance(an, dict) or set(an) - {'steps', 'diff'} or \
+                        not isinstance(an.get('steps'), list) or \
+                        not 1 <= len(an['steps']) <= MAX_ANIM_STEPS:
+                    raise ValueError(f'{aw}: an anim is {{steps (1..{MAX_ANIM_STEPS}), diff}}')
+                steps = []
+                for st in an['steps']:
+                    if not isinstance(st, list) or len(st) != 4 or not isinstance(st[0], list) \
+                            or len(st[0]) != 4:
+                        raise ValueError(f'{aw}: a step is [[x, y, w, h], ticks, dx, dy]')
+                    steps.append((img.block(st[0], aw), check_int(st[1], 1, 65535, f'{aw}: ticks'),
+                                  check_int(st[2], -MAX_SIDE, MAX_SIDE, f'{aw}: dx'),
+                                  check_int(st[3], -MAX_SIDE, MAX_SIDE, f'{aw}: dy')))
+                raw.append((bool(an.get('diff')), steps))
+            # A diff anim's frames are cropped to the pixels that differ from
+            # the layer; where a frame is transparent over an opaque layer
+            # pixel, that pixel is taken out of the layer (a hole every frame
+            # fills or leaves open).
+            orig = base
+            base = [row[:] for row in base]
+            moving = []
+            for diff, steps in raw:
+                mask, holes = set(), set()
+                if diff:
+                    for pix, _, dx, dy in steps:
+                        for j, row in enumerate(pix):
+                            for i, c in enumerate(row):
+                                lx, ly_ = dx + i, dy + j
+                                inside = 0 <= lx < lw and 0 <= ly_ < lh
+                                under = orig[ly_][lx] if inside else None
+                                if c != under:
+                                    mask.add((lx, ly_))
+                                    if c is None:
+                                        holes.add((lx, ly_))
+                for lx, ly_ in holes:
+                    base[ly_][lx] = None
+                moving.append((mask, holes))
+            anims = []
+            blocks = [base]
+            for (diff, steps), (mask, holes) in zip(raw, moving):
+                out = []
+                for pix, ticks, dx, dy in steps:
+                    if diff:
+                        def keep(i, j, c):
+                            p = (dx + i, dy + j)
+                            if p not in mask or c is None:
+                                return False
+                            return p in holes or not (0 <= p[0] < lw and 0 <= p[1] < lh) or \
+                                c != orig[p[1]][p[0]]
+                        pix = [[c if keep(i, j, c) else None for i, c in enumerate(row)]
+                               for j, row in enumerate(pix)]
+                    t = trim(pix)
+                    if t is None:
+                        out.append((None, ticks, dx, dy))
+                        continue
+                    blocks.append(t[0])
+                    out.append((t[0], ticks, dx + t[1], dy + t[2]))
+                anims.append(out)
+            if len(anims) > MAX_LAYER_ANIMS:
+                raise ValueError(f'{w}: at most {MAX_LAYER_ANIMS} anims')
+            colors = palette_of(blocks, w)
+            t = trim(base)
+            if t is None:
+                raise ValueError(f'{w}: empty layer')
+            self.layers.append({'pix': t[0], 'left': t[1], 'top': t[2], 'w': lw, 'h': lh,
+                                'x': x, 'y': y, 'num': num, 'den': den,
+                                'edge': [EDGES.index(e) for e in edge], 'color': color,
+                                'anims': anims, 'colors': colors})
+
+    def pixels(self):
+        return sum(c is not None for ly in self.layers for row in ly['pix'] for c in row)
+
+
+def load_extras(path):
+    """({id: Sparks}, [Stage]) listed by a roster (none for a manifest)."""
+    path = pathlib.Path(path)
+    data = json.loads(path.read_text())
+    if 'manifests' not in data:
+        return {}, []
+    systems = load_systems(path)
+    sparks = data.get('sparks', {})
+    stages = data.get('stages', [])
+    if not isinstance(sparks, dict) or not isinstance(stages, list):
+        raise ValueError(f'{path}: sparks is {{id: manifest}}, stages a list of manifests')
+    if len(stages) > MAX_STAGES:
+        raise ValueError(f'{path}: at most {MAX_STAGES} stages')
+    out = [Stage(path.parent / s, systems) for s in stages]
+    if len({s.display for s in out}) != len(out):
+        raise ValueError(f'{path}: two stages share a name')
+    return {k: Sparks(path.parent / v, k) for k, v in sparks.items()}, out
+
+
 def load_systems(path):
     """The systems.json next to a roster or manifest."""
     return Systems(pathlib.Path(path).parent / 'systems.json')
@@ -894,8 +1289,10 @@ def load_roster(path):
     path = pathlib.Path(path)
     data = json.loads(path.read_text())
     if 'manifests' in data:
-        if set(data) != {'manifests', 'effects'} or not data['manifests']:
-            raise ValueError(f'{path}: a roster has exactly "manifests" (non-empty) and "effects"')
+        if not {'manifests', 'effects'} <= set(data) or \
+                set(data) - {'manifests', 'effects', 'stages', 'sparks'} or not data['manifests']:
+            raise ValueError(f'{path}: a roster has "manifests" (non-empty) and "effects", '
+                             f'optional "stages" and "sparks"')
         paths = [path.parent / p for p in data['manifests']]
         if len(set(paths)) != len(paths):
             raise ValueError(f'{path}: a manifest is listed twice')
@@ -905,7 +1302,11 @@ def load_roster(path):
     return [Sheet(path)], 0
 
 
-def build(sheets, effects_from, automatic, systems):
+def build(sheets, effects_from, automatic, systems, sparks=None, stages=None):
+    """The pack bytes, its hash, the colour count, per-frame (w, h, opaque)
+    stats and the characters. sparks {id: Sparks} and stages [Stage] are the
+    roster's (none for a single manifest)."""
+    sparks, stages = sparks or {}, stages or []
     out = bytearray()
     palette_count, frame_base, chars, char_palettes, all_frames = 0, 0, [], [], []
     stats, ncolors = {}, 0
@@ -929,25 +1330,8 @@ def build(sheets, effects_from, automatic, systems):
         palette_count += len(pal_names)
         for n in names:
             pix, ax, ay = frames[n]
-            h, w = len(pix), len(pix[0])
-            counts, spans, data = [], [], bytearray()
-            for row in pix:
-                k, x = 0, 0
-                while x < w:
-                    if row[x] is None:
-                        x += 1
-                        continue
-                    start = x
-                    while x < w and row[x] is not None:
-                        data.append(index[row[x]])
-                        x += 1
-                    spans.append((start, x - start))
-                    k += 1
-                counts.append(k)
-            all_frames.append(struct.pack('<HHHhhI', sid, w, h, ax, ay, len(spans)) +
-                              struct.pack(f'<{h}H', *counts) +
-                              b''.join(struct.pack('<HH', *s) for s in spans) + data)
-            stats[(sid, n)] = (w, h, sum(c is not None for row in pix for c in row))
+            all_frames.append(encode_frame(sid, pix, ax, ay, index))
+            stats[(sid, n)] = (len(pix[0]), len(pix), sum(c is not None for row in pix for c in row))
         for cname in m['characters']:
             c = Character(m, cname, names, systems, frame_base)
             if c.display in names_seen:
@@ -959,8 +1343,65 @@ def build(sheets, effects_from, automatic, systems):
         frame_base += len(names)
     if len(chars) > MAX_CHARACTERS:
         raise ValueError(f'{len(chars)} characters, at most {MAX_CHARACTERS}')
+    sid = len(sheets)
+
+    def sheet(colors, blocks):
+        """A new sheet with one palette; returns (palette, first frame)."""
+        nonlocal sid, palette_count, frame_base, ncolors, out
+        index = {c: i for i, c in enumerate(colors)}
+        out += struct.pack('<HH', sid, len(colors)) + struct.pack(
+            f'<{len(colors)}H', *[rgb565(c) for c in colors])
+        first = frame_base
+        for pix, ax, ay in blocks:
+            all_frames.append(encode_frame(sid, pix, ax, ay, index))
+        ncolors += len(colors)
+        frame_base += len(blocks)
+        sid += 1
+        palette_count += 1
+        return palette_count - 1, first
+
+    # Sparks: one sheet per manifest; anims indexed in roster then manifest order.
+    spark_index, spark_out = {}, b''
+    for ident, sp in sparks.items():
+        pal, first = sheet(sp.colors, sp.frames)
+        for name, (blend, alpha, steps) in sp.anims.items():
+            spark_index[f'{ident}.{name}'] = len(spark_index)
+            spark_out += struct.pack('<BBH', blend, alpha, len(steps)) + b''.join(
+                struct.pack('<3H', first + f, pal, t) for f, t in steps)
+    if len(spark_index) > MAX_SPARKS:
+        raise ValueError(f'{len(spark_index)} spark anims, at most {MAX_SPARKS}')
+    # Stages: one sheet per layer (the layer then its anim frames).
+    stage_out = b''
+    for st in stages:
+        name = st.display.encode()
+        stage_out += struct.pack('<B', len(name)) + name + struct.pack(
+            '<4H', st.width, st.ground, st.system, len(st.layers))
+        for ly in st.layers:
+            blocks = [(ly['pix'], -ly['left'], -ly['top'])]
+            for steps in ly['anims']:
+                blocks += [(pix, 0, 0) for pix, _, _, _ in steps if pix is not None]
+            pal, first = sheet(ly['colors'], blocks)
+            stage_out += struct.pack('<4H3hH2BHH', first, pal, ly['w'], ly['h'], ly['x'], ly['y'],
+                                     ly['num'], ly['den'], ly['edge'][0], ly['edge'][1],
+                                     ly['color'], len(ly['anims']))
+            f = first + 1
+            for steps in ly['anims']:
+                stage_out += struct.pack('<H', len(steps))
+                for pix, ticks, dx, dy in steps:
+                    stage_out += struct.pack('<H2hH', 0xffff if pix is None else f, dx, dy, ticks)
+                    f += pix is not None
+    if palette_count > MAX_PALETTES or frame_base > MAX_FRAMES:
+        raise ValueError(f'{palette_count} palettes and {frame_base} frames, at most '
+                         f'{MAX_PALETTES} and {MAX_FRAMES}')
+    names = [st.name for st in stages]
+    for c in chars:
+        if c.home_stage is not None:
+            if c.home_stage not in names:
+                raise ValueError(f'{c.name}: unknown home_stage {c.home_stage}')
+            c.home_index = names.index(c.home_stage) + 1
     out += b''.join(all_frames)
-    out += systems.pack()
+    out += spark_out
+    out += systems.pack(spark_index)
     for c, pal in zip(chars, char_palettes):
         out += c.pack(pal)
     em = sheets[effects_from].m
@@ -968,8 +1409,10 @@ def build(sheets, effects_from, automatic, systems):
     ebase = sum(len(s.m['frames']) for s in sheets[:effects_from])
     for f, p in em['effects']:
         out += struct.pack('<HH', ebase + enames.index(f), palette_base[effects_from] + epals.index(p))
-    body = struct.pack('<6I', int(automatic), palette_count, frame_base, len(chars),
-                       len(em['effects']), len(systems.names)) + out
+    out += stage_out
+    body = struct.pack('<8I', int(automatic), palette_count, frame_base, len(chars),
+                       len(em['effects']), len(systems.names), len(spark_index),
+                       len(stages)) + out
     checksum = 2166136261
     for b in body:
         checksum = ((checksum ^ b) * 16777619) & 0xffffffff
@@ -1108,14 +1551,20 @@ def main():
         frame_data(load_roster(args.roster)[0], load_systems(args.roster))
     else:
         sheets, effects_from = load_roster(args.roster)
+        sparks, stages = load_extras(args.roster)
         data, checksum, ncolors, stats, chars = build(sheets, effects_from, args.auto,
-                                                      load_systems(args.roster))
+                                                      load_systems(args.roster), sparks, stages)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_bytes(data)
         opaque = sum(s[2] for s in stats.values())
         print(f'{args.output}: {len(data)} bytes, hash {checksum:08x}, {len(chars)} characters '
               f'({", ".join(c.display for c in chars)}), {len(stats)} frames, {opaque} opaque '
               f'pixels, {ncolors} colours')
+        for st in stages:
+            print(f'  stage {st.display}: {st.width} px wide, {len(st.layers)} layers, '
+                  f'{st.pixels()} layer pixels, '
+                  f'{sum(len(a) for ly in st.layers for a in ly["anims"])} anim steps')
+        print(f'  {sum(len(sp.anims) for sp in sparks.values())} spark anims')
 
 
 if __name__ == '__main__':

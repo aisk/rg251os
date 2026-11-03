@@ -2,6 +2,7 @@
  * ROM list: one folder of <data>/roms at a time (the menu scans a folder
  * when it is entered, nothing deeper), its subfolders first by name, then
  * its *.gba files, *.fight native games and *.mpg videos (video_core.c),
+ * nothing else (a pack's .fightsnd sound bank next to it stays hidden),
  * identified (romdb.c;
  * a video by its file name) and sorted by the name shown, mixed.
  * Identification reads each file's header; ROMs that need their CRC and

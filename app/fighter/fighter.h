@@ -1,11 +1,13 @@
-/* Portable fighter state, FIGHTP05 content (system profiles and a roster of
- * characters with stats, frames, per-step boxes and motion, normals,
- * specials and projectiles), bounded draw commands and the RGB565 software
- * renderer interface. Rules (fighter.c) read the pack's steps, boxes, moves
- * and each character's resolved stats and only emit draw commands; render.c
- * owns the pack decoder (which fills stats and class defaults from the
- * character's system and applies its damage scale), the per-match sprite
- * cast and the pixel loops. */
+/* Portable fighter state, FIGHTP06 content (system profiles with walls and
+ * effect sets, a roster of characters with stats, frames, per-step boxes and
+ * motion, normals, specials and projectiles, spark animations and parallax
+ * stages), bounded draw commands, the per-tick sound events and the RGB565
+ * software renderer interface. Rules (fighter.c) read the pack's steps,
+ * boxes, moves and each character's resolved stats, keep the camera, the
+ * spark pool and the sound events in the state and only emit draw commands;
+ * render.c owns the pack decoder (which fills stats and class defaults from
+ * the character's system and applies its damage scale), the per-match cast
+ * (two fighters and the stage) and the pixel loops. */
 #ifndef FIGHTER_H
 #define FIGHTER_H
 #include <stddef.h>
@@ -13,12 +15,20 @@
 #define FW 480
 #define FH 320
 #define COMMANDS 2048
-#define STATE_WORDS 112
-/* Ground line in screen rows; fighters' foot anchors stand on it. */
+#define STATE_WORDS 192
+/* Ground line in screen rows; fighters' foot anchors stand on it (a stage's
+ * ground row is drawn on it). */
 #define GROUND 260
-/* Stage walls for fighter anchors. */
-#define WALL_LEFT 50
-#define WALL_RIGHT 430
+/* World: fighters and projectiles live in stage pixels, x in 0..width; the
+ * camera cam is the stage column at the screen's left edge, 0..width - FW.
+ * Without stages the world is FW wide. Walls sit margin pixels inside the
+ * rule window, play_width wide and centred on the screen (both from the
+ * stage's system); at the camera's ends they are the stage walls. */
+#define MIN_STAGE_WIDTH FW
+#define MAX_STAGE_WIDTH 2048
+#define MIN_PLAY_WIDTH 320
+#define MIN_MARGIN 8
+#define MAX_MARGIN 48
 /* Pack limits; packs that need more are rejected. Rule data and the
  * palette-index frames of the whole roster stay resident (sized for about
  * 30 characters); RGB565 pixels only for the two cast fighters and the
@@ -30,13 +40,34 @@
 #define MAX_SPANS (1u << 20)
 #define MAX_INDICES (1u << 23)
 #define MAX_IMAGES 1024
-#define MAX_PIXELS (1u << 21)
+#define MAX_PIXELS (1u << 22)
 #define MAX_STEPS 16384
 #define MAX_BOXES 32768
 #define MAX_EFFECTS 64
 #define MAX_SIDE 1024
 #define MAX_NAME 12
 #define MAX_SYSTEMS 8
+/* Spark animations (all systems' effect sets) and their steps. */
+#define MAX_SPARKS 32
+#define MAX_SPARK_STEPS 64
+/* Stages: layers per stage, anims per layer, steps per anim; totals. A
+ * layer's expanded image may be at most MAX_COVER pixels wide. */
+#define MAX_STAGES 16
+#define MAX_LAYERS 8
+#define MAX_LAYER_ANIMS 8
+#define MAX_ANIM_STEPS 64
+#define MAX_STAGE_LAYERS (MAX_STAGES * MAX_LAYERS)
+#define MAX_STAGE_ANIMS 256
+#define MAX_STAGE_STEPS 2048
+#define MAX_COVER 4096
+/* Live sparks in the state; a new one replaces the oldest when full. */
+#define SPARK_SLOTS 8
+/* Screen shake: at most SHAKE_MAX pixels up or down for shake ticks. */
+#define SHAKE_MAX 4
+#define SHAKE_HEAVY 10
+#define SHAKE_KO 16
+/* KO white flash ticks. */
+#define FLASH_TICKS 3
 /* Per-character, per-step and per-move limits, mirrored in pack.py. */
 #define MAX_SPECIALS 8
 #define MAX_MOVES (8 + MAX_SPECIALS)
@@ -110,6 +141,17 @@ enum hit_default { DEFAULT_HITSTUN = 1, DEFAULT_BLOCKSTUN = 2, DEFAULT_HITSTOP =
 /* Standing hurt height group, for the AI and tools only. */
 enum height_class { HEIGHT_LOW, HEIGHT_MID, HEIGHT_HIGH, HEIGHTS };
 enum blend { OPAQUE, ALPHA, ADD, BLENDS };
+/* Stage layer edge rules for pixels outside a layer: leave them, repeat the
+ * outermost column/row, tile, fill with the layer's colour, reflect. */
+enum edge { EDGE_NONE, EDGE_EXTEND, EDGE_REPEAT, EDGE_COLOR, EDGE_MIRROR, EDGES };
+/* A system's effect set: the spark each kind of contact spawns. Strikes
+ * pick light/heavy/special by class (see fighter.c), weapon moves the slash
+ * set plus blood. */
+enum effect_key {
+	FX_HIT_LIGHT, FX_HIT_HEAVY, FX_HIT_SPECIAL, FX_GUARD, FX_SLASH_LIGHT, FX_SLASH_HEAVY,
+	FX_SLASH_SPECIAL, FX_SLASH_GUARD, FX_BLOOD_LIGHT, FX_BLOOD_HEAVY, FX_BLOOD_SPECIAL,
+	FX_KEYS
+};
 /* Game flow: the arcade ladder (select, fights, loss result, clear). */
 enum mode { MODE_SELECT, MODE_FIGHT, MODE_RESULT, MODE_CLEAR, MODES };
 /* One fighter. x is in quarter pixels (x / 4 is the anchor column), y in
@@ -135,17 +177,70 @@ struct fighter {
 struct shot {
 	int32_t kind, owner, x, y, face, age;
 };
+/* A live spark: kind is the spark index + 1 (0 = free), x the world column
+ * and y the screen row of its anchor, age its ticks shown, flip 1 when
+ * mirrored. */
+struct spark_slot {
+	int32_t kind, x, y, age, flip;
+};
+/* Sound events. fight_step clears fight_state.sound and appends what the
+ * rules emitted during that tick (at most MAX_SOUND_EVENTS, in emission
+ * order; later ones are dropped). The list is
+ * part of the rule state, so it is deterministic, saved and restored: a
+ * consumer reads it after each fight_step and never needs to look at the
+ * scene. A paused tick emits nothing. The ids are a stable interface (the
+ * audio side maps them to clips); new ones are only ever appended before
+ * SOUNDS.
+ *   WHOOSH_*        a move starts (normal or special): LIGHT for the light
+ *                   class or classless LP/LK normals, HEAVY for the heavy,
+ *                   command and throw classes or classless HP/HK normals,
+ *                   SPECIAL for the special and super classes and classless
+ *                   specials. side/chr/system: the mover; move: its index
+ *                   + 1.
+ *   HIT_*           a strike or projectile connects unguarded: LIGHT/HEAVY/
+ *                   SPECIAL by the hit's class as above. Weapon moves (the
+ *                   character's slash buttons, see struct character) emit
+ *                   SLASH_* instead. side: the attacker.
+ *   GUARD           a strike or projectile is guarded (SLASH_GUARD for
+ *                   weapon moves). side: the attacker.
+ *   JUMP            a fighter takes off (end of the prejump).
+ *   LAND            an airborne fighter lands.
+ *   LAUNCH          a projectile is spawned. move: the projectile's move.
+ *   CLASH           two projectiles cancel out. side: the lower slot's owner.
+ *   KO              a fighter's life reaches 0. side: the fighter knocked
+ *                   out.
+ *   ROUND_START     a round begins (fight_start). side 0, P1's character.
+ * side is 0 or 1, chr the character index in the pack, system its system
+ * profile index (struct assets sys[]), move a move index + 1 or 0. */
+enum sound_id {
+	SOUND_WHOOSH_LIGHT, SOUND_WHOOSH_HEAVY, SOUND_WHOOSH_SPECIAL,
+	SOUND_HIT_LIGHT, SOUND_HIT_HEAVY, SOUND_HIT_SPECIAL, SOUND_GUARD,
+	SOUND_SLASH_LIGHT, SOUND_SLASH_HEAVY, SOUND_SLASH_SPECIAL, SOUND_SLASH_GUARD,
+	SOUND_JUMP, SOUND_LAND, SOUND_LAUNCH, SOUND_CLASH, SOUND_KO, SOUND_ROUND_START,
+	SOUNDS
+};
+#define MAX_SOUND_EVENTS 16
+struct sound_event {
+	uint8_t id, side, chr, system, move;
+};
 /* chr/pal are the cast (character, 0 normal or 1 alternate palette) of each
  * side; in the select screen chr[0] is the cursor. beaten has a bit per
  * character beaten in this ladder run, stage counts from 1, wins counts
  * rounds in the current match, timer counts ticks in a select, result or
- * clear screen, run counts ladder runs (the Auto rotation). */
+ * clear screen, run counts ladder runs (the Auto rotation). arena is the
+ * pack stage of the fight (0 without stages), cam the camera column, shake
+ * and flash the remaining screen shake and KO flash ticks. */
 struct fight_state {
 	uint32_t tick, rng, previous, paused, stress, boxes, automatic, round;
 	uint32_t mode, timer, beaten, stage, run, wins[2], chr[2], pal[2];
 	struct fighter p[2];
 	struct shot shot[MAX_PROJECTILES];
 	uint32_t tone, phase, ended, hits, guards, specials, clashes;
+	uint32_t arena, cam, shake, flash;
+	struct spark_slot spark[SPARK_SLOTS];
+	/* This tick's sound events (see enum sound_id). */
+	uint32_t sounds;
+	struct sound_event sound[MAX_SOUND_EVENTS];
 };
 /* One opaque run in a frame row; pixels index the frame's data. */
 struct span {
@@ -192,12 +287,13 @@ struct hit {
 };
 /* Startup, active, recovery and reach are derived from the steps at load.
  * Specials have a motion and button bits; spawn is the projectile + 1 the
- * move launches (0 = none). */
+ * move launches (0 = none); slash is set for weapon moves (the character's
+ * slash mask). */
 struct move {
 	struct anim anim;
 	struct hit hit;
 	uint8_t cancel, groups, startup, active, recovery, special, motion, buttons,
-	    spawn;
+	    spawn, slash;
 	int16_t reach; /* furthest hitbox edge in front of the anchor */
 };
 struct projectile {
@@ -232,10 +328,13 @@ struct class_row {
 	uint8_t hitstun, blockstun, hitstop, has;
 };
 /* A system profile: the stat defaults, the damage scale applied to its
- * characters' moves at load and the class table. */
+ * characters' moves at load, the class table, the wall margin and rule
+ * window (play_width) of its stages and its effect set (spark + 1, 0 =
+ * none, per enum effect_key). */
 struct system {
 	char name[MAX_NAME + 1];
-	uint16_t damage_scale;
+	uint16_t damage_scale, margin, play_width;
+	uint16_t effect[FX_KEYS];
 	struct stats stats;
 	struct class_row cls[CLASSES];
 };
@@ -251,17 +350,75 @@ struct character {
 	unsigned first_step, steps;
 	uint32_t pixels; /* RGB565 pixels when cast (all frames it uses) */
 	unsigned images;
+	/* slash: bits 0..3 the LP/HP/LK/HK normals, bit 4 the specials, are
+	 * weapon moves; home: the ladder's stage for this opponent + 1 (0 =
+	 * stage index % stages). */
+	uint8_t slash;
+	uint16_t home;
+};
+/* A spark animation: steps spark_step[first .. first + count), total ticks;
+ * opaque ones draw as sprites, blended ones within the effect budget. */
+struct spark {
+	uint16_t first, count, total;
+	uint8_t blend, alpha;
+};
+struct spark_step {
+	uint16_t image, ticks;
+};
+/* A stage layer: frame (palette indices, anchor = minus its offset inside
+ * the w x h layer) with palette, screen x at camera 0, top y in stage rows,
+ * horizontal motion cam * num / den (floor), edge rules [x, y] and fill
+ * colour, anims stage_anim[first_anim ..). */
+struct layer {
+	uint16_t frame, palette, w, h;
+	int16_t x, y, num;
+	uint16_t den;
+	uint8_t edge[2];
+	uint16_t color, first_anim, anims;
+};
+/* Steps stage_step[first .. first + count) cycle with the global tick. A
+ * step draws frame (or nothing at 0xffff) with its top-left at layer pixel
+ * (x, y) minus the frame's anchor. */
+struct stage_anim {
+	uint16_t first, count;
+	uint32_t total;
+};
+struct stage_step {
+	uint16_t frame, ticks;
+	int16_t x, y;
+};
+/* width and ground (stage row drawn on GROUND); system gives the walls.
+ * pixels/rows/spans/images: what expanding it costs (proven to fit). */
+struct stage {
+	char name[MAX_NAME + 1];
+	uint16_t width, ground, system, first_layer, layers;
+	uint32_t pixels, rows, spans;
+	unsigned images;
 };
 /* cast[i] is the (character, palette) whose frames image[] currently holds
- * for side i (-1 = none); look[i][frame] is that side's image or -1. */
+ * for side i (-1 = none); look[i][frame] is that side's image or -1.
+ * cast_stage is the expanded stage (-1 = none): layer_image[k] is its
+ * layer k's image (-1 = nothing to draw) covering layer pixels from
+ * (layer_x0, layer_y0), stage_look[step] each anim step's image or -1.
+ * Rows and spans past pack_rows/pack_spans belong to the expanded layers. */
 struct assets {
 	uint32_t hash;
 	unsigned systems, characters, palettes, frames, rows, spans, indices, steps, boxes,
-	    effects, images, pixels, effect_images, effect_pixels;
-	int cast[2][2];
-	uint32_t cast_pixels[2];
+	    effects, images, pixels, effect_images, effect_pixels, sparks, spark_steps, stages,
+	    layers, anims, stage_steps, pack_rows, pack_spans;
+	int cast[2][2], cast_stage;
+	uint32_t cast_pixels[2], stage_pixels;
+	int layer_image[MAX_LAYERS];
+	int16_t layer_x0[MAX_LAYERS], layer_y0[MAX_LAYERS];
 	struct system sys[MAX_SYSTEMS];
 	struct character chr[MAX_CHARACTERS];
+	struct spark spark[MAX_SPARKS];
+	struct spark_step spark_step[MAX_SPARKS * MAX_SPARK_STEPS];
+	struct stage stage[MAX_STAGES];
+	struct layer layer[MAX_STAGE_LAYERS];
+	struct stage_anim anim[MAX_STAGE_ANIMS];
+	struct stage_step stage_step[MAX_STAGE_STEPS];
+	int16_t stage_look[MAX_STAGE_STEPS];
 	uint16_t palette_sheet[MAX_PALETTES], palette_size[MAX_PALETTES];
 	uint16_t palette[MAX_PALETTES][256];
 	struct frame frame[MAX_FRAMES];
@@ -283,19 +440,23 @@ struct command {
 	uint16_t color;
 	uint8_t alpha;
 };
-/* effects_requested/effects_drawn count blended effect sprites this frame. */
+/* effects_requested/effects_drawn count blended effect sprites this frame,
+ * sparks the spark sprites, layers the stage layer and anim sprites. */
 struct scene {
 	struct command cmd[COMMANDS];
-	unsigned count, effects_requested, effects_drawn;
+	unsigned count, effects_requested, effects_drawn, sparks, layers;
 };
 /* Screen rectangle of a box for a fighter anchored at x, GROUND + y. */
 struct area {
 	int x, y, w, h;
 };
+/* World width and walls (pixels, for the camera in s) of the state's arena. */
+int fight_width(const struct fight_state *s, const struct assets *a);
+void fight_walls(const struct fight_state *s, const struct assets *a, int *left, int *right);
 /* Back to the select screen (Auto: straight into a rotated ladder run). */
 void fight_reset(struct fight_state *s, int automatic);
 /* Start a round between characters c0 and c1 (mirror: P2 alternate), each
- * with its own life. */
+ * with its own life, on c1's stage, centred with the camera on them. */
 void fight_start(struct fight_state *s, const struct assets *a, unsigned c0, unsigned c1);
 void fight_step(struct fight_state *s, const struct assets *a, uint32_t input,
 		uint32_t second, int human);
@@ -308,8 +469,11 @@ struct area fight_box(const struct box *b, int x, int y, int face);
 void fight_scene(const struct fight_state *s, const struct assets *a, struct scene *scene);
 void fight_render(const struct assets *a, const struct scene *scene, uint16_t *fb);
 int fight_assets(struct assets *a, const void *data, size_t size, int *automatic);
-/* Expand the state's two cast fighters into resident RGB565 images if they
- * changed; returns 1 when it expanded. Never fails for a loaded pack. */
+/* Screen x of a stage layer's left edge with the camera at cam. */
+int fight_layer_x(const struct layer *l, int cam);
+/* Expand the state's two cast fighters and its stage into resident RGB565
+ * images if they changed; returns 1 when it expanded. Never fails for a
+ * loaded pack. */
 int fight_cast(struct assets *a, const struct fight_state *s);
 void fight_encode(const struct fight_state *s, uint32_t words[STATE_WORDS]);
 int fight_decode(struct fight_state *s, const struct assets *a,

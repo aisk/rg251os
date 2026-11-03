@@ -2,9 +2,11 @@
  * jumps, crouching, data-driven normals and specials with an input buffer,
  * motion and charge commands, cancels, projectiles with clashes, hurt/hit
  * boxes from the pack, hitstop, hitstun, blockstun, high/low/overhead guard,
- * pushback with corner transfer, KO, AI (with specials), the select, result
- * and clear screens and the stress scenes, plus the draw-command list (the
- * attacking fighter drawn on top, L overlays the real boxes). Rules pick an
+ * pushback with corner transfer, KO, AI (with specials), the camera and
+ * walls, hit sparks, screen shake, the KO flash, sound events, the select,
+ * result and clear screens and the stress scenes, plus the draw-command list
+ * (parallax stage or the flat fallback, the attacking fighter drawn on top,
+ * sparks, L overlays the real boxes). Rules pick an
  * action or move and its elapsed ticks; the pack's steps map that onto
  * frames, boxes and motion, so what is drawn is what collides. Feel comes
  * from each character's resolved stats (life, defense, weight, walk speeds,
@@ -22,6 +24,29 @@
  * rounded, at least 1 when nonzero. Pushback, times 1000 / the defender's
  * weight, slides the defender ceil(rest / 4) pixels per unfrozen tick; what
  * a wall stops moves the attacker back instead (not for projectile hits).
+ *
+ * Camera and walls: fighters and projectiles live in world (stage) pixels.
+ * Every tick ends by setting cam = clamp(midpoint - FW / 2, 0, width - FW)
+ * (the midpoint of the two anchors, floored) and clamping both fighters to
+ * the walls of that camera: margin pixels inside the play_width rule window
+ * centred on the screen (margin and play_width from the stage's system).
+ * During the tick the walls of the previous camera apply to every move,
+ * slide and push. With the camera at a stage end the window's wall is the
+ * stage wall, so both fighters are always on screen and the corner transfer
+ * works at stage and screen walls alike; fighters further apart than the
+ * window cannot separate (the screen holds the one moving back).
+ *
+ * Effects: a strike or projectile contact spawns its system's spark at the
+ * centre of the first overlapping hitbox/hurtbox pair (hit, guard; weapon
+ * moves the slash spark plus blood on a hit) into SPARK_SLOTS state slots,
+ * replacing the oldest when full; sparks age every fight tick (also in
+ * hitstop) and vanish after their animation. An unguarded heavy or special
+ * hit shakes the screen SHAKE_HEAVY ticks, a KO SHAKE_KO ticks and flashes
+ * it white for FLASH_TICKS. Strength: class light is light; heavy, command
+ * and throw heavy; special and super special; a move without a class goes
+ * by its button (LP/LK light, HP/HK heavy, specials and projectiles
+ * special). Sound events (enum sound_id) are appended to the state as the
+ * rules act.
  * A step's motion moves
  * the fighter on every unfrozen tick it shows, from the move's first tick;
  * a projectile launches on its step's first tick at the owner's anchor plus
@@ -58,7 +83,8 @@
  * Ladder: the select screen picks P1 (d-pad, any attack confirms); each
  * stage is a match of ROUNDS_TO_WIN won rounds against a random character
  * not yet beaten in this run (a mirror with the alternate palette only for
- * a one-character roster). A loss shows the result screen, beating
+ * a one-character roster), fought on that opponent's home stage, or on
+ * pack stage (opponent index % stages) when it has none. A loss shows the result screen, beating
  * everyone the clear screen; both return to select. Auto skips select and
  * rotates P1 through the roster each run. */
 #include "fighter.h"
@@ -71,7 +97,7 @@
 static const uint32_t buttons[4] = {KEY(A), KEY(X), KEY(B), KEY(Y)};
 static const int strength[4] = {STAND_HK, STAND_HP, STAND_LK, STAND_LP};
 static const unsigned button_bit[4] = {BUTTON_HK, BUTTON_HP, BUTTON_LK, BUTTON_LP};
-/* Projectiles vanish this far beyond the screen edge. */
+/* Projectiles vanish this far beyond the camera's screen edges. */
 #define SHOT_MARGIN 64
 /* KO, result and clear screens; Auto confirms them after AUTO_SCREEN. */
 #define KO_TICKS 180
@@ -89,16 +115,55 @@ static uint32_t random_next(struct fight_state *s)
 /* Quarter-pixel position from pixels and back. */
 #define QUARTER(px) ((px) * 4)
 static int px(const struct fighter *p) { return p->x / 4; }
+/* ---- sound events, world and camera ---- */
+static void sound(struct fight_state *s, const struct assets *a, int id, int side, int move)
+{
+	if (s->sounds >= MAX_SOUND_EVENTS)
+		return;
+	unsigned c = s->chr[side] < a->characters ? s->chr[side] : 0;
+	s->sound[s->sounds++] = (struct sound_event){(uint8_t)id, (uint8_t)side, (uint8_t)c,
+						     (uint8_t)a->chr[c].system, (uint8_t)move};
+}
+static const struct system *arena_system(const struct fight_state *s, const struct assets *a)
+{
+	return &a->sys[a->stages && s->arena < a->stages ? a->stage[s->arena].system : 0];
+}
+int fight_width(const struct fight_state *s, const struct assets *a)
+{
+	return a->stages && s->arena < a->stages ? a->stage[s->arena].width : FW;
+}
+void fight_walls(const struct fight_state *s, const struct assets *a, int *left, int *right)
+{
+	const struct system *sy = arena_system(s, a);
+	int edge = (FW - sy->play_width) / 2;
+	*left = (int)s->cam + edge + sy->margin;
+	*right = (int)s->cam + FW - edge - sy->margin;
+}
+static int wall(const struct fight_state *s, const struct assets *a, int x)
+{
+	int lo, hi;
+	fight_walls(s, a, &lo, &hi);
+	return clamp(x, QUARTER(lo), QUARTER(hi));
+}
+/* End of a tick: the camera follows the midpoint, then the walls hold. */
+static void camera(struct fight_state *s, const struct assets *a)
+{
+	int mid = (s->p[0].x + s->p[1].x) / 8;
+	s->cam = (uint32_t)clamp(mid - FW / 2, 0, fight_width(s, a) - FW);
+	for (int i = 0; i < 2; i++)
+		s->p[i].x = wall(s, a, s->p[i].x);
+}
 /* Starting positions; life is only set for a fight (fight_start). */
 static void place(struct fight_state *s)
 {
 	memset(s->p, 0, sizeof(s->p));
 	memset(s->shot, 0, sizeof(s->shot));
+	memset(s->spark, 0, sizeof(s->spark));
 	s->p[0].x = QUARTER(140);
 	s->p[1].x = QUARTER(340);
 	s->p[0].face = 1;
 	s->p[1].face = -1;
-	s->ended = 0;
+	s->ended = s->cam = s->arena = s->shake = s->flash = 0;
 }
 void fight_reset(struct fight_state *s, int automatic)
 {
@@ -112,14 +177,22 @@ void fight_reset(struct fight_state *s, int automatic)
 void fight_start(struct fight_state *s, const struct assets *a, unsigned c0, unsigned c1)
 {
 	place(s);
+	const struct character *opponent = &a->chr[c1 < a->characters ? c1 : 0];
+	if (a->stages)
+		s->arena = opponent->home ? opponent->home - 1u : (c1 % a->stages);
+	int centre = fight_width(s, a) / 2;
+	s->p[0].x = QUARTER(centre - 100);
+	s->p[1].x = QUARTER(centre + 100);
+	s->cam = (uint32_t)(centre - FW / 2);
 	s->p[0].hp = a->chr[c0 < a->characters ? c0 : 0].stats.life;
-	s->p[1].hp = a->chr[c1 < a->characters ? c1 : 0].stats.life;
+	s->p[1].hp = opponent->stats.life;
 	s->mode = MODE_FIGHT;
 	s->timer = 0;
 	s->chr[0] = c0;
 	s->chr[1] = c1;
 	s->pal[0] = 0;
 	s->pal[1] = c0 == c1;
+	sound(s, a, SOUND_ROUND_START, 0, 0);
 }
 static int grounded(const struct fighter *p) { return !p->y && !p->vy; }
 static uint32_t back_key(const struct fighter *p)
@@ -271,6 +344,14 @@ static int overlap(struct area p, struct area q)
 {
 	return p.x < q.x + q.w && q.x < p.x + p.w && p.y < q.y + q.h && q.y < p.y + p.h;
 }
+/* Centre of the overlap of two overlapping boxes: the contact point. */
+static void middle(struct area p, struct area q, int *x, int *y)
+{
+	int x0 = p.x > q.x ? p.x : q.x, x1 = p.x + p.w < q.x + q.w ? p.x + p.w : q.x + q.w,
+	    y0 = p.y > q.y ? p.y : q.y, y1 = p.y + p.h < q.y + q.h ? p.y + p.h : q.y + q.h;
+	*x = (x0 + x1) / 2;
+	*y = (y0 + y1) / 2;
+}
 static const struct projectile *shot_type(const struct fight_state *s, const struct assets *a,
 					  const struct shot *sh)
 {
@@ -381,30 +462,34 @@ static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
 	return key;
 }
 /* ---- fighter update ---- */
-/* One airborne tick: y moves vy / 4 pixels, then gravity; landing stops. */
-static void fall(struct fighter *p, const struct stats *st)
+/* One airborne tick: y moves vy / 4 pixels, then gravity; landing stops
+ * (and sounds). */
+static void fall(struct fight_state *s, const struct assets *a, int i)
 {
+	struct fighter *p = &s->p[i];
 	p->y += p->vy / 4;
-	p->vy += st->jump.gravity;
-	if (p->y >= 0)
+	p->vy += who(s, a, i)->stats.jump.gravity;
+	if (p->y >= 0) {
 		p->y = p->vy = 0;
+		sound(s, a, SOUND_LAND, i, 0);
+	}
 }
 static void age(struct fighter *p)
 {
 	if (p->elapsed < 255)
 		p->elapsed++;
 }
-static int wall(int x) { return clamp(x, QUARTER(WALL_LEFT), QUARTER(WALL_RIGHT)); }
 /* Pushback: ceil(rest / 4) pixels this tick; with corner set a wall passes
  * the remainder to the other fighter (the attacker) the opposite way. */
-static void slide(struct fighter *p, struct fighter *q)
+static void slide(const struct fight_state *s, const struct assets *a, struct fighter *p,
+		  struct fighter *q)
 {
 	int dir = p->slide > 0 ? 1 : -1, d = (abs(p->slide) + 3) / 4;
 	p->slide -= dir * d;
-	int x = wall(p->x + dir * QUARTER(d)), rest = QUARTER(d) - abs(x - p->x);
+	int x = wall(s, a, p->x + dir * QUARTER(d)), rest = QUARTER(d) - abs(x - p->x);
 	p->x = x;
 	if (rest && p->corner)
-		q->x = wall(q->x - dir * rest);
+		q->x = wall(s, a, q->x - dir * rest);
 	if (!p->slide)
 		p->corner = 0;
 }
@@ -430,14 +515,35 @@ static int resolve(const struct fight_state *s, const struct assets *a, int i, u
 			return strength[k] + (keys & KEY(DOWN) ? CROUCH_LP : 0);
 	return -1;
 }
-static void start(struct fight_state *s, const struct character *c, struct fighter *p, int k)
+/* Strength of a hit (0 light, 1 heavy, 2 special) from its class, else
+ * from move index k (-1 for a projectile). */
+static int tier(const struct hit *h, int k)
 {
+	switch (h->cls) {
+	case CLASS_LIGHT:
+		return 0;
+	case CLASS_HEAVY:
+	case CLASS_COMMAND:
+	case CLASS_THROW:
+		return 1;
+	case CLASS_SPECIAL:
+	case CLASS_SUPER:
+		return 2;
+	default:
+		return k < 0 || k >= MOVES ? 2 : k % 2;
+	}
+}
+static void start(struct fight_state *s, const struct assets *a, int i, int k)
+{
+	const struct character *c = who(s, a, i);
+	struct fighter *p = &s->p[i];
 	p->move = k + 1;
 	p->elapsed = p->hit = p->block = p->squat = p->walk = 0;
 	p->buffer = p->age = 0;
 	p->crouch = k >= CROUCH_LP && k <= CROUCH_HK;
 	if (c->move[k].special)
 		s->specials++;
+	sound(s, a, SOUND_WHOOSH_LIGHT + tier(&c->move[k].hit, k), i, k + 1);
 }
 /* Can the connected current move be cancelled into move k now? */
 static int cancellable(const struct character *c, const struct fighter *p, int k)
@@ -447,14 +553,15 @@ static int cancellable(const struct character *c, const struct fighter *p, int k
 	return p->hit && !m->special && (m->cancel & need) &&
 	       p->elapsed < (int)m->startup + m->active;
 }
-static void launch(struct fight_state *s, const struct character *c, int i, unsigned kind)
+static void launch(struct fight_state *s, const struct assets *a, int i, unsigned kind)
 {
 	const struct fighter *p = &s->p[i];
-	const struct projectile *t = &c->projectile[kind - 1];
+	const struct projectile *t = &who(s, a, i)->projectile[kind - 1];
 	for (int k = 0; k < MAX_PROJECTILES; k++)
 		if (!s->shot[k].kind) {
 			s->shot[k] = (struct shot){(int32_t)kind, i, px(p) + p->face * t->x,
 						   p->y + t->y, p->face, 0};
+			sound(s, a, SOUND_LAUNCH, i, p->move);
 			return;
 		}
 }
@@ -477,7 +584,7 @@ static int update(struct fight_state *s, const struct assets *a, int i, uint32_t
 		return 1;
 	}
 	if (p->move && p->buffer && cancellable(c, p, p->buffer - 1))
-		start(s, c, p, p->buffer - 1);
+		start(s, a, i, p->buffer - 1);
 	else if (p->move && ++p->elapsed >= c->move[p->move - 1].anim.total)
 		p->move = p->elapsed = p->hit = 0;
 	if (p->stun) {
@@ -486,9 +593,9 @@ static int update(struct fight_state *s, const struct assets *a, int i, uint32_t
 			p->block = p->elapsed = 0;
 	}
 	if (p->slide)
-		slide(p, q);
+		slide(s, a, p, q);
 	if (!grounded(p) && !p->move)
-		fall(p, &c->stats);
+		fall(s, a, i);
 	p->walk = 0;
 	if (!p->move && !p->stun) {
 		int ground = grounded(p);
@@ -496,10 +603,12 @@ static int update(struct fight_state *s, const struct assets *a, int i, uint32_t
 			p->face = q->x >= p->x ? 1 : -1;
 		p->crouch = ground && !p->squat && (keys & KEY(DOWN));
 		if (p->buffer && ground) {
-			start(s, c, p, p->buffer - 1);
+			start(s, a, i, p->buffer - 1);
 		} else if (p->squat) {
-			if (!--p->squat)
+			if (!--p->squat) {
 				p->vy = c->stats.jump.vy;
+				sound(s, a, SOUND_JUMP, i, 0);
+			}
 		} else if (ground && threat && (keys & back_key(p))) {
 			if (p->block != 2)
 				p->block = 2, p->elapsed = 0;
@@ -530,16 +639,20 @@ static int update(struct fight_state *s, const struct assets *a, int i, uint32_t
 		const struct move *m = &c->move[p->move - 1];
 		const struct step *st =
 		    &a->step[step_at(a, &m->anim, (uint32_t)p->elapsed, 0, &begin)];
+		int airborne = p->y < 0;
 		p->x += p->face * QUARTER(st->vx);
 		p->y += st->vy;
+		if (airborne && !p->y)
+			sound(s, a, SOUND_LAND, i, 0);
 		if (st->spawn && begin == (uint32_t)p->elapsed)
-			launch(s, c, i, st->spawn);
+			launch(s, a, i, st->spawn);
 	}
-	p->x = wall(p->x);
+	p->x = wall(s, a, p->x);
 	return 0;
 }
-/* Does fighter i's current hitbox touch the other's hurtboxes? */
-static int contact(const struct fight_state *s, const struct assets *a, int i)
+/* Does fighter i's current hitbox touch the other's hurtboxes? at gets the
+ * contact point (world x, screen y). */
+static int contact(const struct fight_state *s, const struct assets *a, int i, int at[2])
 {
 	const struct fighter *p = &s->p[i], *q = &s->p[1 - i];
 	if (!p->move || !q->hp)
@@ -550,23 +663,31 @@ static int contact(const struct fight_state *s, const struct assets *a, int i)
 		return 0;
 	for (unsigned h = 0; h < hit->hit; h++) {
 		struct area x = fight_box(&a->box[hit->box + hit->hurt + h], px(p), p->y, p->face);
-		for (unsigned k = 0; k < body->hurt; k++)
-			if (overlap(x, fight_box(&a->box[body->box + k], px(q), q->y, q->face)))
+		for (unsigned k = 0; k < body->hurt; k++) {
+			struct area y = fight_box(&a->box[body->box + k], px(q), q->y, q->face);
+			if (overlap(x, y)) {
+				middle(x, y, &at[0], &at[1]);
 				return 1;
+			}
+		}
 	}
 	return 0;
 }
 static int shot_hits_body(const struct fight_state *s, const struct assets *a,
-			  const struct shot *sh, int i)
+			  const struct shot *sh, int i, int at[2])
 {
 	const struct fighter *q = &s->p[i];
 	const struct step *hit = &a->step[shot_step(s, a, sh)],
 			  *body = &a->step[fight_pose(s, a, i)];
 	for (unsigned h = 0; h < hit->hit; h++) {
 		struct area x = fight_box(&a->box[hit->box + h], sh->x, sh->y, sh->face);
-		for (unsigned k = 0; k < body->hurt; k++)
-			if (overlap(x, fight_box(&a->box[body->box + k], px(q), q->y, q->face)))
+		for (unsigned k = 0; k < body->hurt; k++) {
+			struct area y = fight_box(&a->box[body->box + k], px(q), q->y, q->face);
+			if (overlap(x, y)) {
+				middle(x, y, &at[0], &at[1]);
 				return 1;
+			}
+		}
 	}
 	return 0;
 }
@@ -623,6 +744,49 @@ static void struck(struct fight_state *s, struct fighter *p, struct fighter *q,
 	s->hits++;
 	s->guards += (unsigned)guarded;
 }
+/* A spark of system sy's effect key at world x, screen y: the first free
+ * slot, else the oldest (lowest slot on ties). */
+static void spark(struct fight_state *s, const struct assets *a, const struct system *sy,
+		  int key, int x, int y, int flip)
+{
+	unsigned kind = sy->effect[key];
+	if (!kind || kind > a->sparks)
+		return;
+	int k = 0;
+	for (int j = 0; j < SPARK_SLOTS; j++) {
+		if (!s->spark[j].kind) {
+			k = j;
+			break;
+		}
+		if (s->spark[j].age > s->spark[k].age)
+			k = j;
+	}
+	s->spark[k] = (struct spark_slot){(int32_t)kind, x, y, 0, flip};
+}
+/* Sparks, shake and sounds of a contact by side i (move k + 1, or 0 for a
+ * projectile) at point at; ko when it emptied the defender's life. */
+static void react(struct fight_state *s, const struct assets *a, int i, const struct hit *h,
+		  int k, int slash, int guarded, const int at[2], int face, int ko)
+{
+	const struct system *sy = &a->sys[who(s, a, i)->system];
+	int t = tier(h, k - 1), flip = face < 0;
+	if (guarded) {
+		spark(s, a, sy, slash ? FX_SLASH_GUARD : FX_GUARD, at[0], at[1], flip);
+		sound(s, a, slash ? SOUND_SLASH_GUARD : SOUND_GUARD, i, k);
+	} else {
+		spark(s, a, sy, (slash ? FX_SLASH_LIGHT : FX_HIT_LIGHT) + t, at[0], at[1], flip);
+		if (slash)
+			spark(s, a, sy, FX_BLOOD_LIGHT + t, at[0], at[1], flip);
+		sound(s, a, (slash ? SOUND_SLASH_LIGHT : SOUND_HIT_LIGHT) + t, i, k);
+		if (t && s->shake < SHAKE_HEAVY)
+			s->shake = SHAKE_HEAVY;
+	}
+	if (ko) {
+		sound(s, a, SOUND_KO, 1 - i, 0);
+		s->shake = SHAKE_KO;
+		s->flash = FLASH_TICKS;
+	}
+}
 static void shots_move(struct fight_state *s, const struct assets *a)
 {
 	for (int k = 0; k < MAX_PROJECTILES; k++) {
@@ -632,7 +796,8 @@ static void shots_move(struct fight_state *s, const struct assets *a)
 		const struct projectile *t = shot_type(s, a, sh);
 		sh->age++;
 		sh->x += sh->face * t->speed;
-		if (sh->age >= t->lifetime || sh->x < -SHOT_MARGIN || sh->x > FW + SHOT_MARGIN)
+		if (sh->age >= t->lifetime || sh->x < (int)s->cam - SHOT_MARGIN ||
+		    sh->x > (int)s->cam + FW + SHOT_MARGIN)
 			memset(sh, 0, sizeof(*sh));
 	}
 }
@@ -654,9 +819,10 @@ static void combat(struct fight_state *s, const struct assets *a, const uint32_t
 		frozen[i] = update(s, a, i, keys[i], threat[i]);
 	/* Resolve every contact from the same state before changing any. */
 	const struct move *move[2] = {NULL, NULL};
-	int guarded[2] = {0, 0}, group[2] = {0, 0}, struck_now[2] = {0, 0};
+	int guarded[2] = {0, 0}, group[2] = {0, 0}, struck_now[2] = {0, 0}, at[2][2],
+	    shot_at[MAX_PROJECTILES][2];
 	for (int i = 0; i < 2; i++)
-		if (!frozen[i] && contact(s, a, i)) {
+		if (!frozen[i] && contact(s, a, i, at[i])) {
 			move[i] = &who(s, a, i)->move[s->p[i].move - 1];
 			group[i] = a->step[fight_pose(s, a, i)].group;
 			guarded[i] = blocks(&s->p[1 - i], keys[1 - i], &move[i]->hit);
@@ -671,12 +837,13 @@ static void combat(struct fight_state *s, const struct assets *a, const uint32_t
 			    shots_clash(s, a, &s->shot[k], &s->shot[j])) {
 				gone[k] = gone[j] = 1;
 				s->clashes++;
+				sound(s, a, SOUND_CLASH, s->shot[k].owner, 0);
 			}
 	for (int k = 0; k < MAX_PROJECTILES; k++) {
 		const struct shot *sh = &s->shot[k];
 		int d = 1 - sh->owner;
 		if (!sh->kind || gone[k] || !s->p[d].hp || struck_now[d] ||
-		    !shot_hits_body(s, a, sh, d))
+		    !shot_hits_body(s, a, sh, d, shot_at[k]))
 			continue;
 		landed[k] = 1;
 		struck_now[d] = 1;
@@ -686,17 +853,22 @@ static void combat(struct fight_state *s, const struct assets *a, const uint32_t
 		if (!move[i])
 			continue;
 		struct fighter *p = &s->p[i];
+		int alive = s->p[1 - i].hp > 0;
 		struck(s, p, &s->p[1 - i], who(s, a, 1 - i), &move[i]->hit, guarded[i], p->face,
 		       keys[1 - i]);
+		react(s, a, i, &move[i]->hit, p->move, move[i]->slash, guarded[i], at[i], p->face,
+		      alive && !s->p[1 - i].hp);
 		if (p->move)
 			p->hit = group[i];
 	}
 	for (int k = 0; k < MAX_PROJECTILES; k++) {
 		struct shot *sh = &s->shot[k];
 		if (landed[k]) {
-			int d = 1 - sh->owner;
-			struck(s, NULL, &s->p[d], who(s, a, d), &shot_type(s, a, sh)->hit,
-			       shot_guard[k], sh->face, keys[d]);
+			int d = 1 - sh->owner, alive = s->p[d].hp > 0;
+			const struct hit *h = &shot_type(s, a, sh)->hit;
+			struck(s, NULL, &s->p[d], who(s, a, d), h, shot_guard[k], sh->face, keys[d]);
+			react(s, a, sh->owner, h, 0, 0, shot_guard[k], shot_at[k], sh->face,
+			      alive && !s->p[d].hp);
 		}
 		if (landed[k] || gone[k])
 			memset(sh, 0, sizeof(*sh));
@@ -706,9 +878,10 @@ static void combat(struct fight_state *s, const struct assets *a, const uint32_t
 	    push = push0 > push1 ? push0 : push1;
 	if (grounded(p0) && grounded(p1) && abs(p0->x - p1->x) < QUARTER(push - 1)) {
 		int mid = (p0->x + p1->x) / 2, f = p0->x <= p1->x ? 1 : -1;
-		p0->x = wall(mid - f * 2 * push);
-		p1->x = wall(mid + f * 2 * push);
+		p0->x = wall(s, a, mid - f * 2 * push);
+		p1->x = wall(s, a, mid + f * 2 * push);
 	}
+	camera(s, a);
 	if (!p0->hp || !p1->hp)
 		s->ended = 1;
 }
@@ -808,6 +981,8 @@ void fight_step(struct fight_state *s, const struct assets *a, uint32_t input,
 {
 	uint32_t pressed = input & ~s->previous;
 	s->previous = input;
+	s->sounds = 0;
+	memset(s->sound, 0, sizeof(s->sound));
 	if (pressed & KEY(START))
 		s->paused ^= 1;
 	if (pressed & KEY(L))
@@ -826,6 +1001,19 @@ void fight_step(struct fight_state *s, const struct assets *a, uint32_t input,
 	if (s->mode != MODE_FIGHT) {
 		if (s->timer < 255)
 			s->timer++;
+	} else {
+		/* Sparks, shake and flash run on every fight tick, hitstop too. */
+		for (int k = 0; k < SPARK_SLOTS; k++) {
+			struct spark_slot *sp = &s->spark[k];
+			if (sp->kind && ++sp->age >= a->spark[sp->kind - 1].total)
+				memset(sp, 0, sizeof(*sp));
+		}
+		if (s->shake)
+			s->shake--;
+		if (s->flash)
+			s->flash--;
+	}
+	if (s->mode != MODE_FIGHT) {
 		if (s->timer > (s->automatic ? AUTO_SCREEN : SCREEN_TICKS) ||
 		    (s->timer > SCREEN_SKIP && (pressed & ATTACKS)))
 			to_select(s, a);
@@ -839,10 +1027,11 @@ void fight_step(struct fight_state *s, const struct assets *a, uint32_t input,
 			if (p->move)
 				p->move = p->elapsed = p->hit = 0;
 			if (!grounded(p))
-				fall(p, &who(s, a, i)->stats);
+				fall(s, a, i);
 			p->walk = 0;
 		}
 		shots_move(s, a);
+		camera(s, a);
 		if (++s->ended > KO_TICKS || (pressed & (KEY(A) | KEY(B))))
 			round_over(s, a);
 		return;
@@ -928,14 +1117,47 @@ static void outline(struct scene *s, struct area r, uint16_t color, int alpha, i
 	rect(s, r.x, r.y, width, r.h, color, OPAQUE, 255);
 	rect(s, r.x + r.w - width, r.y, width, r.h, color, OPAQUE, 255);
 }
-static void stage(struct scene *out)
+/* The flat fallback background of a pack without stages (the world is then
+ * FW wide, so the camera never moves). */
+static void flat_stage(struct scene *out, int dy)
 {
-	/* Background is deliberately drawn in software, not supplied by the host. */
 	rect(out, 0, 0, FW, FH, 0x10c6, OPAQUE, 255);
 	for (int i = 0; i < 8; i++)
-		rect(out, i * 64, 100 + (i % 3) * 15, 46, 140, 0x212b, OPAQUE, 255);
-	rect(out, 0, GROUND, FW, FH - GROUND, 0x39a8, OPAQUE, 255);
-	rect(out, 0, GROUND, FW, 2, 0x8c50, OPAQUE, 255);
+		rect(out, i * 64, 100 + (i % 3) * 15 + dy, 46, 140, 0x212b, OPAQUE, 255);
+	rect(out, 0, GROUND + dy, FW, FH - GROUND, 0x39a8, OPAQUE, 255);
+	rect(out, 0, GROUND + dy, FW, 2, 0x8c50, OPAQUE, 255);
+}
+/* The cast stage's layers back to front, each followed by its anims' current
+ * frames; a layer image already covers every camera and shake. */
+static void stage(struct scene *out, const struct fight_state *s, const struct assets *a, int dy)
+{
+	if (!a->stages || a->cast_stage != (int)s->arena) {
+		flat_stage(out, dy);
+		return;
+	}
+	const struct stage *st = &a->stage[s->arena];
+	int oy = GROUND - st->ground + dy;
+	for (unsigned i = 0; i < st->layers; i++) {
+		const struct layer *l = &a->layer[st->first_layer + i];
+		int lx = fight_layer_x(l, (int)s->cam), ly = oy + l->y;
+		if (a->layer_image[i] >= 0) {
+			sprite(out, a, a->layer_image[i], lx + a->layer_x0[i], ly + a->layer_y0[i], 0,
+			       OPAQUE, 255);
+			out->layers++;
+		}
+		for (unsigned j = 0; j < l->anims; j++) {
+			const struct stage_anim *an = &a->anim[l->first_anim + j];
+			uint32_t t = s->tick % an->total;
+			unsigned k = an->first;
+			while (t >= a->stage_step[k].ticks)
+				t -= a->stage_step[k++].ticks;
+			const struct stage_step *sp = &a->stage_step[k];
+			if (a->stage_look[k] >= 0) {
+				sprite(out, a, a->stage_look[k], lx + sp->x, ly + sp->y, 0, OPAQUE, 255);
+				out->layers++;
+			}
+		}
+	}
 }
 static void idle_sprite(struct scene *out, const struct fight_state *s, const struct assets *a,
 			int i, int x, int y, int flip)
@@ -1009,7 +1231,7 @@ static int front_fighter(const struct fight_state *s)
 }
 void fight_scene(const struct fight_state *s, const struct assets *a, struct scene *out)
 {
-	out->count = out->effects_requested = out->effects_drawn = 0;
+	out->count = out->effects_requested = out->effects_drawn = out->sparks = out->layers = 0;
 	if (s->mode == MODE_SELECT) {
 		select_scene(s, a, out);
 		return;
@@ -1018,9 +1240,18 @@ void fight_scene(const struct fight_state *s, const struct assets *a, struct sce
 		screen_scene(s, a, out);
 		return;
 	}
-	stage(out);
+	/* World commands shift by the camera (x) and the shake (y); a KO flash
+	 * replaces the world with white. */
+	int cx = -(int)s->cam,
+	    dy = !s->shake ? 0 : (s->shake & 2 ? 1 : -1) * (s->shake > 8 ? SHAKE_MAX : 2);
+	uint32_t budget = EFFECT_PIXEL_BUDGET;
+	if (s->flash) {
+		rect(out, 0, 0, FW, FH, 0xffff, OPAQUE, 255);
+		goto hud;
+	}
+	stage(out, s, a, dy);
 	for (int i = 0; i < 2; i++)
-		rect(out, px(&s->p[i]) - 30, GROUND - 4, 60, 6, 0, ALPHA, 120);
+		rect(out, px(&s->p[i]) - 30 + cx, GROUND - 4 + dy, 60, 6, 0, ALPHA, 120);
 	int front = front_fighter(s);
 	for (int n = 0; n < 2; n++) {
 		int i = n ? front : !front;
@@ -1029,11 +1260,10 @@ void fight_scene(const struct fight_state *s, const struct assets *a, struct sce
 		const struct step *st = &a->step[fight_pose(s, a, i)];
 		int im = cast_image(s, a, i, st->frame);
 		if (im >= 0)
-			sprite(out, a, im, px(p), GROUND + p->y, p->face < 0, OPAQUE, 255);
+			sprite(out, a, im, px(p) + cx, GROUND + p->y + dy, p->face < 0, OPAQUE, 255);
 	}
 	/* Projectiles: opaque ones as sprites, blended ones within the effect
-	 * budget (ahead of the stress effects). */
-	uint32_t budget = EFFECT_PIXEL_BUDGET;
+	 * budget (ahead of the sparks and stress effects). */
 	for (int k = 0; k < MAX_PROJECTILES; k++) {
 		const struct shot *sh = &s->shot[k];
 		if (!sh->kind)
@@ -1043,19 +1273,37 @@ void fight_scene(const struct fight_state *s, const struct assets *a, struct sce
 		if (im < 0)
 			continue;
 		if (t->blend == OPAQUE)
-			sprite(out, a, im, sh->x, GROUND + sh->y, sh->face < 0, OPAQUE, 255);
+			sprite(out, a, im, sh->x + cx, GROUND + sh->y + dy, sh->face < 0, OPAQUE, 255);
 		else
-			effect(out, a, im, sh->x, GROUND + sh->y, sh->face < 0, t->blend,
+			effect(out, a, im, sh->x + cx, GROUND + sh->y + dy, sh->face < 0, t->blend,
 			       t->alpha, &budget);
+	}
+	/* Sparks over the fighters, the current step of each. */
+	for (int k = 0; k < SPARK_SLOTS; k++) {
+		const struct spark_slot *sp = &s->spark[k];
+		if (!sp->kind)
+			continue;
+		const struct spark *an = &a->spark[sp->kind - 1];
+		int32_t t = sp->age;
+		unsigned j = an->first;
+		while (t >= a->spark_step[j].ticks)
+			t -= a->spark_step[j++].ticks;
+		int im = a->spark_step[j].image;
+		out->sparks++;
+		if (an->blend == OPAQUE)
+			sprite(out, a, im, sp->x + cx, sp->y + dy, sp->flip, OPAQUE, 255);
+		else
+			effect(out, a, im, sp->x + cx, sp->y + dy, sp->flip, an->blend, an->alpha,
+			       &budget);
 	}
 	/* Drawn after the sprites so none hides the boxes. */
 	for (int i = 0; s->boxes && i < 2; i++) {
 		const struct fighter *p = &s->p[i];
 		const struct step *st = &a->step[fight_pose(s, a, i)];
 		for (unsigned k = 0; k < (unsigned)st->hurt + st->hit; k++)
-			outline(out, fight_box(&a->box[st->box + k], px(p), p->y, p->face),
+			outline(out, fight_box(&a->box[st->box + k], px(p) + cx, p->y + dy, p->face),
 				k < st->hurt ? 0x07e0 : 0xf800, k < st->hurt ? 0 : 96, 1);
-		rect(out, px(p) - 3, GROUND + p->y, 7, 1, 0xffff, OPAQUE, 255);
+		rect(out, px(p) - 3 + cx, GROUND + p->y + dy, 7, 1, 0xffff, OPAQUE, 255);
 	}
 	for (int k = 0; s->boxes && k < MAX_PROJECTILES; k++) {
 		const struct shot *sh = &s->shot[k];
@@ -1063,7 +1311,7 @@ void fight_scene(const struct fight_state *s, const struct assets *a, struct sce
 			continue;
 		const struct step *st = &a->step[shot_step(s, a, sh)];
 		for (unsigned h = 0; h < st->hit; h++)
-			outline(out, fight_box(&a->box[st->box + h], sh->x, sh->y, sh->face),
+			outline(out, fight_box(&a->box[st->box + h], sh->x + cx, sh->y + dy, sh->face),
 				0xf800, 96, 1);
 	}
 	/* Stress modes: 8, 24 or 48 overlapping animated alpha/additive effects. */
@@ -1074,6 +1322,7 @@ void fight_scene(const struct fight_state *s, const struct assets *a, struct sce
 		int image = a->effect[(s->tick / 4 + (unsigned)i) % a->effects];
 		effect(out, a, image, x, y, i % 2, i % 3 ? ALPHA : ADD, 160, &budget);
 	}
+hud:
 	rect(out, 16, 16, 204, 13, 0, OPAQUE, 255);
 	rect(out, 260, 16, 204, 13, 0, OPAQUE, 255);
 	/* Life bars are 200 pixels at full life, whatever the character's life. */
@@ -1107,7 +1356,14 @@ void fight_scene(const struct fight_state *s, const struct assets *a, struct sce
 #define GLOBAL_WORDS 19
 #define SHOTS_AT (GLOBAL_WORDS + 2 * FIGHTER_WORDS)
 #define TAIL_AT (SHOTS_AT + MAX_PROJECTILES * SHOT_WORDS)
-#define USED_WORDS (TAIL_AT + 7)
+/* Then arena, cam, shake, flash, the spark slots, the sound count and one
+ * word per sound event (id | side << 8 | chr << 9 | system << 16 | move <<
+ * 24). */
+#define EXTRA_AT (TAIL_AT + 7)
+#define SPARK_WORDS 5
+#define SPARKS_AT (EXTRA_AT + 4)
+#define SOUNDS_AT (SPARKS_AT + SPARK_SLOTS * SPARK_WORDS)
+#define USED_WORDS (SOUNDS_AT + 1 + MAX_SOUND_EVENTS)
 static void fighter_fields(struct fighter *p, int32_t *v[FIGHTER_WORDS])
 {
 	int32_t *f[] = {&p->x,	   &p->y,     &p->vy,	     &p->hp,	&p->face,  &p->walk,
@@ -1157,13 +1413,32 @@ void fight_encode(const struct fight_state *s, uint32_t w[STATE_WORDS])
 	tail_fields(&t, e);
 	for (int k = 0; k < 7; k++)
 		w[TAIL_AT + k] = *e[k];
+	w[EXTRA_AT] = t.arena;
+	w[EXTRA_AT + 1] = t.cam;
+	w[EXTRA_AT + 2] = t.shake;
+	w[EXTRA_AT + 3] = t.flash;
+	for (int k = 0; k < SPARK_SLOTS; k++) {
+		const struct spark_slot *sp = &t.spark[k];
+		const int32_t v[SPARK_WORDS] = {sp->kind, sp->x, sp->y, sp->age, sp->flip};
+		for (int j = 0; j < SPARK_WORDS; j++)
+			w[SPARKS_AT + k * SPARK_WORDS + j] = (uint32_t)v[j];
+	}
+	w[SOUNDS_AT] = t.sounds;
+	for (unsigned k = 0; k < t.sounds && k < MAX_SOUND_EVENTS; k++) {
+		const struct sound_event *e2 = &t.sound[k];
+		w[SOUNDS_AT + 1 + k] = e2->id | (uint32_t)e2->side << 8 | (uint32_t)e2->chr << 9 |
+				       (uint32_t)e2->system << 16 | (uint32_t)e2->move << 24;
+	}
 }
-/* Bounds come from the fighter's own character: life, jump velocities,
- * prejump, buffer, charge and grace. */
-static int valid(const struct fighter *p, const struct assets *a, const struct character *c)
+/* Bounds come from the fighter's own character (life, jump velocities,
+ * prejump, buffer, charge and grace) and the walls of the state's camera. */
+static int valid(const struct fight_state *s, const struct fighter *p, const struct assets *a,
+		 const struct character *c)
 {
 	const struct stats *st = &c->stats;
-	if (p->x < QUARTER(WALL_LEFT) || p->x > QUARTER(WALL_RIGHT) || p->y < -MAX_HEIGHT ||
+	int lo, hi;
+	fight_walls(s, a, &lo, &hi);
+	if (p->x < QUARTER(lo) || p->x > QUARTER(hi) || p->y < -MAX_HEIGHT ||
 	    p->y > 0 || p->vy < st->jump.vy || p->vy > st->jump.fall || p->hp < 0 ||
 	    p->hp > st->life ||
 	    (p->face != 1 && p->face != -1) || p->walk < -1 || p->walk > 1 ||
@@ -1206,9 +1481,54 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 	tail_fields(&t, e);
 	for (int k = 0; k < 7; k++)
 		*e[k] = w[TAIL_AT + k];
+	t.arena = w[EXTRA_AT];
+	t.cam = w[EXTRA_AT + 1];
+	t.shake = w[EXTRA_AT + 2];
+	t.flash = w[EXTRA_AT + 3];
 	for (int i = USED_WORDS; i < STATE_WORDS; i++)
 		if (w[i])
 			return 0;
+	if (t.chr[0] >= a->characters || t.chr[1] >= a->characters ||
+	    (a->stages ? t.arena >= a->stages : t.arena != 0))
+		return 0;
+	int width = fight_width(&t, a);
+	if (t.cam > (uint32_t)(width - FW) || t.shake > SHAKE_KO || t.flash > FLASH_TICKS ||
+	    (t.mode != MODE_FIGHT && (t.arena || t.cam || t.shake || t.flash)))
+		return 0;
+	for (int k = 0; k < SPARK_SLOTS; k++) {
+		struct spark_slot *sp = &t.spark[k];
+		const uint32_t *d = w + SPARKS_AT + k * SPARK_WORDS;
+		*sp = (struct spark_slot){(int32_t)d[0], (int32_t)d[1], (int32_t)d[2], (int32_t)d[3],
+					  (int32_t)d[4]};
+		if (!sp->kind) {
+			if (sp->x || sp->y || sp->age || sp->flip)
+				return 0;
+			continue;
+		}
+		if (t.mode != MODE_FIGHT || sp->kind < 0 || sp->kind > (int)a->sparks ||
+		    sp->age < 0 || sp->age >= a->spark[sp->kind - 1].total || sp->flip < 0 ||
+		    sp->flip > 1 || sp->x < -MAX_SIDE || sp->x > width + MAX_SIDE ||
+		    sp->y < -MAX_SIDE || sp->y > FH + MAX_SIDE)
+			return 0;
+	}
+	t.sounds = w[SOUNDS_AT];
+	if (t.sounds > MAX_SOUND_EVENTS)
+		return 0;
+	for (unsigned k = 0; k < MAX_SOUND_EVENTS; k++) {
+		uint32_t v = w[SOUNDS_AT + 1 + k];
+		if (k >= t.sounds) {
+			if (v)
+				return 0;
+			continue;
+		}
+		struct sound_event e2 = {(uint8_t)(v & 255), (uint8_t)(v >> 8 & 1),
+					 (uint8_t)(v >> 9 & 127), (uint8_t)(v >> 16 & 255),
+					 (uint8_t)(v >> 24)};
+		if (e2.id >= SOUNDS || e2.chr >= a->characters ||
+		    e2.system != a->chr[e2.chr].system || e2.move > a->chr[e2.chr].moves)
+			return 0;
+		t.sound[k] = e2;
+	}
 	unsigned n = a->characters;
 	uint32_t all = n >= 32 ? 0xffffffffu : (1u << n) - 1u;
 	if (t.paused > 1 || t.stress > 3 || t.boxes > 1 || t.automatic > 1 || t.mode >= MODES ||
@@ -1231,7 +1551,7 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 		fighter_fields(&t.p[i], v);
 		for (int k = 0; k < FIGHTER_WORDS; k++)
 			*v[k] = (int32_t)w[GLOBAL_WORDS + i * FIGHTER_WORDS + k];
-		if (!valid(&t.p[i], a, &a->chr[t.chr[i]]))
+		if (!valid(&t, &t.p[i], a, &a->chr[t.chr[i]]))
 			return 0;
 	}
 	int owned[2] = {0, 0};
@@ -1247,8 +1567,9 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 		}
 		if (sh->owner < 0 || sh->owner > 1 || owned[sh->owner]++ || t.mode != MODE_FIGHT ||
 		    sh->kind < 0 || sh->kind > (int)a->chr[t.chr[sh->owner]].projectiles ||
-		    (sh->face != 1 && sh->face != -1) || sh->x < -SHOT_MARGIN ||
-		    sh->x > FW + SHOT_MARGIN || sh->y < -MAX_SIDE - MAX_HEIGHT || sh->y > MAX_SIDE ||
+		    (sh->face != 1 && sh->face != -1) || sh->x < -SHOT_MARGIN - FW ||
+		    sh->x > width + FW + SHOT_MARGIN || sh->y < -MAX_SIDE - MAX_HEIGHT ||
+		    sh->y > MAX_SIDE ||
 		    sh->age < 0 ||
 		    sh->age >= a->chr[t.chr[sh->owner]].projectile[sh->kind - 1].lifetime)
 			return 0;

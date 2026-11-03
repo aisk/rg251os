@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Checks of pack.py's systems.json, stats, class, src and sources handling
-and of convert-stats.py, run by `make fighter-test`. Works on in-memory
+"""Checks of pack.py's systems.json (stats, walls, slash and effect sets),
+stats, class, src and sources handling and of convert-stats.py, run by
+`make fighter-test`. Works on in-memory
 copies of assets/fighter/systems.json and testdata/terry-unconverted.json,
 Terry's manifest as it was before convert-stats.py ran (no sheet decoding):
 the real files load, every malformed variant is refused with ValueError,
@@ -78,6 +79,10 @@ def main():
                             'vx_back': 8, 'prejump': 3}
     assert kof['classes']['light'] == {'hitstun': 11, 'blockstun': 9, 'hitstop': 6}
     assert kof['classes']['command'] == {'hitstun': 19, 'blockstun': 17}
+    # Walls and weapon moves: KOF strikes, Samurai Shodown slashes LP, HP
+    # and specials (bits 0, 1 and 4).
+    assert kof['margin'] == ss['margin'] == 24 and kof['play_width'] == ss['play_width'] == 480
+    assert kof['slash'] == 0 and ss['slash'] == 0b10011 and ss['effects']['blood_light']
     assert pack.jump_arc(-48, 3) == (96, 33) and pack.jump_arc(-42, 2) == (110, 43)
     t = character(TERRY)
     assert t.system['name'] == 'kof2002' and not t.overrides and t.stats == kof['stats']
@@ -138,6 +143,12 @@ def main():
                                               for i in range(9)} | {
                                                   'kof2002': SYSTEMS['systems']['kof2002']}}),
         ('an assignment to an unknown system', lambda: {**SYSTEMS, 'characters': {'terry': 'x'}}),
+        ('wall_margin 7', lambda: with_system(['kof2002', 'wall_margin'], 7)),
+        ('play_width 481', lambda: with_system(['kof2002', 'play_width'], 481)),
+        ('play_width 319', lambda: with_system(['kof2002', 'play_width'], 319)),
+        ('an unknown effect key', lambda: with_system(['kof2002', 'effects', 'dust'], 'kof.x')),
+        ('an effect without a set', lambda: with_system(['kof2002', 'effects', 'guard'], 'x')),
+        ('a slash button', lambda: with_system(['kof2002', 'slash'], ['lp', 'zz'])),
     ]
     for what, data in bad_systems:
         refused(f'systems.json with {what}', lambda d=data: systems(d()))

@@ -1,17 +1,23 @@
-/* FIGHTP05 pack decoder, per-match sprite cast and clipped RGB565 software
+/* FIGHTP06 pack decoder, per-match cast and clipped RGB565 software
  * draw-command backend. The decoder checks every count, offset and index
  * against the file length and the resident limits in fighter.h (palettes
- * and frames per sheet, system profiles, stats, names, box bounds and
- * counts, move, special, projectile and step motion data), keeps the whole
- * roster's rule data and palette-index frames resident, resolves each
- * character's stats (its system's defaults plus its overrides, with the
- * jump's peak and fall speed derived and bounded), fills hitstun/blockstun/
- * hitstop a move takes from its class and scales damage and chip by the
- * system's damage scale, derives hit groups, startup/active/recovery and
- * reach per move, and expands the effects once. fight_cast
- * expands the two fighters of the current match (character, palette) into
- * RGB565 runs when they change, so only two characters' pixels are ever
- * resident; the loader proves both always fit. Drawing a sprite is span
+ * and frames per sheet, system profiles with walls and effect sets, stats,
+ * names, box bounds and counts, move, special, projectile and step motion
+ * data, spark animations, stages with their layers, edge rules and anims),
+ * keeps the whole roster's rule data and palette-index frames and every
+ * stage's palette-index layers resident, resolves each character's stats
+ * (its system's defaults plus its overrides, with the jump's peak and fall
+ * speed derived and bounded), fills hitstun/blockstun/hitstop a move takes
+ * from its class and scales damage and chip by the system's damage scale,
+ * derives hit groups, startup/active/recovery, reach and the weapon flag per
+ * move, and expands the effects and sparks once. fight_cast expands the two
+ * fighters of the current match (character, palette) and its stage into
+ * RGB565 runs when they change, so only two characters' and one stage's
+ * pixels are ever resident; the loader proves any pair plus any stage
+ * fits. A stage layer is expanded into one image that covers every screen
+ * pixel it can reach for any camera and shake, with its edge rules already
+ * applied, so drawing it is the sprite path: an opaque row is one span, a
+ * row copy. Drawing a sprite is span
  * copies (mirroring reverses the span), rectangles are row fills, and
  * constant alpha/additive blending have their own loops without per-pixel
  * mode branches or divisions. All destination reads stay in the cached
@@ -190,7 +196,7 @@ static int system_name_char(unsigned c)
 {
 	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
 }
-static int read_system(struct reader *r, struct system *sy)
+static int read_system(struct reader *r, struct system *sy, unsigned sparks)
 {
 	unsigned len = u8(r);
 	if (!r->ok || !len || len > MAX_NAME)
@@ -237,6 +243,18 @@ static int read_system(struct reader *r, struct system *sy)
 			return 0;
 		sy->cls[c] = (struct class_row){(uint8_t)hitstun, (uint8_t)blockstun,
 						(uint8_t)hitstop, (uint8_t)has};
+	}
+	unsigned margin = u16(r), play = u16(r);
+	if (!r->ok || margin < MIN_MARGIN || margin > MAX_MARGIN || play < MIN_PLAY_WIDTH ||
+	    play > FW)
+		return 0;
+	sy->margin = (uint16_t)margin;
+	sy->play_width = (uint16_t)play;
+	for (int k = 0; k < FX_KEYS; k++) {
+		unsigned e = u16(r);
+		if (!r->ok || e > sparks)
+			return 0;
+		sy->effect[k] = (uint16_t)e;
 	}
 	return 1;
 }
@@ -363,7 +381,7 @@ static int name_char(unsigned c)
 {
 	return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ' ' || c == '-';
 }
-static int character(struct reader *r, struct assets *a, struct character *c)
+static int character(struct reader *r, struct assets *a, struct character *c, unsigned stages)
 {
 	static uint32_t mark[MAX_FRAMES], stamp;
 	unsigned len = u8(r);
@@ -463,6 +481,13 @@ static int character(struct reader *r, struct assets *a, struct character *c)
 		a->box[a->boxes++] =
 		    (struct box){(int16_t)x, (int16_t)y, (int16_t)w, (int16_t)h};
 	}
+	unsigned slash = u16(r), home = u16(r);
+	if (!r->ok || slash > 31 || home > stages)
+		return 0;
+	c->slash = (uint8_t)slash;
+	c->home = (uint16_t)home;
+	for (unsigned k = 0; k < moves; k++)
+		c->move[k].slash = (uint8_t)((slash >> (k < MOVES ? k % 4 : 4)) & 1);
 	/* Actions never hit, move or spawn; projectile steps have no body, no
 	 * motion and always a hitbox. */
 	for (int k = 0; k < ACTIONS; k++) {
@@ -507,19 +532,276 @@ static int character(struct reader *r, struct assets *a, struct character *c)
 	}
 	return 1;
 }
+/* ---- sparks and stages ---- */
+static int read_sparks(struct reader *r, struct assets *a, unsigned n)
+{
+	for (unsigned i = 0; i < n; i++) {
+		unsigned blend = u8(r), alpha = u8(r), steps = u16(r);
+		if (!r->ok || blend >= BLENDS || !alpha || !steps || steps > MAX_SPARK_STEPS)
+			return 0;
+		struct spark *sp = &a->spark[i];
+		*sp = (struct spark){(uint16_t)a->spark_steps, (uint16_t)steps, 0, (uint8_t)blend,
+				     (uint8_t)alpha};
+		unsigned total = 0;
+		for (unsigned k = 0; k < steps; k++) {
+			unsigned f = u16(r), c = u16(r), ticks = u16(r);
+			if (!r->ok || f >= a->frames || c >= a->palettes || !paints(a, f, c) || !ticks ||
+			    ticks > 255)
+				return 0;
+			int im = image(a, f, c);
+			if (im < 0)
+				return 0;
+			a->spark_step[a->spark_steps++] = (struct spark_step){(uint16_t)im, (uint16_t)ticks};
+			total += ticks;
+		}
+		sp->total = (uint16_t)total;
+	}
+	a->sparks = n;
+	return 1;
+}
+static int floor_div(int n, int d) { return n >= 0 ? n / d : -((-n + d - 1) / d); }
+/* Screen x of layer l's left edge with the camera at cam. */
+int fight_layer_x(const struct layer *l, int cam)
+{
+	return l->x - floor_div(cam * l->num, l->den);
+}
+/* The layer pixel range [lo, hi) an axis of size n needs to cover screen
+ * pixels [0, screen) when the layer origin moves over [omin, omax]; an
+ * axis without an edge rule stays inside the layer. */
+static void cover(int omin, int omax, int screen, int n, int edge, int *lo, int *hi)
+{
+	*lo = -omax;
+	*hi = screen - omin;
+	if (edge == EDGE_NONE) {
+		*lo = *lo < 0 ? 0 : *lo;
+		*hi = *hi > n ? n : *hi;
+	}
+}
+/* Layer coordinate v mapped into 0..n-1 by an edge rule; -1 = transparent,
+ * -2 = the fill colour. */
+static int edge_map(int v, int n, int edge)
+{
+	if (v >= 0 && v < n)
+		return v;
+	if (edge == EDGE_EXTEND)
+		return v < 0 ? 0 : n - 1;
+	if (edge == EDGE_REPEAT)
+		return ((v % n) + n) % n;
+	if (edge == EDGE_MIRROR) {
+		int m = ((v % (2 * n)) + 2 * n) % (2 * n);
+		return m < n ? m : 2 * n - 1 - m;
+	}
+	return edge == EDGE_COLOR ? -2 : -1;
+}
+struct need {
+	uint32_t pixels, rows, spans;
+	unsigned images;
+};
+/* Expand layer l of a stage W wide into one image covering every pixel it
+ * can show (any camera, any shake), or only count what that takes when
+ * commit is 0. Returns the image (-1: nothing visible, -2: too large) and
+ * the covered origin in layer pixels. */
+static int expand_layer(struct assets *a, const struct stage *st, const struct layer *l,
+			int commit, struct need *n, int *x0, int *y0)
+{
+	static int16_t line[MAX_SIDE];
+	const struct frame *f = &a->frame[l->frame];
+	int left = -f->ax, top = -f->ay, cmax = st->width - FW;
+	int sx0 = fight_layer_x(l, 0), sx1 = fight_layer_x(l, cmax),
+	    sy = GROUND - st->ground + l->y;
+	int xl, xh, yl, yh;
+	cover(sx0 < sx1 ? sx0 : sx1, sx0 < sx1 ? sx1 : sx0, FW, l->w, l->edge[0], &xl, &xh);
+	cover(sy - SHAKE_MAX, sy + SHAKE_MAX, FH, l->h, l->edge[1], &yl, &yh);
+	*x0 = xl;
+	*y0 = yl;
+	if (xl >= xh || yl >= yh)
+		return -1;
+	int w = xh - xl, h = yh - yl;
+	if (w > MAX_COVER)
+		return -2;
+	uint32_t row0 = a->rows, span0 = a->spans, pix0 = a->pixels, pixels = 0, spans = 0;
+	const uint16_t *pal = a->palette[l->palette];
+	int cached = -3;
+	for (int y = 0; y < h; y++) {
+		int sr = edge_map(yl + y, l->h, l->edge[1]);
+		if (sr >= 0 && sr != cached) {
+			/* Palette indices of source row sr, -1 where transparent. */
+			for (int i = 0; i < l->w; i++)
+				line[i] = -1;
+			int fr = sr - top;
+			if (fr >= 0 && fr < f->h)
+				for (uint32_t k = a->row[f->first_row + fr];
+				     k < a->row[f->first_row + fr + 1]; k++) {
+					const struct span *sp = &a->span[k];
+					for (unsigned i = 0; i < sp->len; i++)
+						line[left + sp->x + i] =
+						    a->index[f->index + sp->pixel + i];
+				}
+			cached = sr;
+		}
+		if (commit)
+			a->row[row0 + (unsigned)y] = span0 + spans;
+		int x = 0;
+		while (x < w) {
+			int c = -1;
+			for (; x < w; x++) {
+				int sc = edge_map(xl + x, l->w, l->edge[0]);
+				c = sr == -2 || sc == -2 ? -2 : sr < 0 || sc < 0 ? -1 : line[sc];
+				if (c != -1)
+					break;
+			}
+			if (x == w)
+				break;
+			int start = x;
+			for (; x < w; x++) {
+				int sc = edge_map(xl + x, l->w, l->edge[0]);
+				c = sr == -2 || sc == -2 ? -2 : sr < 0 || sc < 0 ? -1 : line[sc];
+				if (c == -1)
+					break;
+				if (commit)
+					a->pixel[pix0 + pixels + (unsigned)(x - start)] =
+					    c == -2 ? l->color : pal[c];
+			}
+			if (commit)
+				a->span[span0 + spans] = (struct span){
+				    (uint16_t)start, (uint16_t)(x - start), pixels};
+			pixels += (uint32_t)(x - start);
+			spans++;
+		}
+	}
+	n->pixels += pixels;
+	n->rows += (uint32_t)h + 1;
+	n->spans += spans;
+	n->images++;
+	if (!commit)
+		return 0;
+	a->row[row0 + (unsigned)h] = span0 + spans;
+	a->rows += (unsigned)h + 1;
+	a->spans += spans;
+	a->pixels += pixels;
+	struct image *im = &a->image[a->images];
+	*im = (struct image){w, h, 0, 0, row0, pix0, pixels, l->frame, l->palette};
+	return (int)a->images++;
+}
+/* Expand (commit) or count stage k: its layers and every anim step frame. */
+static int expand_stage(struct assets *a, unsigned k, int commit, struct need *n)
+{
+	const struct stage *st = &a->stage[k];
+	for (unsigned i = 0; i < st->layers; i++) {
+		const struct layer *l = &a->layer[st->first_layer + i];
+		int x0, y0, im = expand_layer(a, st, l, commit, n, &x0, &y0);
+		if (im == -2)
+			return 0;
+		if (commit) {
+			a->layer_image[i] = im;
+			a->layer_x0[i] = (int16_t)x0;
+			a->layer_y0[i] = (int16_t)y0;
+		}
+		for (unsigned j = 0; j < l->anims; j++) {
+			const struct stage_anim *an = &a->anim[l->first_anim + j];
+			for (unsigned t = 0; t < an->count; t++) {
+				const struct stage_step *sp = &a->stage_step[an->first + t];
+				int got = -1;
+				if (sp->frame != 0xffff) {
+					n->pixels += a->frame[sp->frame].count;
+					n->images++;
+					if (commit)
+						got = image(a, sp->frame, l->palette);
+				}
+				if (commit)
+					a->stage_look[an->first + t] = (int16_t)got;
+			}
+		}
+	}
+	return 1;
+}
+static int read_stages(struct reader *r, struct assets *a, unsigned n)
+{
+	for (unsigned k = 0; k < n; k++) {
+		struct stage *st = &a->stage[k];
+		char name[MAX_NAME + 1] = {0};
+		unsigned len = u8(r);
+		if (!r->ok || !len || len > MAX_NAME)
+			return 0;
+		for (unsigned i = 0; i < len; i++) {
+			name[i] = (char)u8(r);
+			if (!name_char((unsigned char)name[i]))
+				return 0;
+		}
+		unsigned width = u16(r), ground = u16(r), system = u16(r), layers = u16(r);
+		if (!r->ok || width < MIN_STAGE_WIDTH || width > MAX_STAGE_WIDTH || ground > MAX_SIDE ||
+		    system >= a->systems || !layers || layers > MAX_LAYERS ||
+		    layers > MAX_STAGE_LAYERS - a->layers)
+			return 0;
+		*st = (struct stage){{0}, (uint16_t)width, (uint16_t)ground, (uint16_t)system,
+				     (uint16_t)a->layers, (uint16_t)layers, 0, 0, 0, 0};
+		memcpy(st->name, name, sizeof(name));
+		for (unsigned i = 0; i < layers; i++) {
+			struct layer *l = &a->layer[a->layers++];
+			unsigned f = u16(r), c = u16(r), w = u16(r), h = u16(r);
+			int x = s16(r), y = s16(r), num = s16(r);
+			unsigned den = u16(r), ex = u8(r), ey = u8(r), color = u16(r), anims = u16(r);
+			if (!r->ok || f >= a->frames || c >= a->palettes || !paints(a, f, c) || !w ||
+			    w > MAX_SIDE || !h || h > MAX_SIDE || x < -MAX_SIDE || x > MAX_SIDE ||
+			    y < -MAX_SIDE || y > MAX_SIDE || num < -MAX_SIDE || num > MAX_SIDE || !den ||
+			    den > MAX_STAGE_WIDTH || ex >= EDGES || ey >= EDGES ||
+			    anims > MAX_LAYER_ANIMS || anims > MAX_STAGE_ANIMS - a->anims)
+				return 0;
+			const struct frame *fr = &a->frame[f];
+			/* The layer frame lies inside its w x h rectangle. */
+			if (fr->ax > 0 || fr->ay > 0 || -fr->ax + fr->w > (int)w ||
+			    -fr->ay + fr->h > (int)h)
+				return 0;
+			*l = (struct layer){(uint16_t)f, (uint16_t)c, (uint16_t)w, (uint16_t)h,
+					    (int16_t)x, (int16_t)y, (int16_t)num, (uint16_t)den,
+					    {(uint8_t)ex, (uint8_t)ey}, (uint16_t)color,
+					    (uint16_t)a->anims, (uint16_t)anims};
+			for (unsigned j = 0; j < anims; j++) {
+				struct stage_anim *an = &a->anim[a->anims++];
+				unsigned steps = u16(r);
+				if (!r->ok || !steps || steps > MAX_ANIM_STEPS ||
+				    steps > MAX_STAGE_STEPS - a->stage_steps)
+					return 0;
+				*an = (struct stage_anim){(uint16_t)a->stage_steps, (uint16_t)steps, 0};
+				for (unsigned t = 0; t < steps; t++) {
+					unsigned sf = u16(r);
+					int sx = s16(r), sy = s16(r);
+					unsigned ticks = u16(r);
+					if (!r->ok || (sf != 0xffff && (sf >= a->frames || !paints(a, sf, c))) ||
+					    sx < -MAX_SIDE || sx > MAX_SIDE || sy < -MAX_SIDE ||
+					    sy > MAX_SIDE || !ticks)
+						return 0;
+					a->stage_step[a->stage_steps++] =
+					    (struct stage_step){(uint16_t)sf, (uint16_t)ticks, (int16_t)sx,
+								(int16_t)sy};
+					an->total += ticks;
+				}
+			}
+		}
+		struct need need = {0, 0, 0, 0};
+		if (!expand_stage(a, k, 0, &need))
+			return 0;
+		st->pixels = need.pixels;
+		st->rows = need.rows;
+		st->spans = need.spans;
+		st->images = need.images;
+	}
+	a->stages = n;
+	return 1;
+}
 int fight_assets(struct assets *a, const void *data, size_t size, int *automatic)
 {
 	struct reader r = {data, 0, size, 1};
-	if (!data || size < 40 || memcmp(data, "FIGHTP05", 8))
+	if (!data || size < 48 || memcmp(data, "FIGHTP06", 8))
 		return 0;
 	r.at = 8;
 	uint32_t length = u32(&r), hash = u32(&r), flags = u32(&r);
 	uint32_t palettes = u32(&r), nframes = u32(&r), ncharacters = u32(&r),
-		 effects = u32(&r), systems = u32(&r);
+		 effects = u32(&r), systems = u32(&r), sparks = u32(&r), stages = u32(&r);
 	if (length != size || flags > 1 || !palettes || palettes > MAX_PALETTES ||
 	    !nframes || nframes > MAX_FRAMES || !ncharacters ||
 	    ncharacters > MAX_CHARACTERS || effects > MAX_EFFECTS || !systems ||
-	    systems > MAX_SYSTEMS)
+	    systems > MAX_SYSTEMS || sparks > MAX_SPARKS || stages > MAX_STAGES)
 		return 0;
 	uint32_t check = 2166136261u;
 	for (size_t i = 16; i < size; i++)
@@ -541,13 +823,15 @@ int fight_assets(struct assets *a, const void *data, size_t size, int *automatic
 	for (unsigned i = 0; i < nframes; i++)
 		if (!frame(&r, a, &a->frame[i]))
 			return 0;
+	if (!read_sparks(&r, a, sparks))
+		return 0;
 	a->systems = systems;
 	for (unsigned i = 0; i < systems; i++)
-		if (!read_system(&r, &a->sys[i]))
+		if (!read_system(&r, &a->sys[i], sparks))
 			return 0;
 	a->characters = ncharacters;
 	for (unsigned i = 0; i < ncharacters; i++)
-		if (!character(&r, a, &a->chr[i]))
+		if (!character(&r, a, &a->chr[i], stages))
 			return 0;
 	for (unsigned i = 0; i < effects; i++) {
 		unsigned f = u16(&r), c = u16(&r);
@@ -558,11 +842,12 @@ int fight_assets(struct assets *a, const void *data, size_t size, int *automatic
 			return 0;
 		a->effect[a->effects++] = (uint16_t)im;
 	}
-	if (!r.ok || r.at != size)
+	if (!read_stages(&r, a, stages) || !r.ok || r.at != size)
 		return 0;
-	/* Any two cast characters (a mirror match casts one twice) must fit. */
-	uint32_t pixels = 0;
-	unsigned images = 0;
+	/* Any two cast characters (a mirror match casts one twice) and any
+	 * stage must fit. */
+	uint32_t pixels = 0, rows = 0, spans = 0;
+	unsigned images = 0, stage_images = 0;
 	for (unsigned i = 0; i < ncharacters; i++)
 		for (unsigned j = i; j < ncharacters; j++) {
 			uint32_t p = a->chr[i].pixels + a->chr[j].pixels;
@@ -570,21 +855,46 @@ int fight_assets(struct assets *a, const void *data, size_t size, int *automatic
 			pixels = p > pixels ? p : pixels;
 			images = n > images ? n : images;
 		}
-	if (pixels > MAX_PIXELS - a->pixels || images > MAX_IMAGES - a->images)
+	uint32_t stage_pixels = 0;
+	for (unsigned k = 0; k < stages; k++) {
+		const struct stage *st = &a->stage[k];
+		stage_pixels = st->pixels > stage_pixels ? st->pixels : stage_pixels;
+		rows = st->rows > rows ? st->rows : rows;
+		spans = st->spans > spans ? st->spans : spans;
+		stage_images = st->images > stage_images ? st->images : stage_images;
+	}
+	if (pixels > MAX_PIXELS - a->pixels || stage_pixels > MAX_PIXELS - a->pixels - pixels ||
+	    images > MAX_IMAGES - a->images || stage_images > MAX_IMAGES - a->images - images ||
+	    rows > MAX_ROWS + 1 - a->rows || spans > MAX_SPANS - a->spans)
 		return 0;
 	a->effect_images = a->images;
 	a->effect_pixels = a->pixels;
+	a->pack_rows = a->rows;
+	a->pack_spans = a->spans;
 	a->cast[0][0] = a->cast[1][0] = -1;
+	a->cast_stage = -1;
 	*automatic = (int)flags;
 	return 1;
 }
 int fight_cast(struct assets *a, const struct fight_state *s)
 {
+	int stage = a->stages ? (int)(s->arena < a->stages ? s->arena : 0) : -1;
 	if (a->cast[0][0] == (int)s->chr[0] && a->cast[0][1] == (int)s->pal[0] &&
-	    a->cast[1][0] == (int)s->chr[1] && a->cast[1][1] == (int)s->pal[1])
+	    a->cast[1][0] == (int)s->chr[1] && a->cast[1][1] == (int)s->pal[1] &&
+	    a->cast_stage == stage)
 		return 0;
 	a->images = a->effect_images;
 	a->pixels = a->effect_pixels;
+	a->rows = a->pack_rows;
+	a->spans = a->pack_spans;
+	a->stage_pixels = 0;
+	if (stage >= 0) {
+		struct need n = {0, 0, 0, 0};
+		uint32_t start = a->pixels;
+		expand_stage(a, (unsigned)stage, 1, &n);
+		a->stage_pixels = a->pixels - start;
+	}
+	a->cast_stage = stage;
 	for (int i = 0; i < 2; i++) {
 		const struct character *c = &a->chr[s->chr[i] < a->characters ? s->chr[i] : 0];
 		unsigned palette = c->palette[s->pal[i] ? 1 : 0];
