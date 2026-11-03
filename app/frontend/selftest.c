@@ -125,6 +125,12 @@ static void test_blit(void)
 		{ 320, 480, 90, 480, 320, 480, 1 },
 		{ 320, 480, 270, 160, 144, 160, 2 },  /* smaller, centered */
 		{ 320, 480, 270, 99, 77, 101, 3 },
+		{ 320, 480, 270, 480, 270, 480, 1 },  /* video, borders */
+		{ 320, 480, 90, 480, 270, 512, 1 },
+		{ 320, 480, 90, 99, 77, 101, 3 },
+		{ 320, 480, 270, 33, 47, 40, 4 },     /* partial blocks */
+		{ 320, 480, 90, 33, 47, 40, 4 },
+		{ 480, 320, 0, 160, 106, 256, 3 },
 	};
 	const int dpitch = 336;  /* wider than the mode, like a real pitch */
 	uint16_t *src = malloc(512 * 320 * 2);
@@ -222,6 +228,11 @@ static void test_blit(void)
 		blit_rotate(a, dpitch, 320, 480, 270, src, 256, 240, 160, 2, NULL);
 	log_msg("selftest: GBA blit %.3f ms per frame (host or emulator time)",
 		(now_ns() - t0) / 50 / 1e6);
+	t0 = now_ns();
+	for (int i = 0; i < 50; i++)
+		blit_rotate(a, dpitch, 320, 480, 270, src, 480, 480, 320, 1, NULL);
+	log_msg("selftest: 480x320 1x blit %.3f ms per frame (host or emulator "
+		"time)", (now_ns() - t0) / 50 / 1e6);
 	free(src);
 	free(a);
 	free(b);
