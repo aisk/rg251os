@@ -47,7 +47,7 @@
 
 一个包由 `assets/fighter/roster.json` 列出的多个清单组成，每个清单对应一张图集，也能单独打包测试。整个阵容的调色板索引帧常驻，开打时只把对战双方的（角色, 调色板）展开成 RGB565，加载时证明任意两人加特效都放得下。上限 32 个角色、4096 帧、每个角色 8 个必杀技和 4 种飞行道具，静态 BSS 约 23 MB（只有用到的页面占内存）。现在 7 个角色时每包约 2.8 MB，常驻内存（帧索引约 2 MiB、span 约 0.9 MiB）写进加载日志。整包打包约 40 秒（纯 Python 解 PNG）。
 
-阵容：KOF 2002 的 Terry、Chin、Chris、Mature、May Lee、Shermie、Vice，图集都是 Heatpark 提取、来自 Sprite Database，来源和 SHA256 在 `assets/fighter/README.md`。原像素 1:1，不缩放，站高从 Chin 约 88 px 到 Mature 约 112 px。每人都有同一套动作（站、走、跳、蹲、站防蹲防、站蹲受击、KO）和站蹲八个普通技，镜像对局时 P2 用图集里的另一套配色。只有 Terry 有必杀技。除 Terry 外的帧数据都是参照 Terry 估的，不是从原作测的；各清单的 `notes` 记了必杀技所在的图集行。音频仍是测试蜂鸣。
+阵容：KOF 2002 的 Terry、Chin、Chris、Mature、May Lee、Shermie、Vice（Heatpark 提取，来自 Sprite Database），加上侍魂 V Special 的霸王丸（the shirt ninja 和 Firejoker54 提取，Spriters Resource 现站拒绝脚本请求，取自 Wayback Machine 存档）。来源和 SHA256 在 `assets/fighter/README.md`。霸王丸站高约 110 px，只用持刀形态，有八个普通技（拳键为斩、脚键为踢）和弧月斩（623+斩）、旋风裂斩（236+斩，龙卷飞行道具），数值暂按 KOF 尺度估计，重斩更慢更痛；P2 配色会把刀刃高光一起变蓝。8 人的整包约 3.7 MB，霸王丸镜像对局展开约 1.5M 像素，接近 `MAX_PIXELS` 2M 的上限，以后加大体型角色要调。原像素 1:1，不缩放，站高从 Chin 约 88 px 到 Mature 约 112 px。每人都有同一套动作（站、走、跳、蹲、站防蹲防、站蹲受击、KO）和站蹲八个普通技，镜像对局时 P2 用图集里的另一套配色。只有 Terry 和霸王丸有必杀技。Chin 的防御帧已换成图集里的真防御帧（之前的受击帧其实是防御帧，也一起换成了真受击帧），锚点按 Zelgadis 的 MUGEN 包轴点换算；Chin 的站姿和蹲姿锚点相差约 22 px，站蹲切换会横移，记在 `chin.json` 的 notes。除 Terry 外的帧数据都是参照 Terry 估的，不是从原作测的；各清单的 `notes` 记了必杀技所在的图集行。音频仍是测试蜂鸣。
 
 判定和招式（P1 第 1 到 3 步）：受击框按帧给（姿势的属性，可复用另一帧，`[]` 为无敌），打击框按招式的步给，连续带打击框的步是一段，一段只命中一次。框以锚点为原点，x 朝前、y 朝下，朝左时镜像为 `x' = -(x+w)`。招式字段有 damage、chip、hitstun、blockstun、hitstop、pushback、block_pushback、guard（high/low/overhead）和 cancel；startup/active/recovery 和 reach 由加载器从步推导，`pack.py data` 打印帧数据表。时序规则写在 `fighter.c` 头注释：命中后双方冻结 hitstop 帧，推开按剩余量每帧推 1/4，被墙挡住的部分转给攻方。防御要求不在招式和受击硬直中、站在地上、按后；low 只能蹲防，overhead 只能站防。
 
@@ -164,7 +164,7 @@ python3 tools/fighter/report.py /path/to/log/boot-NNNN/
    4. （已完成）指令输入缓冲、取消、Terry 的三个必杀技和飞行道具。
    5. 投技、倒地和起身。
    选人和简单闯关已完成。之后是其他角色的必杀技、多局制和计时、可重放规则。
-5. **角色：能找到的都做进去。** 盘点结果在本机 `build/fighter/source/INVENTORY.md`（不提交）：Sprite Database 可直接导入的约 30 个（KOF 2002 约 11、KOF 2003 约 15、月华剑士 4），侍魂只有 4 张不完整的 SS4 小图，没有霸王丸；龙虎、饿狼 2/3、Real Bout、KOF 94–97 也没有，Spriters Resource 对脚本请求返回 403。优先导入 KOF02 的 Chris、Vice、Mature、Shermie、May Lee、Chin，KOF03 的 Iori、Joe 或 Mai，持刀角色用月华剑士的 Shinnosuke 和 Hibiki。已导入 KOF02 的 Chin、Chris、Mature、May Lee、Shermie、Vice（只有普通动作和八个普通技）。还在找更好的来源：Chin 的图集没有防御帧，现在借用了重拳起手和盘坐帧；侍魂霸王丸也还没有。不同作品保持原像素 1:1。
+5. **角色：能找到的都做进去。** 盘点结果在本机 `build/fighter/source/INVENTORY.md`（不提交）：Sprite Database 可直接导入的约 30 个（KOF 2002 约 11、KOF 2003 约 15、月华剑士 4），侍魂只有 4 张不完整的 SS4 小图，没有霸王丸；龙虎、饿狼 2/3、Real Bout、KOF 94–97 也没有，Spriters Resource 对脚本请求返回 403。优先导入 KOF02 的 Chris、Vice、Mature、Shermie、May Lee、Chin，KOF03 的 Iori、Joe 或 Mai，持刀角色用月华剑士的 Shinnosuke 和 Hibiki。已导入 KOF02 的 Chin、Chris、Mature、May Lee、Shermie、Vice（只有普通动作和八个普通技）。霸王丸已导入，Chin 的防御帧已修正。更多来源的调查在本机 `build/fighter/source/SOURCES2.md`：MUGEN 人物包适合提供锚点、帧序和判定框的初值（只采纳与图集逐像素一致的帧），Wayback 存档的 Spriters Resource 还有 KOF 94 到 99、龙虎、饿狼、月华等条目可逐个尝试。不同作品保持原像素 1:1。
 6. **数值体系（2026-11-03 设计）**：按[数值设计](fighter-stats.md)的分阶段实施推进，第一步是每角色属性、数值来源字段和以 KOF 2002 为参考尺度的系统档案。现有数值都是估计，不平衡优先、娱乐性优先。
 7. **有能实际打的内容后集中一次上机**：必须 `make image`、`make frontend-test` 零 warning 后再提交。同一次开机测 Max/Adaptive、真实对局负载、新 blit 计时、持续十分钟、恢复/休眠与主观手感和延迟。初始正常对战总工作目标 p99<12ms。
 
