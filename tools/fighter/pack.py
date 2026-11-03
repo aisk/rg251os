@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a FIGHTP09 content pack from ripped sprite sheets and their manifests.
+"""Build a FIGHTP10 content pack from ripped sprite sheets and their manifests.
 
 Each manifest (assets/fighter/<name>.json) describes one sheet and is the
 source of truth for it: every frame is a hand-checked sheet rectangle plus a
@@ -81,7 +81,11 @@ top-level keys such as "notes" are ignored):
               knockdown's fall (knocked off the feet until landing), down
               (lying, loops) and getup; without them fall is the ko
               animation minus its last step, down that last step and getup
-              the first crouch frame for 10 ticks.
+              the first crouch frame for 10 ticks. Normal throws use throw
+              (the thrower) and thrown (the one held); without them throw
+              is a generic grab, the stand_hp frames with the first active
+              one held until it lasts 30 ticks (no hitboxes), and thrown the
+              hurt animation.
               Moves: the eight normals (stand/crouch lp/hp/lk/hk) are fixed by
               name; any other name is a special. A special may have "name",
               shown in the command lists (A-Z, a-z, 0-9, space and "-", at
@@ -198,12 +202,19 @@ values itself), input {buffer, quarter (236/214 window), dragon (623),
 charge, grace, optional release (default 4)}, push_distance (bodies closer
 than this - 1 pixels are pushed apart to it) and guard_range (pixels).
 Optional: defense, weight (1000), height (mid), wakeup (ticks from landing in
-a knockdown until the fighter acts again, default 25), src, notes. hop, super_jump,
+a knockdown until the fighter acts again, default 25), throw (normal throws,
+every key optional: range, the body gap in pixels beyond push_distance a
+throw reaches, default 4; damage (before damage_scale) 100, pushback 40,
+hitstop 8; tech, the ticks after the grab in which the victim's HP or HK
+breaks it (0 none), default 6; tech_stun 12 and tech_push 24, both fighters'
+recovery and slide after a break; wakeup_safe 8 and stun_safe 0, ticks a
+fighter cannot be thrown after it rises from a knockdown or leaves hitstun or
+blockstun), src, notes. hop, super_jump,
 hyper_hop, chip, meters, mechanics, scaling, stun and guard are accepted for
 later steps and not packed.
 
 Pack layout, all little endian (the C loader in app/fighter/render.c checks it):
-  header     "FIGHTP09", u32 size, u32 FNV-1a of bytes 16..size, u32 flags
+  header     "FIGHTP10", u32 size, u32 FNV-1a of bytes 16..size, u32 flags
              (bit 0 automatic), u32 palettes, frames, characters, effects,
              systems, sparks, stages
   palette    u16 sheet, u16 n (1..256), n x u16 RGB565
@@ -221,11 +232,13 @@ Pack layout, all little endian (the C loader in app/fighter/render.c checks it):
              play width; 11 x u16 spark + 1 (0 none) for hit_light, hit_heavy,
              hit_special, guard, slash_light, slash_heavy, slash_special,
              slash_guard, blood_light, blood_heavy, blood_special; u16
-             wakeup (ticks from landing in a knockdown to acting again)
+             wakeup (ticks from landing in a knockdown to acting again);
+             9 x u16 throw range, damage, pushback, hitstop, tech,
+             tech_stun, tech_push, wakeup_safe, stun_safe
   character  u8 name length, name bytes; u16 normal palette, alternate
              palette; u16 system, u16 override mask (bit per stat), 11 stats
              x u16 as above (0 where the mask bit is clear); u16 steps, boxes,
-             moves, projectiles; 13 actions x (u16 first step, u16 steps);
+             moves, projectiles; 15 actions x (u16 first step, u16 steps);
              moves x 20 u16 (kind 0 normal or 1 special, trigger or motion
              (0 236, 1 214, 2 623, 3 [4]6, 4 [2]8, follow-ups also 5 any,
              6 5, 7 8, 8 2, 9 6, 10 4), buttons, first step, steps, damage,
@@ -264,12 +277,21 @@ import struct
 import sys
 import zlib
 
-MAGIC = b'FIGHTP09'
+MAGIC = b'FIGHTP10'
 # Order matters: these are the C enums in app/fighter/fighter.h.
 ACTIONS = ['idle', 'walk_forward', 'walk_back', 'jump', 'guard', 'hurt', 'ko',
-           'crouch', 'crouch_guard', 'crouch_hurt', 'fall', 'down', 'getup']
-# Knockdown actions a manifest may leave out (see Character.knockdown_actions).
-DERIVED_ACTIONS = ['fall', 'down', 'getup']
+           'crouch', 'crouch_guard', 'crouch_hurt', 'fall', 'down', 'getup', 'throw',
+           'thrown']
+# Knockdown and throw actions a manifest may leave out (see
+# Character.derived_actions).
+DERIVED_ACTIONS = ['fall', 'down', 'getup', 'throw', 'thrown']
+# A derived throw lasts at least this many ticks (its stand HP frames, the
+# first active one held longer).
+THROW_TICKS = 30
+# Normal throws (systems.json "throw"): key -> (default, low, high).
+THROW_KEYS = {'range': (4, 0, 64), 'damage': (100, 0, 1500), 'pushback': (40, 0, 120),
+              'hitstop': (8, 0, 30), 'tech': (6, 0, 15), 'tech_stun': (12, 1, 120),
+              'tech_push': (24, 0, 120), 'wakeup_safe': (8, 0, 60), 'stun_safe': (0, 0, 60)}
 # Default get-up length (ticks of the crouch frame) when a character has no
 # getup action.
 GETUP_TICKS = 10
@@ -758,7 +780,8 @@ class Systems:
         need = {'life', 'damage_scale', 'walk', 'walk_back', 'jump', 'stun_table',
                 'hitstop_table', 'input', 'push_distance', 'guard_range'}
         known = need | {'defense', 'weight', 'height', 'src', 'notes', 'wall_margin',
-                        'play_width', 'slash', 'effects', 'wakeup'} | LATER_SYSTEM_KEYS
+                        'play_width', 'slash', 'effects', 'wakeup', 'throw'} | \
+            LATER_SYSTEM_KEYS
         if not isinstance(p, dict) or need - set(p) or set(p) - known:
             raise ValueError(f'{what}: needs {sorted(need)}, may have '
                              f'{sorted(known - need)}')
@@ -790,6 +813,11 @@ class Systems:
                                                                f'{what}: {table} {cls}')
         if 'src' in p:
             check_src(p['src'], what, set(p) - {'src', 'notes'}, {})
+        throw = p.get('throw', {})
+        if not isinstance(throw, dict) or set(throw) - set(THROW_KEYS):
+            raise ValueError(f'{what}: throw is {{{", ".join(THROW_KEYS)}}} (all optional)')
+        throw = {k: check_int(throw.get(k, d), lo, hi, f'{what}: throw {k}')
+                 for k, (d, lo, hi) in THROW_KEYS.items()}
         effects = p.get('effects', {})
         if not isinstance(effects, dict) or set(effects) - set(EFFECT_KEYS) or not all(
                 isinstance(v, str) and v.count('.') == 1 for v in effects.values()):
@@ -810,7 +838,7 @@ class Systems:
                 'guard_range': check_int(p['guard_range'], 0, SCREEN_WIDTH,
                                          f'{what}: guard_range'),
                 'wakeup': check_int(p.get('wakeup', 25), 1, MAX_WAKEUP, f'{what}: wakeup'),
-                'classes': classes}
+                'throw': throw, 'classes': classes}
 
     def of(self, character, written):
         """The system a character uses: its own "system", else the assigned
@@ -844,6 +872,7 @@ class Systems:
                     raise ValueError(f'systems.json {n}: effect {k} names unknown spark anim {ref}')
                 out += struct.pack('<H', sparks[ref] + 1 if ref is not None else 0)
             out += struct.pack('<H', p['wakeup'])
+            out += b''.join(struct.pack('<H', p['throw'][k]) for k in THROW_KEYS)
         return out
 
 
@@ -1003,7 +1032,7 @@ class Character:
         given = ch['actions']
         if not set(ACTIONS) - set(DERIVED_ACTIONS) <= set(given) or set(given) - set(ACTIONS):
             raise ValueError(f'{name}: needs the actions {ACTIONS} ({DERIVED_ACTIONS} optional)')
-        actions = {**self.knockdown_actions(given), **given}
+        actions = {**self.derived_actions(given, ch['moves']), **given}
         for action in ACTIONS:
             self.actions.append(sequence(actions[action], f'{name} {action}', 'action'))
         projectiles = ch.get('projectiles', {})
@@ -1126,14 +1155,32 @@ class Character:
             self.moves[k] = self.moves[k][:20] + (self.moves[k][20] | FLAG_KNOCKDOWN * knock,)
 
     @staticmethod
-    def knockdown_actions(given):
-        """fall, down and getup when a manifest has none of its own: fall is
+    def derived_actions(given, moves):
+        """The knockdown and throw actions a manifest has none of: fall is
         the KO animation without its last step, down that last step (the
-        lying frame) and getup the first crouch frame for GETUP_TICKS."""
+        lying frame) and getup the first crouch frame for GETUP_TICKS; throw
+        is the generic grab, the stand HP frames (their hurtboxes, no hits)
+        with the first active one held until it lasts THROW_TICKS, and
+        thrown (held by a throw) the hurt animation."""
         ko, crouch = given['ko'], given['crouch']
         lying = ko[-1][:1] + [1]
+        grab = []
+        for st in moves.get('stand_hp', {}).get('steps', []):
+            if not isinstance(st, list) or len(st) < 2:
+                raise ValueError('stand_hp: a step is [frame, ticks] or [frame, ticks, {...}]')
+            extra = st[2] if len(st) > 2 and isinstance(st[2], dict) else {}
+            grab.append([st[0], st[1], {'hurt': extra['hurt']}] if 'hurt' in extra
+                        else [st[0], st[1]])
+        if not grab:
+            raise ValueError('stand_hp: no steps for the derived throw')
+        hold = next((i for i, st in enumerate(moves['stand_hp']['steps'])
+                     if len(st) > 2 and isinstance(st[2], dict) and st[2].get('hit')), 0)
+        total = sum(st[1] for st in grab if isinstance(st[1], int))
+        if total < THROW_TICKS:
+            grab[hold] = [grab[hold][0], grab[hold][1] + THROW_TICKS - total, *grab[hold][2:]]
         return {'fall': ko[:-1] or [lying], 'down': [lying],
-                'getup': [[crouch[0][0], GETUP_TICKS]]}
+                'getup': [[crouch[0][0], GETUP_TICKS]], 'throw': grab,
+                'thrown': [list(st) for st in given['hurt']]}
 
     def frames(self):
         return {s[0] for s in self.steps}

@@ -1,6 +1,7 @@
-/* Standard libretro fighter core: FIGHTP09 content, input, deterministic
- * FGSTAT12 saves, audio and software frames. Timing below measures work only;
- * the frontend owns pacing. Logs the system profiles, the roster with each
+/* Standard libretro fighter core: FIGHTP10 content, input, deterministic
+ * FGSTAT13 saves, audio and software frames. Timing below measures work only;
+ * the frontend owns pacing. Logs the system profiles (wake-up and throw
+ * rules), the roster with each
  * character's system and resolved stats, every move's frame data and class
  * (specials with their name)
  * (follow-ups with their parent and window) and the resident memory at
@@ -15,8 +16,9 @@
  * each scene (0 = two fighters, 1-3 = +8, +24, +48 requested alpha/additive
  * effects, capped by the per-frame effect pixel budget) every 600 runs,
  * also with debug off: logic/render/audio/cache times, how many effects
- * were drawn of those requested, and the ladder, special/clash and max
- * combo counters; each KO logs the round with both lives and max combos.
+ * were drawn of those requested, and the ladder, special/clash, throw/tech
+ * and max combo counters; each KO logs the round with both lives, max
+ * combos and the throw counts.
  *
  * Sound comes from the bank next to the content (<pack>.fightsnd, found
  * from retro_game_info's path; audio.c): after each unpaused tick the rule
@@ -38,7 +40,9 @@
  * A (right) heavy kick; hold DOWN for the crouching version. Specials are
  * motions plus a punch (Terry: 236 Power Wave, 214 Burn Knuckle, hold down
  * then up Rising Tackle; Iori's 214 Aoi Hana takes 214+P twice more as
- * it hits). Back guards (down-back guards low), UP jumps, L
+ * it hits). Forward or back with X or A next to the opponent throws it
+ * that way; X or A right after being grabbed breaks the throw. Back guards
+ * (down-back guards low), UP jumps, L
  * toggles the hurt/hit box overlay, R cycles the stress scene, START
  * pauses (showing P1's command list); A or B skips the KO screen. In the
  * select screen the d-pad moves, any attack button picks, R cycles the CPU
@@ -189,10 +193,11 @@ static void report(void)
 		       state.cam, sample_count);
 		logger(RETRO_LOG_INFO,
 		       "fight: tick %u round %u hits %u guards %u specials %u clashes %u "
-		       "max combo %u/%u difficulty %s mode %u run %u stage %u beaten %08x %s vs "
-		       "%s; frontend perf measures rotate/present/audio output\n",
+		       "throws %u techs %u max combo %u/%u difficulty %s mode %u run %u stage %u "
+		       "beaten %08x %s vs %s; frontend perf measures rotate/present/audio output\n",
 		       state.tick, state.round, state.hits, state.guards, state.specials,
-		       state.clashes, state.best[0], state.best[1], level_names[state.level],
+		       state.clashes, state.throws, state.techs, state.best[0], state.best[1],
+		       level_names[state.level],
 		       state.mode, state.run,
 		       state.stage, state.beaten, assets.chr[state.chr[0]].name,
 		       assets.chr[state.chr[1]].name);
@@ -422,10 +427,15 @@ bool retro_load_game(const struct retro_game_info *g)
 			const struct stats *st = &sy->stats;
 			logger(RETRO_LOG_INFO,
 			       "fight: system %u %s damage scale %u push %d guard range %d "
-			       "input buffer/236/623/charge/grace/release %u/%u/%u/%u/%u/%u\n",
+			       "input buffer/236/623/charge/grace/release %u/%u/%u/%u/%u/%u "
+			       "wakeup %u throw range %u damage %u push %u stop %u tech %u "
+			       "(stun %u push %u) safe wakeup/stun %u/%u\n",
 			       k, sy->name, sy->damage_scale, st->push, st->guard_range,
 			       st->buffer, st->quarter, st->dragon, st->charge, st->grace,
-			       st->release);
+			       st->release, st->wakeup, sy->throw.range, sy->throw.hit.damage,
+			       sy->throw.hit.pushback, sy->throw.hit.hitstop, sy->throw.tech,
+			       sy->throw.tech_stun, sy->throw.tech_push, sy->throw.wakeup_safe,
+			       sy->throw.stun_safe);
 		}
 		for (unsigned c = 0; c < assets.characters; c++) {
 			const struct character *ch = &assets.chr[c];
@@ -513,10 +523,11 @@ void retro_run(void)
 	if (!old_ended && state.ended && logger)
 		logger(RETRO_LOG_INFO,
 		       "fight: KO stage %u round %u %s vs %s life %d/%d, max combo %u/%u, "
-		       "difficulty %s, tick %u\n",
+		       "throws %u techs %u, difficulty %s, tick %u\n",
 		       state.stage, state.round + 1, assets.chr[state.chr[0]].name,
 		       assets.chr[state.chr[1]].name, state.p[0].hp, state.p[1].hp, state.best[0],
-		       state.best[1], level_names[state.level], state.tick);
+		       state.best[1], state.throws, state.techs, level_names[state.level],
+		       state.tick);
 	if (state.automatic && state.tick != old_tick && ++benchmark_runs == 36000 &&
 	    logger)
 		logger(
@@ -595,7 +606,7 @@ bool retro_serialize(void *data, size_t size)
 	uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	fight_encode(&state, w);
-	memcpy(p, "FGSTAT12", 8);
+	memcpy(p, "FGSTAT13", 8);
 	put32(p + 8, assets.hash);
 	put32(p + 12, state.automatic);
 	for (int i = 0; i < STATE_WORDS; i++)
@@ -608,7 +619,7 @@ bool retro_unserialize(const void *data, size_t size)
 	const uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	if (!loaded || !p || size != retro_serialize_size() ||
-	    memcmp(p, "FGSTAT12", 8) || get32(p + 8) != assets.hash ||
+	    memcmp(p, "FGSTAT13", 8) || get32(p + 8) != assets.hash ||
 	    get32(p + 12) != state.automatic)
 		return false;
 	for (int i = 0; i < STATE_WORDS; i++)

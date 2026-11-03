@@ -2,7 +2,8 @@
  * jumps, crouching, data-driven normals and specials with an input buffer,
  * motion and charge commands, cancels, projectiles with clashes, hurt/hit
  * boxes from the pack, hitstop, hitstun, blockstun, high/low/overhead guard,
- * pushback with corner transfer, knockdown and wake-up, KO, combo counts,
+ * pushback with corner transfer, knockdown and wake-up, normal throws with
+ * techs, KO, combo counts,
  * AI (with specials), the
  * camera and walls, hit sparks, screen shake, the KO flash, sound events,
  * the select, result and clear screens, the READY/FIGHT round start and the
@@ -56,7 +57,9 @@
  * core option): the levels table sets the AI's guard
  * rate, wrong-height guards and guard reaction, how often it starts
  * specials and normals, its follow-ups, Hard's cancels of connected
- * normals into motion specials, and on Easy the ladder CPU's damage (75%).
+ * normals into motion specials, how many of its plans walk in to throw,
+ * how often and how soon it breaks a throw, and on Easy the ladder CPU's
+ * damage (75%).
  * Normal is the original AI. Everything reads the state's rng and tick, so
  * replays and states stay deterministic.
  * Combos: an unguarded hit (strike or projectile) on a defender still in
@@ -114,6 +117,22 @@
  * not attack a downed opponent, walks in and (above Easy) presses its
  * planned normal to land as the opponent rises. A KO plays the KO
  * animation instead.
+ * Throws: forward or back (numpad 6 or 4, not diagonal) with HP or HK,
+ * when the buffered stand HP/HK would start from neutral on the ground and
+ * the opponent was within body + range pixels (body the larger push, range
+ * the thrower's system) and throwable as the tick began, grabs instead on
+ * that tick, before any strike lands (two grabs on one tick break each
+ * other). Throwable: on the ground, not in a prejump, hitstun, blockstun,
+ * a knockdown or a throw, and past its safe ticks (wakeup_safe after rising
+ * from a knockdown, stun_safe after hitstun or blockstun ends; both from
+ * the fighter's own system). The one held faces the thrower body pixels in
+ * front of it; both show THROW/THROWN, nothing hits or pushes them, and
+ * their elapsed counts together. HP or HK by the one held in the first tech
+ * ticks after the grab breaks it: both recover tech_stun ticks in the guard
+ * pose, sliding tech_push pixels apart. Otherwise, on the tick the
+ * thrower's elapsed reaches its THROW total, the one held takes the
+ * system's throw hit (class throw, unguardable, it knocks down; a back
+ * throw first moves it behind the thrower and sends it the other way).
  * Cancels: a normal whose hit connected (hit or block) can be cancelled
  * into a special (cancel "special") or another normal (cancel "chain")
  * while its elapsed is inside startup + active; the buffered move starts on
@@ -165,12 +184,12 @@ static const unsigned button_bit[4] = {BUTTON_HK, BUTTON_HP, BUTTON_LK, BUTTON_L
  * cancelled into a motion special cancel times in 4; its hits deal damage
  * per mille (the ladder's CPU only). */
 static const struct level_ai {
-	uint8_t guard, wrong, react, hit_follow, whiff_follow, cancel;
+	uint8_t guard, wrong, react, hit_follow, whiff_follow, cancel, tech, tech_at, grab;
 	uint16_t special, press, damage;
 } levels[LEVELS] = {
-    {14, 6, 4, 2, 4, 0, 128, 16, 750},
-    {22, 4, 0, 1, 2, 0, 64, 8, 1000},
-    {28, 1, 0, 1, 0, 3, 24, 4, 1000},
+    {14, 6, 4, 2, 4, 0, 6, 4, 1, 128, 16, 750},
+    {22, 4, 0, 1, 2, 0, 12, 3, 2, 64, 8, 1000},
+    {28, 1, 0, 1, 0, 3, 20, 2, 3, 24, 4, 1000},
 };
 static int clamp(int x, int lo, int hi) { return x < lo ? lo : x > hi ? hi : x; }
 static uint32_t random_next(struct fight_state *s)
@@ -411,6 +430,34 @@ static int lying(const struct fighter *p, const struct character *c)
 {
 	return p->down == LYING && p->elapsed < lie_ticks(c);
 }
+/* ---- normal throws ---- */
+static const struct throw_rule *rule(const struct fight_state *s, const struct assets *a, int i)
+{
+	return &a->sys[who(s, a, i)->system].throw;
+}
+static int throwing(const struct fighter *p)
+{
+	return p->grab == GRAB_FORWARD || p->grab == GRAB_BACK;
+}
+/* Can q be thrown: standing or crouching on the ground (not in a prejump),
+ * out of hitstun, blockstun, knockdowns and throws, and past its safe
+ * ticks. */
+static int throwable(const struct fighter *q)
+{
+	return q->hp && grounded(q) && !q->squat && !q->stun && !q->down && !q->grab && !q->safe;
+}
+/* Body distance: the larger push of the two fighters. */
+static int body(const struct fight_state *s, const struct assets *a)
+{
+	int p0 = who(s, a, 0)->stats.push, p1 = who(s, a, 1)->stats.push;
+	return p0 > p1 ? p0 : p1;
+}
+/* Is fighter i's opponent within its throw range and throwable? */
+static int in_throw_range(const struct fight_state *s, const struct assets *a, int i)
+{
+	const struct fighter *p = &s->p[i], *q = &s->p[1 - i];
+	return p->hp && throwable(q) && abs(px(q) - px(p)) <= body(s, a) + rule(s, a, i)->range;
+}
 unsigned fight_pose(const struct fight_state *s, const struct assets *a, int i)
 {
 	const struct fighter *p = &s->p[i];
@@ -423,6 +470,9 @@ unsigned fight_pose(const struct fight_state *s, const struct assets *a, int i)
 		return lying(p, c) ? step_at(a, &c->action[DOWN], (uint32_t)p->elapsed, 1, NULL)
 				   : step_at(a, &c->action[GETUP],
 					     (uint32_t)(p->elapsed - lie_ticks(c)), 0, NULL);
+	if (p->grab)
+		return step_at(a, &c->action[throwing(p) ? THROW : THROWN], (uint32_t)p->elapsed, 0,
+			       NULL);
 	if (p->move)
 		return step_at(a, &c->move[p->move - 1].anim, (uint32_t)p->elapsed, 0, NULL);
 	int low = p->crouch && grounded(p);
@@ -536,10 +586,19 @@ static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
 		 away = d > 0 ? KEY(LEFT) : KEY(RIGHT);
 	uint32_t r = random_next(s);
 	const struct level_ai *lv = &levels[s->level];
-	if (p->stun || p->down || !q->hp)
+	if (p->stun || p->down || p->grab || !q->hp)
 		p->plan = p->plan_tick = 0;
 	if (p->down)
 		return 0;
+	/* Held by a throw: break it lv->tech times in 32 (decided once per
+	 * throw), pressing HP lv->tech_at ticks after the grab. */
+	if (p->grab) {
+		uint32_t h = ((s->tick - (uint32_t)p->elapsed) * 2654435761u + (unsigned)i) >> 27;
+		return p->grab == GRAB_HELD && h < lv->tech && p->elapsed == lv->tech_at &&
+				       lv->tech_at < rule(s, a, 1 - i)->tech
+			   ? KEY(X)
+			   : 0;
+	}
 	/* Ticks until a knocked-down opponent acts again (-1: it is up). */
 	int waking = q->down == LYING ? down_ticks(oc) - q->elapsed : q->down ? 255 : -1;
 	if (p->plan) {
@@ -644,10 +703,18 @@ static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
 	/* Each 29-tick window plans one normal: walk in until its hitbox can
 	 * reach the opponent's body, then press it once. A knocked-down
 	 * opponent cannot be hit: walk in and wait, and above Easy press so
-	 * the hit lands as it gets up (a meaty). */
+	 * the hit lands as it gets up (a meaty). lv->grab windows in 8 (with
+	 * the opponent up) plan a throw instead: walk into throw range and
+	 * throw forward, or now and then back, with HP or HK. */
 	unsigned window = (s->tick + (unsigned)i * 17) / 29, plan = window * 2654435761u >> 24;
 	int button = (int)(plan & 3), low = (int)(plan >> 2) & 1;
 	const struct move *m = &c->move[strength[button] + (low ? CROUCH_LP : 0)];
+	if (waking < 0 && ((plan >> 3) & 7) < lv->grab) {
+		if (!p->move && !p->stun && grounded(p) && in_throw_range(s, a, i))
+			return (plan & 0x40 && plan & 0x80 ? away : toward) |
+			       (plan & 1 ? KEY(A) : KEY(X));
+		return dist > body(s, a) + rule(s, a, i)->range ? toward : 0;
+	}
 	uint32_t key = dist > m->reach + 20 ? toward : 0;
 	int press = waking < 0 ? r % lv->press == 0
 			       : s->level != LEVEL_EASY && waking <= m->startup + 1;
@@ -799,9 +866,20 @@ static void launch(struct fight_state *s, const struct assets *a, int i, unsigne
 			return;
 		}
 }
-/* One fighter's tick before contacts; returns 1 if it was frozen. */
+/* A normal throw begins (forward or back): it takes the opponent once
+ * combat() has updated both fighters. */
+static void begin_throw(struct fight_state *s, const struct assets *a, int i, int back)
+{
+	struct fighter *p = &s->p[i];
+	p->grab = back ? GRAB_BACK : GRAB_FORWARD;
+	p->elapsed = p->hit = p->block = p->squat = p->walk = p->crouch = p->clock = 0;
+	p->buffer = p->age = 0;
+	sound(s, a, SOUND_WHOOSH_HEAVY, i, 0);
+}
+/* One fighter's tick before contacts; returns 1 if it was frozen. reach:
+ * the opponent was in throw range and throwable as the tick began. */
 static int update(struct fight_state *s, const struct assets *a, int i, uint32_t keys,
-		  int threat)
+		  int threat, int reach)
 {
 	struct fighter *p = &s->p[i], *q = &s->p[1 - i];
 	const struct character *c = who(s, a, i);
@@ -819,13 +897,29 @@ static int update(struct fight_state *s, const struct assets *a, int i, uint32_t
 		p->freeze--;
 		return 1;
 	}
-	/* Knocked down: presses stay buffered (a press in the last buffer
-	 * ticks of the get-up comes out as the fighter rises). */
-	if (p->down && knocked(s, a, i)) {
-		if (p->buffer && ++p->age > c->stats.buffer)
-			p->buffer = p->age = 0;
-		p->x = wall(s, a, p->x);
+	if (p->safe)
+		p->safe--;
+	/* In a throw: the one held breaks it with HP or HK in the thrower's
+	 * tech window (combat() resolves it); nothing is buffered. */
+	if (p->grab) {
+		if (p->grab == GRAB_HELD && (edge & (KEY(A) | KEY(X))) &&
+		    p->elapsed < rule(s, a, 1 - i)->tech)
+			p->grab = GRAB_TECH;
+		p->buffer = p->age = 0;
+		age(p);
 		return 0;
+	}
+	/* Knocked down: presses stay buffered (a press in the last buffer
+	 * ticks of the get-up comes out as the fighter rises, which starts
+	 * its throw-safe ticks). */
+	if (p->down) {
+		if (knocked(s, a, i)) {
+			if (p->buffer && ++p->age > c->stats.buffer)
+				p->buffer = p->age = 0;
+			p->x = wall(s, a, p->x);
+			return 0;
+		}
+		p->safe = rule(s, a, i)->wakeup_safe;
 	}
 	if (p->move && p->buffer && cancellable(c, p, p->buffer - 1))
 		start(s, a, i, p->buffer - 1);
@@ -837,8 +931,10 @@ static int update(struct fight_state *s, const struct assets *a, int i, uint32_t
 		p->buffer = p->age = 0;
 	if (p->stun) {
 		age(p);
-		if (!--p->stun)
+		if (!--p->stun) {
 			p->block = p->elapsed = 0;
+			p->safe = rule(s, a, i)->stun_safe;
+		}
 	}
 	if (p->slide)
 		slide(s, a, p, q);
@@ -850,7 +946,13 @@ static int update(struct fight_state *s, const struct assets *a, int i, uint32_t
 		if (ground)
 			p->face = q->x >= p->x ? 1 : -1;
 		p->crouch = ground && !p->squat && (keys & KEY(DOWN));
-		if (p->buffer && ground) {
+		/* Forward or back with HP or HK near a throwable opponent
+		 * throws (on this first tick); otherwise it is the normal. */
+		int n = numpad(direction(keys), p->face);
+		if (p->buffer && ground && reach && (n == 4 || n == 6) &&
+		    (p->buffer - 1 == STAND_HP || p->buffer - 1 == STAND_HK)) {
+			begin_throw(s, a, i, n == 4);
+		} else if (p->buffer && ground) {
 			start(s, a, i, p->buffer - 1);
 		} else if (p->squat) {
 			if (!--p->squat) {
@@ -903,7 +1005,7 @@ static int update(struct fight_state *s, const struct assets *a, int i, uint32_t
 static int contact(const struct fight_state *s, const struct assets *a, int i, int at[2])
 {
 	const struct fighter *p = &s->p[i], *q = &s->p[1 - i];
-	if (!p->move || !q->hp)
+	if (!p->move || !q->hp || q->grab)
 		return 0;
 	/* A fighter knocked down is out of reach, except lying for OTG moves. */
 	if (q->down && !(lying(q, who(s, a, 1 - i)) &&
@@ -929,7 +1031,7 @@ static int shot_hits_body(const struct fight_state *s, const struct assets *a,
 			  const struct shot *sh, int i, int at[2])
 {
 	const struct fighter *q = &s->p[i];
-	if (q->down)
+	if (q->down || q->grab)
 		return 0;
 	const struct step *hit = &a->step[shot_step(s, a, sh)],
 			  *body = &a->step[fight_pose(s, a, i)];
@@ -1066,6 +1168,60 @@ static void count_hit(struct fight_state *s, int i, int stunned)
 		s->best[i] = s->combo[i];
 }
 static int in_hitstun(const struct fighter *p) { return p->stun && p->block != 1; }
+/* Fighter i's throw takes the other: held facing it, body distance in
+ * front, whatever it was doing dropped. */
+static void seize(struct fight_state *s, const struct assets *a, int i)
+{
+	struct fighter *p = &s->p[i], *q = &s->p[1 - i];
+	q->grab = GRAB_HELD;
+	q->elapsed = q->move = q->hit = q->stun = q->block = q->squat = q->walk = q->crouch = 0;
+	q->buffer = q->age = q->clock = q->freeze = q->slide = q->corner = q->y = q->vy = 0;
+	p->freeze = p->slide = p->corner = 0;
+	q->face = -p->face;
+	q->x = wall(s, a, p->x + p->face * QUARTER(body(s, a)));
+}
+/* A broken throw (or two at once, rule of side i): both fighters recover
+ * in the guard pose for tech_stun ticks, sliding tech_push pixels apart. */
+static void tech(struct fight_state *s, const struct assets *a, int i)
+{
+	const struct throw_rule *t = rule(s, a, i);
+	for (int j = 0; j < 2; j++) {
+		struct fighter *f = &s->p[j];
+		f->grab = GRAB_NONE;
+		f->move = f->hit = f->squat = f->walk = f->crouch = f->buffer = f->age = 0;
+		f->stun = t->tech_stun;
+		f->block = 1;
+		f->elapsed = 0;
+		f->slide = -f->face * t->tech_push;
+		f->corner = 0;
+	}
+	s->techs++;
+	sound(s, a, SOUND_GUARD, i, 0);
+}
+/* Fighter i's throw ends: the one held takes the throw hit (it knocks
+ * down) at the centre of its first hurtbox, thrown forward, or from behind
+ * the thrower the other way. */
+static void release(struct fight_state *s, const struct assets *a, int i, int scale)
+{
+	struct fighter *p = &s->p[i], *q = &s->p[1 - i];
+	const struct hit *h = &rule(s, a, i)->hit;
+	const struct step *b = &a->step[fight_pose(s, a, 1 - i)];
+	int back = p->grab == GRAB_BACK, alive = q->hp > 0, at[2] = {px(q), GROUND + q->y - 64};
+	if (b->hurt) {
+		struct area r = fight_box(&a->box[b->box], px(q), q->y, q->face);
+		at[0] = r.x + r.w / 2;
+		at[1] = r.y + r.h / 2;
+	}
+	p->grab = q->grab = GRAB_NONE;
+	p->elapsed = q->elapsed = 0;
+	if (back)
+		q->x = wall(s, a, p->x - p->face * QUARTER(body(s, a)));
+	int dir = back ? -p->face : p->face;
+	struck(s, p, q, who(s, a, 1 - i), h, 0, dir, 0, scale, 1);
+	count_hit(s, i, 0);
+	react(s, a, i, h, 0, 0, 0, at, dir, alive && !q->hp);
+	s->throws++;
+}
 static void shots_move(struct fight_state *s, const struct assets *a)
 {
 	for (int k = 0; k < MAX_PROJECTILES; k++) {
@@ -1084,7 +1240,7 @@ static void shots_move(struct fight_state *s, const struct assets *a)
 static void combat(struct fight_state *s, const struct assets *a, const uint32_t keys[2], int cpu)
 {
 	const int scale[2] = {1000, cpu ? levels[s->level].damage : 1000};
-	int threat[2], frozen[2];
+	int threat[2], frozen[2], reach[2] = {in_throw_range(s, a, 0), in_throw_range(s, a, 1)};
 	/* Both fighters see the other's state from the start of the tick. */
 	for (int i = 0; i < 2; i++) {
 		const struct fighter *p = &s->p[i], *q = &s->p[1 - i];
@@ -1097,7 +1253,24 @@ static void combat(struct fight_state *s, const struct assets *a, const uint32_t
 	}
 	shots_move(s, a);
 	for (int i = 0; i < 2; i++)
-		frozen[i] = update(s, a, i, keys[i], threat[i]);
+		frozen[i] = update(s, a, i, keys[i], threat[i], reach[i]);
+	/* Throws, before any strike: a throw begun this tick (elapsed 0) takes
+	 * the opponent, two at once break each other; a held fighter's tech
+	 * press breaks the throw, else it is released once the thrower's THROW
+	 * animation is over. */
+	int fresh[2] = {throwing(&s->p[0]) && !s->p[0].elapsed,
+			throwing(&s->p[1]) && !s->p[1].elapsed};
+	if (fresh[0] && fresh[1])
+		tech(s, a, 0);
+	for (int i = 0; i < 2; i++) {
+		struct fighter *p = &s->p[i];
+		if (fresh[i] && !fresh[1 - i])
+			seize(s, a, i);
+		else if (throwing(p) && s->p[1 - i].grab == GRAB_TECH)
+			tech(s, a, i);
+		else if (throwing(p) && p->elapsed >= who(s, a, i)->action[THROW].total)
+			release(s, a, i, scale[i]);
+	}
 	/* Who is still in hitstun as contacts land (a combo goes on). */
 	int stunned[2] = {in_hitstun(&s->p[0]), in_hitstun(&s->p[1])};
 	/* Resolve every contact from the same state before changing any. */
@@ -1166,7 +1339,7 @@ static void combat(struct fight_state *s, const struct assets *a, const uint32_t
 	struct fighter *p0 = &s->p[0], *p1 = &s->p[1];
 	int push0 = who(s, a, 0)->stats.push, push1 = who(s, a, 1)->stats.push,
 	    push = push0 > push1 ? push0 : push1;
-	if (grounded(p0) && grounded(p1) && abs(p0->x - p1->x) < QUARTER(push - 1)) {
+	if (grounded(p0) && grounded(p1) && !p0->grab && abs(p0->x - p1->x) < QUARTER(push - 1)) {
 		int mid = (p0->x + p1->x) / 2, f = p0->x <= p1->x ? 1 : -1;
 		p0->x = wall(s, a, mid - f * 2 * push);
 		p1->x = wall(s, a, mid + f * 2 * push);
@@ -1741,12 +1914,14 @@ static void number(char *out, unsigned v)
 	*out++ = (char)('0' + v % 10);
 	*out = 0;
 }
-/* Which fighter is drawn on top: the one in a move (the more recent move if
- * both are), else the one not stunned, else player 2 as before, so an attack is never
+/* Which fighter is drawn on top: the thrower in a throw, the one in a move
+ * (the more recent move if both are), else the one not stunned, else player 2 as before, so an attack is never
  * hidden behind the defender. Derived from the state, nothing is stored. */
 static int front_fighter(const struct fight_state *s)
 {
 	const struct fighter *p = s->p, *q = s->p + 1;
+	if (p->grab)
+		return throwing(q);
 	if (p->move && q->move)
 		return q->elapsed < p->elapsed;
 	if (p->move || q->move)
@@ -1943,7 +2118,7 @@ hud:
 		pause_panel(out, s, a);
 }
 /* ---- state words ---- */
-#define FIGHTER_WORDS 28
+#define FIGHTER_WORDS 30
 #define SHOT_WORDS 6
 #define GLOBAL_WORDS 19
 #define SHOTS_AT (GLOBAL_WORDS + 2 * FIGHTER_WORDS)
@@ -1955,23 +2130,25 @@ hud:
 #define SPARK_WORDS 5
 #define SPARKS_AT (EXTRA_AT + 4)
 #define SOUNDS_AT (SPARKS_AT + SPARK_SLOTS * SPARK_WORDS)
-/* Then combo, shown, show and best per side, the select list flag and the
- * difficulty. */
+/* Then combo, shown, show and best per side, the select list flag, the
+ * difficulty and the throw and tech counts. */
 #define COMBO_AT (SOUNDS_AT + 1 + MAX_SOUND_EVENTS)
 #define LIST_AT (COMBO_AT + 8)
 #define LEVEL_AT (LIST_AT + 1)
-#define USED_WORDS (LEVEL_AT + 1)
+#define THROWS_AT (LEVEL_AT + 1)
+#define USED_WORDS (THROWS_AT + 2)
 static void fighter_fields(struct fighter *p, int32_t *v[FIGHTER_WORDS])
 {
 	int32_t *f[] = {&p->x,	   &p->y,     &p->vy,	     &p->hp,	&p->face,  &p->walk,
 			&p->block, &p->crouch, &p->move,     &p->elapsed, &p->hit,   &p->stun,
 			&p->freeze, &p->slide, &p->keys,     &p->corner, &p->squat, &p->buffer,
-			&p->age,   &p->plan,   &p->plan_tick, &p->clock, &p->down};
-	for (int k = 0; k < 23; k++)
+			&p->age,   &p->plan,   &p->plan_tick, &p->clock, &p->down,  &p->grab,
+			&p->safe};
+	for (int k = 0; k < 25; k++)
 		v[k] = f[k];
-	v[23] = (int32_t *)(void *)&p->charge;
+	v[25] = (int32_t *)(void *)&p->charge;
 	for (int k = 0; k < HISTORY / 8; k++)
-		v[24 + k] = (int32_t *)(void *)&p->history[k];
+		v[26 + k] = (int32_t *)(void *)&p->history[k];
 }
 static void global_fields(struct fight_state *s, uint32_t *v[GLOBAL_WORDS])
 {
@@ -2034,6 +2211,8 @@ void fight_encode(const struct fight_state *s, uint32_t w[STATE_WORDS])
 	}
 	w[LIST_AT] = t.list;
 	w[LEVEL_AT] = t.level;
+	w[THROWS_AT] = t.throws;
+	w[THROWS_AT + 1] = t.techs;
 }
 /* Bounds come from the fighter's own character (life, jump velocities,
  * prejump, buffer, charge and grace) and the walls of the state's camera. */
@@ -2070,6 +2249,14 @@ static int valid(const struct fight_state *s, const struct fighter *p, const str
 	if (p->down < UP || p->down >= DOWN_PHASES ||
 	    (p->down && (p->move || p->stun || p->block || p->crouch || p->squat || p->walk)) ||
 	    (p->down == LYING && (!grounded(p) || p->elapsed >= down_ticks(c))))
+		return 0;
+	/* A throw: nothing else going on, on the ground; the thrower is
+	 * released before its THROW animation is over. */
+	if (p->grab < GRAB_NONE || p->grab > GRAB_HELD || p->safe < 0 ||
+	    p->safe > MAX_THROW_SAFE ||
+	    (p->grab && (p->move || p->stun || p->block || p->crouch || p->squat || p->walk ||
+			 p->down || !grounded(p) || p->freeze || p->buffer || p->slide)) ||
+	    (throwing(p) && p->elapsed >= c->action[THROW].total))
 		return 0;
 	if (p->move) {
 		const struct move *m = &c->move[p->move - 1];
@@ -2155,6 +2342,8 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 	}
 	t.list = w[LIST_AT];
 	t.level = w[LEVEL_AT];
+	t.throws = w[THROWS_AT];
+	t.techs = w[THROWS_AT + 1];
 	if (t.list > 1 || t.level >= LEVELS)
 		return 0;
 	unsigned n = a->characters;
@@ -2187,6 +2376,12 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 	for (int i = 0; i < 2; i++)
 		if (t.combo[i] && !in_hitstun(&t.p[1 - i]))
 			return 0;
+	/* A thrower holds the other fighter, facing it, for as long. */
+	for (int i = 0; i < 2; i++)
+		if (throwing(&t.p[i]) != (t.p[1 - i].grab == GRAB_HELD) ||
+		    (throwing(&t.p[i]) && (t.p[i].elapsed != t.p[1 - i].elapsed ||
+					   t.p[i].face != -t.p[1 - i].face)))
+			return 0;
 	int owned[2] = {0, 0};
 	for (int k = 0; k < MAX_PROJECTILES; k++) {
 		struct shot *sh = &t.shot[k];
@@ -2209,7 +2404,8 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 	}
 	/* Nothing moves during the versus card and READY. */
 	for (int i = 0; t.mode == MODE_FIGHT && t.timer < ROUND_TICKS && i < 2; i++)
-		if (t.p[i].move || t.p[i].stun || t.p[i].down || t.p[i].buffer || owned[i])
+		if (t.p[i].move || t.p[i].stun || t.p[i].down || t.p[i].grab || t.p[i].buffer ||
+		    owned[i])
 			return 0;
 	*s = t;
 	return 1;

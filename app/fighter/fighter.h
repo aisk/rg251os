@@ -1,4 +1,4 @@
-/* Portable fighter state, FIGHTP09 content (system profiles with walls and
+/* Portable fighter state, FIGHTP10 content (system profiles with walls and
  * effect sets, a roster of characters with stats, frames, per-step boxes and
  * motion, normals, named specials and projectiles, spark animations and parallax
  * stages), bounded draw commands, the per-tick sound events and the RGB565
@@ -133,10 +133,11 @@
 /* Cast frames a scene can report missing (see struct scene). */
 #define SCENE_MISSES 16
 /* FALL, DOWN and GETUP are the knockdown (see fighter.c): knocked off the
- * feet until landing, lying, getting up. */
+ * feet until landing, lying, getting up. THROW is a normal throw's
+ * thrower, THROWN the fighter it holds. */
 enum action {
 	IDLE, WALK_FORWARD, WALK_BACK, JUMP, GUARD, HURT, KO, CROUCH, CROUCH_GUARD,
-	CROUCH_HURT, FALL, DOWN, GETUP, ACTIONS
+	CROUCH_HURT, FALL, DOWN, GETUP, THROW, THROWN, ACTIONS
 };
 /* Normals; specials follow them in the move table. */
 enum trigger {
@@ -170,6 +171,12 @@ enum hit_flag { FLAG_KNOCKDOWN = 1, FLAG_OTG = 2, FLAG_MASK = 3 };
 /* Knockdown phases (struct fighter down). */
 enum down_phase { UP, FALLING, LYING, DOWN_PHASES };
 #define MAX_WAKEUP 120
+/* Normal throws (struct fighter grab): throwing forward or back, held, and
+ * held after a tech press (only inside a tick). */
+enum grab { GRAB_NONE, GRAB_FORWARD, GRAB_BACK, GRAB_HELD, GRAB_TECH, GRABS };
+#define MAX_THROW_RANGE 64
+#define MAX_TECH 15
+#define MAX_THROW_SAFE 60
 /* Bits of a packed move's defaults: the field comes from its class. */
 enum hit_default { DEFAULT_HITSTUN = 1, DEFAULT_BLOCKSTUN = 2, DEFAULT_HITSTOP = 4 };
 /* Standing hurt height group, for the AI and tools only. */
@@ -207,10 +214,14 @@ enum mode { MODE_SELECT, MODE_FIGHT, MODE_RESULT, MODE_CLEAR, MODES };
  * since the current move started: a follow-up's motion must lie within it.
  * down is the knockdown phase (enum down_phase; elapsed counts its ticks):
  * FALLING until the fall animation is over and the fighter is on the
- * ground, then LYING through lying and getting up. */
+ * ground, then LYING through lying and getting up. grab is the normal throw
+ * state (enum grab; elapsed counts its ticks, equal on both sides); safe
+ * counts down the ticks the fighter cannot be thrown after rising or
+ * leaving hitstun or blockstun. */
 struct fighter {
 	int32_t x, y, vy, hp, face, walk, block, crouch, move, elapsed, hit, stun,
-	    freeze, slide, keys, corner, squat, buffer, age, plan, plan_tick, clock, down;
+	    freeze, slide, keys, corner, squat, buffer, age, plan, plan_tick, clock, down, grab,
+	    safe;
 	uint32_t charge, history[HISTORY / 8];
 };
 /* A live projectile: kind is the owner's projectile index + 1 (0 = free). */
@@ -280,7 +291,8 @@ struct sound_event {
  * highlighted character's command list (START toggles it there). level is
  * the CPU difficulty (enum level, LEVEL_NORMAL after fight_reset; R cycles
  * it on the select screen, the core sets its option at load, reset and when
- * the option changes while the select screen shows). */
+ * the option changes while the select screen shows). throws and techs count
+ * the normal throws that landed and those broken. */
 struct fight_state {
 	uint32_t tick, rng, previous, paused, stress, boxes, automatic, round;
 	uint32_t mode, timer, beaten, stage, run, wins[2], chr[2], pal[2];
@@ -292,7 +304,7 @@ struct fight_state {
 	/* This tick's sound events (see enum sound_id). */
 	uint32_t sounds;
 	struct sound_event sound[MAX_SOUND_EVENTS];
-	uint32_t combo[2], shown[2], show[2], best[2], list, level;
+	uint32_t combo[2], shown[2], show[2], best[2], list, level, throws, techs;
 };
 /* One opaque run in a frame row; pixels index the frame's data. */
 struct span {
@@ -385,16 +397,29 @@ struct stats {
 struct class_row {
 	uint8_t hitstun, blockstun, hitstop, has;
 };
+/* Normal throws of a system's characters: range, the body gap in pixels
+ * beyond the push distance a throw reaches; tech, the ticks after the grab
+ * in which the victim's HP or HK breaks it (0 none); tech_stun and
+ * tech_push, both fighters' recovery (guard pose) and slide in pixels after
+ * a break; wakeup_safe and stun_safe, the ticks a fighter cannot be thrown
+ * after rising from a knockdown or leaving hitstun/blockstun. hit is the
+ * throw's damage (scaled at load), pushback and hitstop, class throw, and
+ * it knocks down. */
+struct throw_rule {
+	uint8_t range, tech, tech_stun, tech_push, wakeup_safe, stun_safe;
+	struct hit hit;
+};
 /* A system profile: the stat defaults, the damage scale applied to its
  * characters' moves at load, the class table, the wall margin and rule
- * window (play_width) of its stages and its effect set (spark + 1, 0 =
- * none, per enum effect_key). */
+ * window (play_width) of its stages, its effect set (spark + 1, 0 =
+ * none, per enum effect_key) and its normal throws. */
 struct system {
 	char name[MAX_NAME + 1];
 	uint16_t damage_scale, margin, play_width;
 	uint16_t effect[FX_KEYS];
 	struct stats stats;
 	struct class_row cls[CLASSES];
+	struct throw_rule throw;
 };
 struct character {
 	char name[MAX_NAME + 1];

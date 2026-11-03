@@ -1,5 +1,5 @@
 /* Renderer and pack-decoder regression for the fighter core, linked into the
- * callback harness (test.c). It writes its own FIGHTP09 packs from known
+ * callback harness (test.c). It writes its own FIGHTP10 packs from known
  * bitmaps, two system profiles, two spark anims and a three-layer stage,
  * checks that malformed or truncated packs (including bad systems, stats,
  * classes, class defaults, sparks, walls, effect sets, slash and home
@@ -273,7 +273,8 @@ enum field {
 	F_STAT_WALK, F_STAT_HEIGHT, F_DEF_HITSTUN, F_DEF_CLASS, F_DEF_DEFAULTS,
 	/* Sparks (the first one), walls and effect sets, slash and home. */
 	F_SPARKS, F_STAGES, F_SPARK_BLEND, F_SPARK_ALPHA, F_SPARK_STEPS, F_SPARK_FRAME,
-	F_SPARK_PALETTE, F_SPARK_TICKS, F_SYS_MARGIN, F_SYS_PLAY, F_SYS_EFFECT, F_SYS_WAKEUP, F_MOVE_FLAGS, F_CHAR_SLASH,
+	F_SPARK_PALETTE, F_SPARK_TICKS, F_SYS_MARGIN, F_SYS_PLAY, F_SYS_EFFECT, F_SYS_WAKEUP, F_SYS_THROW_RANGE,
+	F_SYS_THROW_TECH_STUN, F_MOVE_FLAGS, F_CHAR_SLASH,
 	F_CHAR_HOME,
 	/* The stage, its first layer and that layer's first anim step. */
 	F_STAGE_NAME_LEN, F_STAGE_NAME_CHAR, F_STAGE_WIDTH, F_STAGE_GROUND, F_STAGE_SYSTEM,
@@ -392,6 +393,17 @@ static void systems(struct pack *p)
 		if (!k)
 			MARK(F_SYS_WAKEUP);
 		put(p, k ? 30 : 25, 2);
+		/* Throws: range, damage, pushback, hitstop, tech, tech_stun,
+		 * tech_push, wakeup_safe, stun_safe. */
+		static const unsigned throw_rule[2][9] = {{4, 100, 40, 8, 6, 12, 24, 8, 0},
+							  {12, 220, 40, 8, 0, 12, 24, 17, 17}};
+		for (int j = 0; j < 9; j++) {
+			if (!k && !j)
+				MARK(F_SYS_THROW_RANGE);
+			if (!k && j == 5)
+				MARK(F_SYS_THROW_TECH_STUN);
+			put(p, throw_rule[k][j], 2);
+		}
 	}
 }
 /* One character "SYN" on system 0 with its own walk 10 and height high:
@@ -505,7 +517,7 @@ static int syn_hurts(unsigned i) { return i < 14; }
 static void build(struct pack *p, int automatic)
 {
 	memset(p, 0, sizeof(*p));
-	memcpy(p->data, "FIGHTP09", 8);
+	memcpy(p->data, "FIGHTP10", 8);
 	p->len = 16;
 	MARK(F_FLAGS);
 	put(p, (unsigned)automatic, 4);
@@ -901,6 +913,7 @@ static void malformed(void)
 	    {F_SYS_MARGIN, MAX_MARGIN + 1, 2}, {F_SYS_PLAY, MIN_PLAY_WIDTH - 1, 2},
 	    {F_SYS_PLAY, FW + 1, 2},	    {F_SYS_EFFECT, 3, 2},
 	    {F_SYS_WAKEUP, 0, 2},	    {F_SYS_WAKEUP, MAX_WAKEUP + 1, 2},
+	    {F_SYS_THROW_RANGE, MAX_THROW_RANGE + 1, 2}, {F_SYS_THROW_TECH_STUN, 0, 2},
 	    {F_MOVE_FLAGS, FLAG_MASK + 1, 2}, {F_PROJ_FLAGS, FLAG_OTG, 2},
 	    {F_CHAR_SLASH, 32, 2},	    {F_CHAR_HOME, 2, 2},
 	    /* Stages, layers and stage anims. */
@@ -946,9 +959,10 @@ static void malformed(void)
 	bad.data[bad.len++] = 0;
 	seal(&bad);
 	assert(!load(&assets_a, &bad));
-	for (char v = '1'; v <= '8'; v++) {
+	for (char v = '1'; v <= '9'; v++) {
 		bad = good;
-		bad.data[7] = (uint8_t)v; /* FIGHTP01..08: retired formats */
+		bad.data[6] = '0';
+		bad.data[7] = (uint8_t)v; /* FIGHTP01..09: retired formats */
 		assert(!load(&assets_a, &bad));
 	}
 	bad = good;
@@ -1180,6 +1194,13 @@ static void synthetic_moves(struct assets *a)
 	       pr->alpha == 200 && !a->step[pr->anim.first].hurt && pr->hit.flags == FLAG_KNOCKDOWN);
 	assert(ch->move[CROUCH_HK].hit.flags == FLAG_KNOCKDOWN && !ch->move[STAND_HK].hit.flags &&
 	       ch->move[MOVES].hit.flags == (FLAG_KNOCKDOWN | FLAG_OTG) && ch->stats.wakeup == 25);
+	/* Throw rules; damage scales with the system (220 * 800 / 1000). */
+	const struct throw_rule *tr = &a->sys[0].throw, *ts = &a->sys[1].throw;
+	assert(tr->range == 4 && tr->tech == 6 && tr->tech_stun == 12 && tr->tech_push == 24 &&
+	       tr->wakeup_safe == 8 && !tr->stun_safe && tr->hit.damage == 100 &&
+	       tr->hit.pushback == 40 && tr->hit.hitstop == 8 && tr->hit.cls == CLASS_THROW &&
+	       tr->hit.flags == FLAG_KNOCKDOWN && ts->range == 12 && !ts->tech &&
+	       ts->hit.damage == 176 && ts->wakeup_safe == 17 && ts->stun_safe == 17);
 	/* Stats: system "kof" with SYN's own walk 10 and height high; the jump
 	 * -48/3 peaks at 96 px and a fall from MAX_HEIGHT reaches vy 87. */
 	const struct stats *st = &ch->stats;

@@ -8,7 +8,8 @@ the real files load, every malformed variant is refused with ValueError,
 stats resolve from the system plus overrides, class defaults and the damage
 scale give the expected numbers, follow-ups pack their parent, window and
 contact flag, specials pack their names (every roster special has one),
-knockdown and OTG flags and the derived knockdown actions and wakeup, and the conversion keeps every loaded
+knockdown and OTG flags, the derived knockdown and throw actions, wakeup and
+the throw rules, and the conversion keeps every loaded
 value and is idempotent. It also checks that every roster manifest is
 already converted."""
 import copy
@@ -159,9 +160,28 @@ def main():
     refused('knockdown 1', lambda: character(with_terry(
         lambda c, _: c['moves']['crouch_hk'].update(knockdown=1))))
     t = TERRY['characters']['terry']['actions']
-    derived = pack.Character.knockdown_actions(t)
+    tm = TERRY['characters']['terry']['moves']
+    derived = pack.Character.derived_actions(t, tm)
     assert derived['fall'] == t['ko'][:-1] and derived['down'] == [[t['ko'][-1][0], 1]]
     assert derived['getup'] == [[t['crouch'][0][0], pack.GETUP_TICKS]]
+    # The generic grab: stand HP's frames, no hitboxes, at least THROW_TICKS.
+    grab = derived['throw']
+    assert [s[0] for s in grab] == [s[0] for s in tm['stand_hp']['steps']]
+    assert sum(s[1] for s in grab) == max(pack.THROW_TICKS,
+                                          sum(s[1] for s in tm['stand_hp']['steps']))
+    assert not any(len(s) > 2 and 'hit' in s[2] for s in grab)
+    assert derived['thrown'] == t['hurt']
+    c = character(TERRY)
+    assert len(c.actions) == len(pack.ACTIONS) == 15
+    kof = real.profile['kof2002']['throw']
+    assert kof['range'] == 4 and kof['tech'] == 6 and kof['wakeup_safe'] == 8
+    assert real.profile['samsho5sp']['throw']['tech'] == 0
+    refused('throw range 65', lambda: systems(with_system(['kof2002', 'throw'],
+                                                           {'range': 65})))
+    refused('an unknown throw key', lambda: systems(with_system(['kof2002', 'throw'],
+                                                                 {'speed': 1})))
+    refused('throw tech_stun 0', lambda: systems(with_system(['kof2002', 'throw'],
+                                                              {'tech_stun': 0})))
     refused('an unknown action', lambda: character(with_terry(
         lambda c, _: c['actions'].update(roll=c['actions']['idle']))))
     assert real.profile['kof2002']['wakeup'] == 25

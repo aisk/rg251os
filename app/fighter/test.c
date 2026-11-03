@@ -135,7 +135,7 @@ static uint32_t get_word(const uint8_t *p, int k)
 /* ---- rules on exact ticks; expected numbers come from terry.json ---- */
 #define K(k) (1u << RETRO_DEVICE_ID_JOYPAD_##k)
 /* Words per fighter in a saved state, mirroring FIGHTER_WORDS in fighter.c. */
-#define FIGHTER_WORDS_T 28
+#define FIGHTER_WORDS_T 30
 static struct assets pack;
 static unsigned terry;
 enum { POWER_WAVE = MOVES, BURN_KNUCKLE, RISING_TACKLE };
@@ -992,9 +992,10 @@ static void round_start(void)
 }
 /* The combo words in a saved state (COMBO_AT in fighter.c): combo, shown,
  * show and best, two each. */
-#define COMBO_W 167
+#define COMBO_W 171
 #define LIST_W (COMBO_W + 8)
 #define LEVEL_W (LIST_W + 1)
+#define THROWS_W (LEVEL_W + 1)
 /* Combos: crouch LP chains keep P1 in hitstun, the count shows from the
  * second hit and stays COMBO_TICKS after P1 recovers; LP into a Power Wave
  * that lands after the hitstun is two single hits; guarded hits count
@@ -1292,7 +1293,9 @@ static void knockdowns(void)
 				since[i] = 0;
 			else if (since[i] < 99)
 				since[i]++;
-			if (before.p[i].down && s.p[i].down)
+			/* (A fighter can rise and be swept down again on one tick.) */
+			if (before.p[i].down && s.p[i].down &&
+			    !(before.p[i].down == LYING && s.p[i].down == FALLING))
 				assert(s.p[i].hp == before.p[i].hp);
 			meaty += s.p[i].hp < before.p[i].hp && since[i] <= 4;
 		}
@@ -1439,7 +1442,7 @@ static void state_words(void)
 	assert(fight_decode(&t, &pack, w));
 	enum { W_X, W_Y, W_VY, W_HP, W_FACE, W_WALK, W_BLOCK, W_CROUCH, W_MOVE, W_ELAPSED,
 	       W_HIT, W_STUN, W_FREEZE, W_SLIDE, W_KEYS, W_CORNER, W_SQUAT, W_BUFFER, W_AGE,
-	       W_PLAN, W_PLAN_TICK, W_CLOCK, W_DOWN, W_CHARGE };
+	       W_PLAN, W_PLAN_TICK, W_CLOCK, W_DOWN, W_GRAB, W_SAFE, W_CHARGE };
 	enum { G_MODE = 8, G_TIMER, G_BEATEN, G_STAGE, G_RUN, G_WIN0, G_WIN1, G_CHR0, G_CHR1,
 	       G_PAL0, G_PAL1 };
 	const int P = 19, S = 19 + 2 * FIGHTER_WORDS_T;
@@ -1461,6 +1464,8 @@ static void state_words(void)
 	    {0, 1, W_AGE, 1},		   {0, 1, W_PLAN, STAND_HK + 1}, {0, 1, W_PLAN, MOVES + 4},
 	    {0, 1, W_PLAN_TICK, 1},	   {0, 1, W_CHARGE, (10 + 1) << 8},
 	    {0, 1, W_CHARGE, 1 | 1 << 8}, {0, 0, W_CLOCK, 256},
+	    {0, 0, W_GRAB, GRAB_TECH},	   {0, 0, W_GRAB, GRAB_HELD},  {0, 1, W_GRAB, GRAB_FORWARD},
+	    {0, 0, W_SAFE, MAX_THROW_SAFE + 1}, {0, 0, W_SAFE, (uint32_t)-1},
 	    /* Globals. */
 	    {1, 0, G_MODE, MODES},	   {1, 0, G_TIMER, 256},	       {1, 0, G_BEATEN, 1},
 	    {1, 0, G_BEATEN, 2},	   {1, 0, G_STAGE, 2},	       {1, 0, G_WIN0, ROUNDS_TO_WIN},
@@ -2101,6 +2106,140 @@ static void stat_tests(void)
  * specials), throws projectiles, guards at both heights, and finishes
  * ladder runs. Contacts are counted on the tick a fighter enters hitstop
  * with fresh stun. */
+/* Normal throws: forward or back with HP or HK within the system's range
+ * grabs on the press tick, holds the other fighter (THROW/THROWN) and
+ * knocks it down when the THROW animation is over; HP or HK in the tech
+ * window breaks it, two at once break each other; nobody in blockstun, a
+ * prejump or its safe ticks is thrown (the press is the normal then); no
+ * tech on the samsho5sp system; the AI throws and techs. */
+static void throws(void)
+{
+	const struct character *t = &pack.chr[terry];
+	const struct throw_rule *r = &pack.sys[t->system].throw;
+	const int body = t->stats.push, total = t->action[THROW].total;
+	assert(r->range == 4 && r->tech == 6 && r->wakeup_safe == 8 && !r->stun_safe &&
+	       r->hit.damage == 100 && r->hit.cls == CLASS_THROW &&
+	       (r->hit.flags & FLAG_KNOCKDOWN) && total >= 30 && total <= MAX_MOVE_TICKS);
+	for (unsigned c = 0; c < pack.characters; c++)
+		for (int k = THROW; k <= THROWN; k++)
+			assert(pack.chr[c].action[k].count && pack.chr[c].action[k].total);
+	struct fight_state s, u;
+	uint32_t w[STATE_WORDS], v[STATE_WORDS];
+	/* Forward: grabbed on the press tick, held in front, thrown. */
+	duel(&s, 200, 200 + body + r->range);
+	step2(&s, K(RIGHT) | K(X), 0);
+	assert(s.p[0].grab == GRAB_FORWARD && s.p[1].grab == GRAB_HELD && !s.p[0].move &&
+	       s.p[1].x == QX(200 + body) && s.p[1].face == -1 &&
+	       heard(&s, SOUND_WHOOSH_HEAVY, 0));
+	assert(in_action(&s, 0, THROW) && in_action(&s, 1, THROWN));
+	for (int n = 1; n < total; n++) {
+		step2(&s, 0, 0);
+		assert(s.p[0].grab == GRAB_FORWARD && s.p[1].hp == 1000 && s.p[0].elapsed == n);
+		if (n == 10) {
+			fight_encode(&s, w);
+			assert(fight_decode(&u, &pack, w));
+			fight_encode(&u, v);
+			assert(!memcmp(w, v, sizeof(w)));
+		}
+	}
+	step2(&s, 0, 0);
+	assert(!s.p[0].grab && !s.p[1].grab && s.p[1].down == FALLING &&
+	       s.p[1].hp == 1000 - per_mille(100, t->stats.defense) && s.throws == 1 &&
+	       s.p[1].slide > 0 && s.p[0].freeze == r->hit.hitstop &&
+	       heard(&s, SOUND_HIT_HEAVY, 0));
+	/* Bad throw words: a held fighter without a thrower, the two out of
+	 * step or facing the same way, a tech flag left over, a thrower past
+	 * its animation. */
+	const int P = 19, G = 23;
+	static const struct {
+		int who, field;
+		uint32_t value;
+	} bad[] = {{0, G, GRAB_NONE}, {1, 9, 3}, {1, G, GRAB_TECH}, {1, 4, 1}, {0, 9, 255}};
+	for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		memcpy(v, w, sizeof(v));
+		v[P + bad[i].who * FIGHTER_WORDS_T + bad[i].field] = bad[i].value;
+		struct fight_state keep = u;
+		assert(!fight_decode(&u, &pack, v) && !memcmp(&keep, &u, sizeof(u)));
+	}
+	/* Rising from the throw's knockdown starts wakeup_safe ticks. */
+	int n = 0;
+	while (s.p[1].down && n++ < 400)
+		step2(&s, 0, 0);
+	assert(!s.p[1].down && s.p[1].safe == r->wakeup_safe);
+	for (n = 0; s.p[1].safe; n++)
+		step2(&s, 0, 0);
+	assert(n == r->wakeup_safe);
+	/* Back: the one held lands behind the thrower. */
+	duel(&s, 200, 200 + body);
+	step2(&s, K(LEFT) | K(A), 0);
+	assert(s.p[0].grab == GRAB_BACK);
+	for (n = 0; s.p[0].grab && n < 300; n++)
+		step2(&s, 0, 0);
+	assert(s.p[1].down && s.p[1].x < s.p[0].x && s.p[1].slide < 0);
+	/* Tech: HP on the second tick held breaks it, no damage. */
+	duel(&s, 200, 200 + body);
+	step2(&s, K(RIGHT) | K(X), 0);
+	step2(&s, 0, 0);
+	step2(&s, 0, K(X));
+	assert(!s.p[0].grab && !s.p[1].grab && s.techs == 1 && s.p[1].hp == 1000 &&
+	       s.p[0].stun == r->tech_stun && s.p[0].block == 1 && s.p[1].block == 1 &&
+	       s.p[0].slide == -r->tech_push && s.p[1].slide == r->tech_push &&
+	       heard(&s, SOUND_GUARD, 0));
+	/* Too late: a press once the window is over does nothing. */
+	duel(&s, 200, 200 + body);
+	step2(&s, K(RIGHT) | K(X), 0);
+	for (n = 0; n < r->tech; n++)
+		step2(&s, 0, 0);
+	step2(&s, 0, K(X));
+	assert(s.p[1].grab == GRAB_HELD && !s.techs);
+	/* Both at once break each other. */
+	duel(&s, 200, 200 + body);
+	step2(&s, K(RIGHT) | K(X), K(RIGHT) | K(A));
+	assert(!s.p[0].grab && !s.p[1].grab && s.techs == 1 && s.p[0].stun && s.p[1].stun);
+	/* A throw beats a strike begun on the same tick. */
+	duel(&s, 200, 200 + body);
+	step2(&s, K(RIGHT) | K(X), K(Y));
+	assert(s.p[1].grab == GRAB_HELD && !s.p[1].move);
+	for (n = 0; s.p[1].grab && n < 300; n++)
+		step2(&s, 0, 0);
+	assert(s.hits == 1 && s.p[1].down);
+	/* Out of range, in blockstun, in a prejump or safe: the normal. */
+	duel(&s, 200, 200 + body + r->range + 1);
+	step2(&s, K(RIGHT) | K(X), 0);
+	assert(!s.p[0].grab && s.p[0].move == STAND_HP + 1);
+	duel(&s, 200, 200 + body);
+	s.p[1].stun = 5;
+	s.p[1].block = 1;
+	step2(&s, K(RIGHT) | K(X), K(RIGHT));
+	assert(!s.p[0].grab && s.p[0].move == STAND_HP + 1);
+	duel(&s, 200, 200 + body);
+	step2(&s, 0, K(UP));
+	step2(&s, K(RIGHT) | K(X), K(UP));
+	assert(!s.p[0].grab && s.p[0].move == STAND_HP + 1);
+	duel(&s, 200, 200 + body);
+	s.p[1].safe = 2;
+	step2(&s, K(RIGHT) | K(X), 0);
+	assert(!s.p[0].grab && s.p[0].move == STAND_HP + 1);
+	/* Down-forward is the crouching normal. */
+	duel(&s, 200, 200 + body);
+	step2(&s, K(RIGHT) | K(DOWN) | K(X), 0);
+	assert(!s.p[0].grab && s.p[0].move == CROUCH_HP + 1);
+	/* samsho5sp: no tech, a wider range. */
+	const struct throw_rule *ss = &pack.sys[pack.chr[haohmaru].system].throw;
+	assert(!ss->tech && ss->range == 12 && ss->wakeup_safe == 17 && ss->stun_safe == 17);
+	int hb = pack.chr[haohmaru].stats.push;
+	match(&s, haohmaru, haohmaru, 200, 200 + hb + ss->range);
+	step2(&s, K(RIGHT) | K(X), 0);
+	step2(&s, 0, 0);
+	step2(&s, 0, K(X));
+	assert(s.p[1].grab == GRAB_HELD && !s.techs);
+	/* AI vs AI on Normal throws and breaks throws. */
+	fight_reset(&s, 1);
+	for (n = 0; n < 30000; n++)
+		fight_step(&s, &pack, 0, 0, 0);
+	printf("throws: %u thrown and %u broken in 30000 AI ticks\n", s.throws, s.techs);
+	assert(s.throws > 10 && s.techs > 0);
+}
 static void ai_coverage(void)
 {
 	struct fight_state s;
@@ -2299,6 +2438,13 @@ static void previews(void)
 		step2(&s, 0, 0);
 	step2(&s, 0, 0);
 	snapshot(&s, "down");
+	/* Terry throws Terry: held halfway through the generic grab. */
+	staged(&s, korea, terry, terry, centre - 23, centre + 23);
+	step2(&s, K(RIGHT) | K(X), 0);
+	assert(s.p[0].grab == GRAB_FORWARD);
+	for (int n = 0; n < 12; n++)
+		step2(&s, 0, 0);
+	snapshot(&s, "throw");
 	s.chr[0] = character("IORI");
 	staged(&s, korea, s.chr[0], terry, centre - 60, centre + 60);
 	step2(&s, K(START), 0);
@@ -2338,6 +2484,7 @@ static void logic_tests(const uint8_t *data, size_t len)
 	move_lists();
 	difficulty();
 	knockdowns();
+	throws();
 	state_words();
 	stat_tests();
 	pack.stages = stages;
@@ -2449,6 +2596,9 @@ int main(int argc, char **argv)
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
 	memcpy(copy, "FGSTAT11", 8); /* before knockdowns */
+	assert(!retro_unserialize(copy, n));
+	memcpy(copy, end, n);
+	memcpy(copy, "FGSTAT12", 8); /* before throws */
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
 	memset(copy + 16 + 8 * 4, 0xff, 4);
@@ -2586,7 +2736,7 @@ int main(int argc, char **argv)
 	     "effect budget, camera and walls, sparks, sound events, content, "
 	     "RGB565/XRGB8888, audio, ports, replay, pause, state validation, frame "
 	     "data, hit/block/hitstop ticks, pushback and corner, guard heights, "
-	     "trades, combos, move lists, difficulty, commands, buffer, prejump, cancels, follow-ups, projectiles and clash, "
+	     "trades, combos, knockdowns, throws, move lists, difficulty, commands, buffer, prejump, cancels, follow-ups, projectiles and clash, "
 	     "specials, ladder, systems and stats, AI coverage and stress cycle "
 	     "passed");
 	return 0;

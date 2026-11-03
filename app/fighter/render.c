@@ -1,7 +1,8 @@
-/* FIGHTP09 pack decoder, render cache and clipped RGB565 software
+/* FIGHTP10 pack decoder, render cache and clipped RGB565 software
  * draw-command backend. The decoder checks every count, offset and index
  * against the file length and the resident limits in fighter.h (palettes
- * and frames per sheet, system profiles with walls and effect sets, stats,
+ * and frames per sheet, system profiles with walls, effect sets and throw
+ * rules, stats,
  * character and move names, box bounds and counts, move, special, projectile and step motion
  * data, spark animations, stages with their layers, edge rules and anims),
  * keeps the whole roster's rule data and palette-index frames and every
@@ -273,6 +274,21 @@ static int read_system(struct reader *r, struct system *sy, unsigned sparks)
 	if (!r->ok || !wakeup || wakeup > MAX_WAKEUP)
 		return 0;
 	st->wakeup = (uint8_t)wakeup;
+	/* Normal throws: range, damage, pushback, hitstop, tech, tech_stun,
+	 * tech_push, wakeup_safe, stun_safe. */
+	unsigned t[9];
+	for (int k = 0; k < 9; k++)
+		t[k] = u16(r);
+	if (!r->ok || t[0] > MAX_THROW_RANGE || t[1] > MAX_DAMAGE || t[2] > MAX_PUSH ||
+	    t[3] > MAX_HITSTOP || t[4] > MAX_TECH || !t[5] || t[5] > MAX_STUN || t[6] > MAX_PUSH ||
+	    t[7] > MAX_THROW_SAFE || t[8] > MAX_THROW_SAFE)
+		return 0;
+	unsigned damage = (t[1] * scale + 500) / 1000;
+	sy->throw = (struct throw_rule){(uint8_t)t[0], (uint8_t)t[4], (uint8_t)t[5], (uint8_t)t[6],
+					(uint8_t)t[7], (uint8_t)t[8],
+					(struct hit){(uint16_t)(t[1] && !damage ? 1 : damage), 0, 1, 1,
+						     (uint16_t)t[3], (uint16_t)t[2], 0, GUARD_HIGH,
+						     CLASS_THROW, FLAG_KNOCKDOWN}};
 	return 1;
 }
 /* A character's stats: its system's, then each override in the mask. */
@@ -540,7 +556,8 @@ static int character(struct reader *r, struct assets *a, struct character *c, un
 				return 0;
 		}
 		unsigned t = total(a, an);
-		if (t > 65535)
+		/* A throw is released when its elapsed (at most 255) reaches it. */
+		if (t > 65535 || (k == THROW && t > MAX_MOVE_TICKS))
 			return 0;
 		an->total = (uint16_t)t;
 	}
@@ -845,7 +862,7 @@ static int read_stages(struct reader *r, struct assets *a, unsigned n)
 int fight_assets(struct assets *a, const void *data, size_t size, int *automatic)
 {
 	struct reader r = {data, 0, size, 1};
-	if (!data || size < 48 || memcmp(data, "FIGHTP09", 8))
+	if (!data || size < 48 || memcmp(data, "FIGHTP10", 8))
 		return 0;
 	r.at = 8;
 	uint32_t length = u32(&r), hash = u32(&r), flags = u32(&r);
