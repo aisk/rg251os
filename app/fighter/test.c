@@ -1509,8 +1509,8 @@ static void stat_tests(void)
 	       kof->cls[CLASS_LIGHT].hitstop == 8 && kof->cls[CLASS_LIGHT].has == 3 &&
 	       kof->cls[CLASS_COMMAND].has == 3 && !kof->cls[CLASS_THROW].has &&
 	       ss->cls[CLASS_HEAVY].hitstun == 22 && ss->cls[CLASS_HEAVY].hitstop == 12);
-	/* samsho5sp scales damage at load: stand LP 35 in haohmaru.json -> 28. */
-	assert(h->move[STAND_LP].hit.damage == 28 && t->move[STAND_LP].hit.damage == 30);
+	/* samsho5sp scales damage at load: stand LP 55 in haohmaru.json -> 44. */
+	assert(h->move[STAND_LP].hit.damage == 44 && t->move[STAND_LP].hit.damage == 30);
 	/* Walk: Terry 10 x 12/4 px forward and 10 x 8/4 back, Haohmaru 9 and 8. */
 	walk_test(terry, 12, 8);
 	walk_test(haohmaru, 9, 8);
@@ -1518,10 +1518,10 @@ static void stat_tests(void)
 	 * ticks later; Haohmaru -42/2 after 1 peaks at 110 and lands after 43. */
 	jump_test(terry, 4, 108, 35);
 	jump_test(haohmaru, 1, 110, 43);
-	/* Damage scale in a fight: Haohmaru's stand LP takes 28 from Terry,
+	/* Damage scale in a fight: Haohmaru's stand LP takes 44 from Terry,
 	 * Terry's takes 30 from Haohmaru. */
 	match(&s, haohmaru, terry, 200, 250);
-	assert(first_hit(&s, K(Y)) && s.p[1].hp == 1000 - 28);
+	assert(first_hit(&s, K(Y)) && s.p[1].hp == 1000 - 44);
 	match(&s, terry, haohmaru, 200, 260);
 	assert(first_hit(&s, K(Y)) == 4 && s.p[1].hp == 1000 - 30);
 	/* The rest edits Terry's stats in the loaded pack and restores them. */
