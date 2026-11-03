@@ -1,13 +1,21 @@
-/* Standard libretro fighter core: FIGHTP06 content, input, deterministic
- * FGSTATE6 saves, audio and software frames. Timing below measures work only;
+/* Standard libretro fighter core: FIGHTP07 content, input, deterministic
+ * FGSTATE7 saves, audio and software frames. Timing below measures work only;
  * the frontend owns pacing. Logs the system profiles, the roster with each
  * character's system and resolved stats, every move's frame data and class
- * and the resident memory at load, the stages and spark sets, and each new
- * cast (the two fighters and the stage whose RGB565 frames are expanded). Reports each scene (0 = two fighters, 1-3 =
- * +8, +24, +48 requested alpha/additive effects, capped by the per-frame
- * effect pixel budget) every 600 runs, also with debug off: logic/render/
- * audio times, how many effects were drawn of those requested, and the
- * ladder and special/clash counters.
+ * (follow-ups with their parent and window) and the resident memory at
+ * load, and the stages and spark sets. The render cache is filled a slice
+ * at a time: each run names what the state shows, expands at most
+ * CACHE_BUDGET pixels ahead, builds the scene and expands only what it
+ * still missed before building it again, so a select cursor move costs
+ * one character and a match's cast spreads over the versus card. Each fill
+ * is logged when ready (runs taken, pixels, total and worst cache time per
+ * run, frames expanded on demand, fills superseded and the resident
+ * regions), and a state loaded mid-fight logs its blocking fill. Reports
+ * each scene (0 = two fighters, 1-3 = +8, +24, +48 requested alpha/additive
+ * effects, capped by the per-frame effect pixel budget) every 600 runs,
+ * also with debug off: logic/render/audio/cache times, how many effects
+ * were drawn of those requested, and the ladder and special/clash
+ * counters.
  *
  * Sound comes from the bank next to the content (<pack>.fightsnd, found
  * from retro_game_info's path; audio.c): after each unpaused tick the rule
@@ -23,7 +31,8 @@
  * Y (left) light punch, X (top) heavy punch, B (bottom) light kick,
  * A (right) heavy kick; hold DOWN for the crouching version. Specials are
  * motions plus a punch (Terry: 236 Power Wave, 214 Burn Knuckle, hold down
- * then up Rising Tackle). Back guards (down-back guards low), UP jumps, L
+ * then up Rising Tackle; Iori's 214 Aoi Hana takes 214+P twice more as
+ * it hits). Back guards (down-back guards low), UP jumps, L
  * toggles the hurt/hit box overlay, R cycles the stress scene, START
  * pauses; A or B skips the KO screen. In the select screen the d-pad moves
  * and any attack button picks. The desktop option fight_players=two lets
@@ -55,24 +64,21 @@ static char sound_path[4096];
 static int loaded, format32, two_players;
 static unsigned devices[2] = {RETRO_DEVICE_JOYPAD, RETRO_DEVICE_JOYPAD};
 static unsigned benchmark_runs;
-static uint64_t samples[3][600];
+static uint64_t samples[4][600];
 static unsigned sample_count, scene_mode;
 static uint64_t effects_requested, effects_drawn, sparks_drawn, layers_drawn;
 static unsigned effects_peak;
-/* Expand the state's two fighters and stage if they changed, and log it. */
-static void cast(void)
-{
-	if (fight_cast(&assets, &state) && logger)
-		logger(RETRO_LOG_INFO,
-		       "fight: cast %s palette %u vs %s palette %u on %s, resident RGB565 KiB "
-		       "p1 %u p2 %u stage %u effects %u, %u images\n",
-		       assets.chr[state.chr[0]].name, state.pal[0],
-		       assets.chr[state.chr[1]].name, state.pal[1],
-		       assets.cast_stage >= 0 ? assets.stage[assets.cast_stage].name : "FLAT",
-		       assets.cast_pixels[0] * 2 / 1024, assets.cast_pixels[1] * 2 / 1024,
-		       assets.stage_pixels * 2 / 1024, assets.effect_pixels * 2 / 1024,
-		       assets.images);
-}
+/* Render cache work per run: at most CACHE_BUDGET pixels of prefetch plus
+ * the frames the scene needs right away (render.c). */
+#define CACHE_BUDGET 49152u
+/* The current cast's fill: runs, cache time, pixels and frames expanded on
+ * demand since it was asked for, and casts dropped before they were ready. */
+static struct {
+	int active;
+	unsigned runs, demand, superseded;
+	uint64_t us, max_us;
+	uint32_t pixels;
+} fill;
 static uint64_t tick_us(void)
 {
 	struct timespec t;
@@ -85,13 +91,61 @@ static int compare(const void *a, const void *b)
 	uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
 	return (x > y) - (x < y);
 }
+static const char *side_name(int i, char *buf, size_t n)
+{
+	if (!(assets.wanted >> i & 1) || assets.cast[i][0] < 0)
+		return "-";
+	snprintf(buf, n, "%s palette %d", assets.chr[assets.cast[i][0]].name, assets.cast[i][1]);
+	return buf;
+}
+/* Point the cache at the state; a change starts a new fill. */
+static void want(void)
+{
+	if (!fight_want(&assets, &state))
+		return;
+	if (fill.active)
+		fill.superseded++;
+	fill.active = 1;
+	fill.runs = fill.demand = 0;
+	fill.us = fill.max_us = 0;
+	fill.pixels = 0;
+}
+/* Count one run's cache work; log the fill once everything is expanded. */
+static void filled(uint64_t us, uint32_t pixels)
+{
+	if (!fill.active)
+		return;
+	fill.runs++;
+	fill.us += us;
+	fill.max_us = us > fill.max_us ? us : fill.max_us;
+	fill.pixels += pixels;
+	if (!fight_ready(&assets))
+		return;
+	char p1[32], p2[32];
+	if (logger)
+		logger(RETRO_LOG_INFO,
+		       "fight: cast %s vs %s on %s ready in %u runs (%s): expanded %u KiB, cache us "
+		       "total %llu max %llu per run, %u frames on demand, %u casts superseded; "
+		       "resident RGB565 KiB p1 %u p2 %u stage %u effects %u\n",
+		       side_name(0, p1, sizeof(p1)), side_name(1, p2, sizeof(p2)),
+		       (assets.wanted & 4) && assets.cast_stage >= 0
+			   ? assets.stage[assets.cast_stage].name
+			   : "-",
+		       fill.runs, state.mode == MODE_FIGHT ? "fight" : "screen",
+		       (unsigned)(fill.pixels * 2 / 1024), (unsigned long long)fill.us,
+		       (unsigned long long)fill.max_us, fill.demand, fill.superseded,
+		       assets.cast_pixels[0] * 2 / 1024, assets.cast_pixels[1] * 2 / 1024,
+		       assets.stage_pixels * 2 / 1024, assets.effect_pixels * 2 / 1024);
+	fill.active = 0;
+	fill.superseded = 0;
+}
 static void report(void)
 {
 	if (!sample_count)
 		return;
 	if (logger) {
-		const char *names[] = {"logic", "render", "audio"};
-		for (int i = 0; i < 3; i++) {
+		const char *names[] = {"logic", "render", "audio", "cache"};
+		for (int i = 0; i < 4; i++) {
 			uint64_t sum = 0;
 			for (unsigned j = 0; j < sample_count; j++)
 				sum += samples[i][j];
@@ -258,7 +312,7 @@ bool retro_load_game(const struct retro_game_info *g)
 	if (!g || !fight_assets(&assets, g->data, g->size, &automatic)) {
 		if (logger)
 			logger(RETRO_LOG_ERROR,
-			       "fight: invalid FIGHTP06 package (magic, length, hash, "
+			       "fight: invalid FIGHTP07 package (magic, length, hash, "
 			       "limits, frame, palette, system, stats, character, move, "
 			       "projectile or step data)\n");
 		return false;
@@ -282,7 +336,7 @@ bool retro_load_game(const struct retro_game_info *g)
 	benchmark_runs = 0;
 	if (logger) {
 		logger(RETRO_LOG_INFO,
-		       "fight: FIGHTP06 package %08x, %u characters, %u frames, %u "
+		       "fight: FIGHTP07 package %08x, %u characters, %u frames, %u "
 		       "palettes, %u steps, %u boxes, 480x320 60Hz 48kHz, software %s, %s; "
 		       "L boxes R stress START pause\n",
 		       assets.hash, assets.characters, assets.frames, assets.palettes,
@@ -317,8 +371,8 @@ bool retro_load_game(const struct retro_game_info *g)
 		static const char *const names[MOVES] = {
 		    "stand LP", "stand HP", "stand LK", "stand HK",
 		    "crouch LP", "crouch HP", "crouch LK", "crouch HK"};
-		static const char *const motions[MOTIONS] = {"236", "214", "623", "[4]6",
-							     "[2]8"};
+		static const char *const motions[MOTIONS] = {
+		    "236", "214", "623", "[4]6", "[2]8", "any", "5", "8", "2", "6", "4"};
 		static const char *const classes[CLASSES] = {
 		    "none", "light", "heavy", "command", "special", "super", "throw"};
 		static const char *const heights[HEIGHTS] = {"low", "mid", "high"};
@@ -350,23 +404,30 @@ bool retro_load_game(const struct retro_game_info *g)
 			       st->jump.prejump, st->jump.peak);
 			for (unsigned k = 0; k < ch->moves; k++) {
 				const struct move *m = &ch->move[k];
-				char special[32];
+				char special[32], window[64] = "";
 				if (m->special)
 					snprintf(special, sizeof(special), "special %s+%x",
 						 motions[m->motion], m->buttons);
+				/* A follow-up names its parent's move index. */
+				if (m->after)
+					snprintf(window, sizeof(window),
+						 ", follow-up of move %u window %u..%u%s", m->after - 1u,
+						 m->open, m->close, m->contact ? " on contact" : "");
 				logger(RETRO_LOG_INFO,
 				       "fight: %s %s startup/active/recovery %u/%u/%u "
 				       "damage %u chip %u hit/block/stop %u/%u/%u push %u/%u "
-				       "guard %u reach %d cancel %u spawn %u class %s\n",
+				       "guard %u reach %d cancel %u spawn %u class %s%s\n",
 				       ch->name, m->special ? special : names[k], m->startup,
 				       m->active, m->recovery, m->hit.damage, m->hit.chip,
 				       m->hit.hitstun, m->hit.blockstun, m->hit.hitstop,
 				       m->hit.pushback, m->hit.block_pushback, m->hit.guard,
-				       m->reach, m->cancel, m->spawn, classes[m->hit.cls]);
+				       m->reach, m->cancel, m->spawn, classes[m->hit.cls], window);
 			}
 		}
 	}
-	cast();
+	fill.active = 0;
+	fill.superseded = 0;
+	want();
 	return true;
 }
 void retro_unload_game(void)
@@ -380,7 +441,7 @@ void retro_reset(void)
 	report();
 	fight_reset(&state, state.automatic);
 	audio_reset(&sound);
-	cast();
+	want();
 	benchmark_runs = 0;
 }
 void retro_run(void)
@@ -402,7 +463,6 @@ void retro_run(void)
 	uint32_t old_tick = state.tick;
 	uint64_t t0 = tick_us();
 	fight_step(&state, &assets, keys[0], keys[1], two_players);
-	cast();
 	uint64_t t1 = tick_us();
 	if (state.automatic && state.tick != old_tick && ++benchmark_runs == 36000 &&
 	    logger)
@@ -414,7 +474,22 @@ void retro_run(void)
 		report();
 		scene_mode = state.stress;
 	}
+	/* The cache: prefetch within the budget, build the scene, and if it
+	 * still misses frames (or the stage), expand those and build it again. */
+	uint64_t c0 = tick_us();
+	want();
+	uint32_t cached = fight_prefetch(&assets, CACHE_BUDGET);
+	uint64_t c1 = tick_us();
 	fight_scene(&state, &assets, &scene);
+	uint64_t d0 = tick_us(), d1 = d0;
+	if (scene.misses || scene.stage_missing) {
+		fill.demand += scene.misses;
+		cached += fight_demand(&assets, &scene);
+		d1 = tick_us();
+		fight_scene(&state, &assets, &scene);
+	}
+	uint64_t cache_us = (c1 - c0) + (d1 - d0);
+	filled(cache_us, cached);
 	effects_requested += scene.effects_requested;
 	effects_drawn += scene.effects_drawn;
 	sparks_drawn += scene.sparks;
@@ -434,8 +509,9 @@ void retro_run(void)
 	audio_mix(&sound, audio, 800, !state.paused);
 	uint64_t t3 = tick_us();
 	samples[0][sample_count] = t1 - t0;
-	samples[1][sample_count] = t2 - t1;
+	samples[1][sample_count] = t2 - c0 - cache_us;
 	samples[2][sample_count] = t3 - t2;
+	samples[3][sample_count] = cache_us;
 	if (++sample_count == 600)
 		report();
 	if (video)
@@ -466,7 +542,7 @@ bool retro_serialize(void *data, size_t size)
 	uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	fight_encode(&state, w);
-	memcpy(p, "FGSTATE6", 8);
+	memcpy(p, "FGSTATE7", 8);
 	put32(p + 8, assets.hash);
 	put32(p + 12, state.automatic);
 	for (int i = 0; i < STATE_WORDS; i++)
@@ -479,7 +555,7 @@ bool retro_unserialize(const void *data, size_t size)
 	const uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	if (!loaded || !p || size != retro_serialize_size() ||
-	    memcmp(p, "FGSTATE6", 8) || get32(p + 8) != assets.hash ||
+	    memcmp(p, "FGSTATE7", 8) || get32(p + 8) != assets.hash ||
 	    get32(p + 12) != state.automatic)
 		return false;
 	for (int i = 0; i < STATE_WORDS; i++)
@@ -494,7 +570,19 @@ bool retro_unserialize(const void *data, size_t size)
 		return false;
 	report();
 	state = restored;
-	cast();
+	want();
+	/* Mid-fight the scene needs the whole stage at once: fill everything
+	 * now rather than over the next runs. */
+	if (state.mode == MODE_FIGHT && state.timer >= INTRO_TICKS && !fight_ready(&assets)) {
+		uint64_t t0 = tick_us();
+		uint32_t n = fight_prefetch(&assets, UINT32_MAX);
+		uint64_t us = tick_us() - t0;
+		if (logger)
+			logger(RETRO_LOG_INFO,
+			       "fight: state loaded mid-fight, blocking cache fill %u KiB in %llu us\n",
+			       (unsigned)(n * 2 / 1024), (unsigned long long)us);
+		filled(us, n);
+	}
 	return true;
 }
 void retro_set_controller_port_device(unsigned port, unsigned device)

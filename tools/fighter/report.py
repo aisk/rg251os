@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Summarize fighter timing windows in a returned frontend.txt or boot directory.
 
+Parts are logic, render, audio and cache (render cache expansion per run);
+the cast lines (each fill's runs and cost) and blocking fills are echoed.
+
 Window percentiles are never combined into a claimed whole-run percentile.
 The original log and perf.csv remain necessary for chronology and CPU analysis.
 """
@@ -17,7 +20,7 @@ def main():
     path = args.log / 'frontend.txt' if args.log.is_dir() else args.log
     text = path.read_text(errors='replace')
     rows = collections.defaultdict(list)
-    pattern = r'fight: scene (\d+) (logic|render|audio) us avg/p95/p99/max (\d+)/(\d+)/(\d+)/(\d+), (\d+) runs'
+    pattern = r'fight: scene (\d+) (logic|render|audio|cache) us avg/p95/p99/max (\d+)/(\d+)/(\d+)/(\d+), (\d+) runs'
     for match in re.finditer(pattern, text):
         scene, part, avg, p95, p99, peak, runs = match.groups()
         rows[int(scene), part].append(tuple(map(int, (avg, p95, p99, peak, runs))))
@@ -38,7 +41,8 @@ def main():
         print(f'Frontend peak RSS: {max(rss)} KiB (whole process)')
     for line in text.splitlines():
         if any(key in line for key in ('fight: pacing', 'perf summary: adaptive all:',
-                                        'perf summary: max all:', 'benchmark complete:')):
+                                        'perf summary: max all:', 'benchmark complete:',
+                                        'fight: cast ', 'blocking cache fill')):
             print(line)
     print('Use perf.csv and perf lines for rotate/output, CPU, temperature and underruns.')
     print('Host/qemu timings do not predict RG351P performance.')

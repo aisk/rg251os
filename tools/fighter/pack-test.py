@@ -6,7 +6,8 @@ copies of assets/fighter/systems.json and testdata/terry-unconverted.json,
 Terry's manifest as it was before convert-stats.py ran (no sheet decoding):
 the real files load, every malformed variant is refused with ValueError,
 stats resolve from the system plus overrides, class defaults and the damage
-scale give the expected numbers, and the conversion keeps every loaded
+scale give the expected numbers, follow-ups pack their parent, window and
+contact flag, and the conversion keeps every loaded
 value and is idempotent. It also checks that every roster manifest is
 already converted."""
 import copy
@@ -119,6 +120,17 @@ def main():
     c = character(m)
     assert c.sources['source'] == 1 and c.sources['mugen'] == 1 and c.sources['estimate'] > 50
 
+    # Follow-ups: Burn Knuckle as a rekka of Power Wave packs its parent
+    # (move index + 1), window and contact flag into the last four fields.
+    def follow(**tr):
+        return with_terry(lambda c, _: c['moves']['burn_knuckle']['trigger'].update(tr))
+
+    c = character(follow(motion='any', after='power_wave', window=[3, 9], contact=True))
+    k = c.move_names.index('burn_knuckle')
+    assert c.moves[k][16:] == (c.move_names.index('power_wave') + 1, 3, 9, 1)
+    assert c.moves[k - 1][16:] == (0, 0, 0, 0)
+    assert character(follow(after='stand_hp', window=[0, 0])).moves[k][16:19] == (2, 0, 0)
+
     # Malformed systems.json.
     bad_systems = [
         ('no kof2002', lambda: {'systems': {'samsho5sp': SYSTEMS['systems']['samsho5sp']}}),
@@ -184,6 +196,17 @@ def main():
         ('a projectile class typo', with_terry(lambda c, _: c['projectiles']['power_wave'].update(
             {'class': 'specail'}))),
         ('a source without url', with_terry(lambda c, mm: mm.update(sources={'x': {}}))),
+        ('a follow-up of an unknown move', follow(after='power_wav', window=[0, 1])),
+        ('a follow-up of itself', follow(after='burn_knuckle', window=[0, 1])),
+        ('a follow-up without a window', follow(after='power_wave')),
+        ('a window of one tick value', follow(after='power_wave', window=[3])),
+        ('a window closing before it opens', follow(after='power_wave', window=[5, 4])),
+        ('a window past the parent', follow(after='stand_lp', window=[0, 60])),
+        ('a window without after', follow(window=[0, 1])),
+        ('contact without after', follow(contact=True)),
+        ('contact not a bool', follow(after='power_wave', window=[0, 1], contact=1)),
+        ('a held direction on its own', follow(motion='6')),
+        ('any on its own', follow(motion='any')),
     ]
     for what, m in bad_terry:
         refused(f'terry with {what}', lambda mm=m: character(mm))
@@ -214,8 +237,8 @@ def main():
         path = ASSETS / name
         text = path.read_text()
         assert convert.convert(text, json.loads(text), real, False, lambda _: None) == text, name
-    print('pack-test: systems.json, stats, class defaults, damage scale, src/sources '
-          'validation and conversion passed')
+    print('pack-test: systems.json, stats, class defaults, damage scale, follow-ups, '
+          'src/sources validation and conversion passed')
 
 
 if __name__ == '__main__':

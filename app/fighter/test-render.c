@@ -1,5 +1,5 @@
 /* Renderer and pack-decoder regression for the fighter core, linked into the
- * callback harness (test.c). It writes its own FIGHTP06 packs from known
+ * callback harness (test.c). It writes its own FIGHTP07 packs from known
  * bitmaps, two system profiles, two spark anims and a three-layer stage,
  * checks that malformed or truncated packs (including bad systems, stats,
  * classes, class defaults, sparks, walls, effect sets, slash and home
@@ -13,12 +13,17 @@
  * screens). The synthetic stage is also drawn per screen pixel from its
  * layers (parallax, every edge rule, anims) for many cameras, shakes and
  * ticks. It also rejects malformed palette, frame, name, box, step,
- * motion, move, special and projectile data, checks the loader's derived
- * frame data, the cast (resident images follow the state's fighters,
- * palettes and stage), that boxes mirror with the sprite pixel for pixel,
- * the L box overlay and the effect pixel budget. FIGHTER_BENCH=1 also
- * prints host render times and written pixels per stress scene and per
- * stage; host numbers only show relative change. */
+ * motion, move, special, follow-up and projectile data, checks the loader's
+ * derived frame data, the render cache (its regions, the select screen
+ * wanting side 0 only, resident images following the state's fighters,
+ * palettes and stage; a lazily filled cache with a per-run budget and
+ * on-demand frames matches the fully expanded one pixel for pixel over
+ * select cursor moves and a long Auto run, never exceeds its slice and is
+ * complete when the versus card ends), that boxes mirror with the sprite
+ * pixel for pixel, the L box overlay and the effect pixel budget.
+ * FIGHTER_BENCH=1 also prints host render times and written pixels per
+ * stress scene and per stage and the cost of a full cast; host numbers only
+ * show relative change. */
 #include "fighter.h"
 #include "test-render.h"
 #include <assert.h>
@@ -166,6 +171,9 @@ static void reference(const struct assets *a, const struct decoded *dec,
 			if (c->image < 0 || (unsigned)c->image >= a->images)
 				continue;
 			const struct image *im = &a->image[c->image];
+			/* An empty cache slot draws nothing. */
+			if (!im->w)
+				continue;
 			layer = layer_of(a, c->image);
 			if (layer >= 0) {
 				l = &a->layer[a->stage[a->cast_stage].first_layer + (unsigned)layer];
@@ -246,7 +254,8 @@ enum field {
 	F_MOVE_HITSTUN, F_MOVE_BLOCKSTUN, F_MOVE_HITSTOP, F_MOVE_PUSHBACK,
 	F_MOVE_BLOCK_PUSH, F_MOVE_GUARD, F_MOVE_CANCEL, F_MOVE_CLASS, F_MOVE_DEFAULTS,
 	F_SPECIAL_KIND, F_SPECIAL_MOTION,
-	F_SPECIAL_BUTTONS, F_PROJ_FIRST, F_PROJ_COUNT, F_PROJ_SPEED, F_PROJ_LIFETIME,
+	F_SPECIAL_BUTTONS, F_MOVE_AFTER, F_SPECIAL_AFTER, F_SPECIAL_OPEN, F_FOLLOW_MOTION,
+	F_FOLLOW_AFTER, F_FOLLOW_OPEN, F_FOLLOW_CLOSE, F_FOLLOW_CONTACT, F_PROJ_FIRST, F_PROJ_COUNT, F_PROJ_SPEED, F_PROJ_LIFETIME,
 	F_PROJ_X, F_PROJ_Y, F_PROJ_DAMAGE, F_PROJ_CHIP, F_PROJ_HITSTUN, F_PROJ_BLOCKSTUN,
 	F_PROJ_HITSTOP, F_PROJ_PUSHBACK, F_PROJ_BLOCK_PUSH, F_PROJ_GUARD, F_PROJ_BLEND,
 	F_PROJ_ALPHA, F_PROJ_CLASS, F_PROJ_DEFAULTS, F_STEP_FRAME, F_STEP_TICKS, F_STEP_BOX, F_STEP_HURT, F_ACTION_STEP_HIT,
@@ -492,7 +501,7 @@ static int syn_hurts(unsigned i) { return i < 14; }
 static void build(struct pack *p, int automatic)
 {
 	memset(p, 0, sizeof(*p));
-	memcpy(p->data, "FIGHTP06", 8);
+	memcpy(p->data, "FIGHTP07", 8);
 	p->len = 16;
 	MARK(F_FLAGS);
 	put(p, (unsigned)automatic, 4);
@@ -603,7 +612,7 @@ static void build(struct pack *p, int automatic)
 	MARK(F_CHAR_BOXES);
 	put(p, boxes, 2);
 	MARK(F_CHAR_MOVES);
-	put(p, MOVES + 1, 2);
+	put(p, MOVES + 2, 2);
 	MARK(F_CHAR_PROJECTILES);
 	put(p, 1, 2);
 	for (int k = 0; k < ACTIONS; k++) {
@@ -614,32 +623,48 @@ static void build(struct pack *p, int automatic)
 		put(p, (unsigned)(k % 6), 2);
 		put(p, 1 + (unsigned)(k % 3), 2);
 	}
-	for (unsigned t = 0; t <= MOVES; t++) {
+	for (unsigned t = 0; t <= MOVES + 1; t++) {
 		/* kind, trigger, buttons, first, count, damage, chip, hitstun,
 		 * blockstun, hitstop, pushback, block pushback, guard, cancel,
-		 * class, defaults; crouch HK takes its stuns from class heavy. */
-		int heavy = t == CROUCH_HK;
-		const unsigned v[16] = {t == MOVES,
-					t == MOVES ? MOTION_236 : t,
-					t == MOVES ? BUTTON_LP | BUTTON_HP : 0,
-					t == MOVES ? 12 : 8,
-					t == MOVES ? 2 : 4,
+		 * class, defaults, after, open, close, contact; crouch HK takes
+		 * its stuns from class heavy. The second special is a follow-up
+		 * of the first (forward + HK during its ticks 1..2, on contact). */
+		int heavy = t == CROUCH_HK, follow = t == MOVES + 1;
+		const unsigned v[20] = {t >= MOVES,
+					follow	    ? HOLD_6
+					: t == MOVES ? MOTION_236
+						     : t,
+					follow	    ? BUTTON_HK
+					: t == MOVES ? BUTTON_LP | BUTTON_HP
+						     : 0,
+					t >= MOVES ? 12 : 8,
+					t >= MOVES ? 2 : 4,
 					10 + t, t, heavy ? 0 : 5 + t, heavy ? 0 : 3 + t, heavy ? 0 : 2, 6, 8,
 					t % GUARD_TYPES, t & CANCEL_MASK,
-					heavy ? CLASS_HEAVY : t == MOVES ? CLASS_SPECIAL : CLASS_NONE,
-					heavy ? 7 : 0};
-		if (t == STAND_HK)
+					heavy ? CLASS_HEAVY : t >= MOVES ? CLASS_SPECIAL : CLASS_NONE,
+					heavy ? 7 : 0, follow ? MOVES + 1 : 0, follow, follow * 2, follow};
+		if (t == STAND_HK) {
 			for (int j = 0; j < 16; j++)
 				p->at[F_MOVE_KIND + j] = p->len + 2 * (size_t)j;
-		if (t == MOVES)
+			p->at[F_MOVE_AFTER] = p->len + 32;
+		}
+		if (t == MOVES) {
 			for (int j = 0; j < 3; j++)
 				p->at[F_SPECIAL_KIND + j] = p->len + 2 * (size_t)j;
+			p->at[F_SPECIAL_AFTER] = p->len + 32;
+			p->at[F_SPECIAL_OPEN] = p->len + 34;
+		}
+		if (follow) {
+			p->at[F_FOLLOW_MOTION] = p->len + 2;
+			for (int j = 0; j < 4; j++)
+				p->at[F_FOLLOW_AFTER + j] = p->len + 32 + 2 * (size_t)j;
+		}
 		if (heavy) {
 			p->at[F_DEF_HITSTUN] = p->len + 14;
 			p->at[F_DEF_CLASS] = p->len + 28;
 			p->at[F_DEF_DEFAULTS] = p->len + 30;
 		}
-		for (int j = 0; j < 16; j++)
+		for (int j = 0; j < 20; j++)
 			put(p, v[j], 2);
 	}
 	/* first, count, speed, lifetime, x, y, damage, chip, hitstun,
@@ -774,6 +799,14 @@ static void malformed(void)
 	    {F_MOVE_CANCEL, CANCEL_MASK + 1, 2}, {F_SPECIAL_KIND, 0, 2},
 	    {F_SPECIAL_MOTION, MOTIONS, 2},   {F_SPECIAL_BUTTONS, 0, 2},
 	    {F_SPECIAL_BUTTONS, 16, 2},
+	    /* Follow-ups: only specials, never their own parent, held directions
+	     * only with a parent, the window inside the parent's 4 ticks. */
+	    {F_MOVE_AFTER, MOVES + 1, 2},   {F_SPECIAL_AFTER, MOVES + 1, 2},
+	    {F_SPECIAL_OPEN, 1, 2},	    {F_SPECIAL_MOTION, MOTION_ANY, 2},
+	    {F_FOLLOW_MOTION, MOTIONS, 2},  {F_FOLLOW_AFTER, 0, 2},
+	    {F_FOLLOW_AFTER, MOVES + 3, 2}, {F_FOLLOW_AFTER, MOVES + 2, 2},
+	    {F_FOLLOW_OPEN, 3, 2},	    {F_FOLLOW_CLOSE, 4, 2},
+	    {F_FOLLOW_CLOSE, MAX_MOVE_TICKS, 2}, {F_FOLLOW_CONTACT, 2, 2},
 	    /* Projectiles. */
 	    {F_PROJ_FIRST, SYN_STEPS - 1, 2}, {F_PROJ_COUNT, 0, 2},
 	    {F_PROJ_FIRST, 12, 2},	    {F_PROJ_SPEED, 0, 2},
@@ -889,9 +922,9 @@ static void malformed(void)
 	bad.data[bad.len++] = 0;
 	seal(&bad);
 	assert(!load(&assets_a, &bad));
-	for (char v = '1'; v <= '5'; v++) {
+	for (char v = '1'; v <= '6'; v++) {
 		bad = good;
-		bad.data[7] = (uint8_t)v; /* FIGHTP01..05: retired formats */
+		bad.data[7] = (uint8_t)v; /* FIGHTP01..06: retired formats */
 		assert(!load(&assets_a, &bad));
 	}
 	bad = good;
@@ -909,6 +942,11 @@ static void roundtrip(const struct assets *a, const struct decoded *dec,
 	for (unsigned i = 0; i < a->images; i++) {
 		const struct image *im = &a->image[i];
 		int layer = layer_of(a, (int)i);
+		if (!im->w) {
+			/* An empty cache slot: only past the effects and sparks. */
+			assert(i >= a->effect_images && !im->h && !im->count);
+			continue;
+		}
 		if (layer >= 0) {
 			const struct layer *l =
 			    &a->layer[a->stage[a->cast_stage].first_layer + (unsigned)layer];
@@ -1073,7 +1111,7 @@ static void game_scenes(struct assets *a, const struct decoded *dec)
 static void synthetic_moves(struct assets *a)
 {
 	const struct character *ch = &a->chr[0];
-	assert(a->characters == 1 && !strcmp(ch->name, "SYN") && ch->moves == MOVES + 1 &&
+	assert(a->characters == 1 && !strcmp(ch->name, "SYN") && ch->moves == MOVES + 2 &&
 	       ch->projectiles == 1 && ch->palette[0] == 0 && ch->palette[1] == 1);
 	/* Action HURT (5) is steps 5..7 (k % 6, 1 + k % 3), 2 + 3 + 4 ticks. */
 	assert(ch->action[HURT].count == 3 && ch->action[HURT].total == 2 + 3 + 4);
@@ -1103,7 +1141,12 @@ static void synthetic_moves(struct assets *a)
 	assert(sp->special && sp->motion == MOTION_236 &&
 	       sp->buttons == (BUTTON_LP | BUTTON_HP) && sp->anim.total == 4 &&
 	       sp->startup == 2 && sp->active == 2 && !sp->recovery && sp->spawn == 1 &&
-	       rise->vx == 3 && rise->vy == -2 && rise->spawn == 1 && rise[1].vy == 2);
+	       rise->vx == 3 && rise->vy == -2 && rise->spawn == 1 && rise[1].vy == 2 &&
+	       !sp->after && !sp->open && !sp->close && !sp->contact);
+	const struct move *fu = &ch->move[MOVES + 1];
+	assert(fu->special && fu->motion == HOLD_6 && fu->buttons == BUTTON_HK &&
+	       fu->after == MOVES + 1 && fu->open == 1 && fu->close == 2 && fu->contact == 1 &&
+	       fu->anim.total == 4 && !ch->move[STAND_HK].after);
 	const struct projectile *pr = &ch->projectile[0];
 	assert(pr->anim.count == 2 && pr->anim.total == 4 && pr->speed == 5 &&
 	       pr->lifetime == 50 && pr->x == 10 && pr->y == -5 && pr->hit.damage == 40 &&
@@ -1123,22 +1166,37 @@ static void synthetic_moves(struct assets *a)
 	       st->dragon == 20 && st->charge == 30 && st->grace == 10 && st->release == 4);
 	assert(a->sys[0].stats.walk == 7 && a->sys[0].stats.height == HEIGHT_MID &&
 	       a->sys[0].cls[CLASS_COMMAND].has == 1 && !a->sys[0].cls[CLASS_THROW].has);
-	/* The cast follows the state: the stage's images, then normal and
-	 * alternate palette images of every frame the character uses (all
-	 * five), recast only on change. */
+	/* The cache follows the state: the select screen only P1 (normal
+	 * palette); a fight both sides (normal and alternate palette images of
+	 * every frame the character uses, all five) and the stage in their own
+	 * regions, recast only on change. */
 	struct fight_state s;
 	fight_reset(&s, 0);
-	assert(a->cast[0][0] == -1 && fight_cast(a, &s) && !fight_cast(a, &s));
-	assert(a->cast_stage == 0 &&
+	assert(a->cast[0][0] == -1 && a->cast_stage == -1 &&
 	       a->images == a->effect_images + a->stage[0].images + 2 * SYN_FRAMES &&
-	       a->cast_pixels[0] == ch->pixels && a->cast_pixels[1] == ch->pixels);
+	       a->char_images == SYN_FRAMES && a->char_pixels == ch->pixels);
+	assert(fight_cast(a, &s) && !fight_cast(a, &s) && fight_ready(a));
+	assert(a->wanted == 1 && a->cast[0][0] == 0 && a->cast[1][0] == -1 &&
+	       a->cast_stage == -1 && a->cast_pixels[0] == ch->pixels);
+	fight_start(&s, a, 0, 0);
+	assert(fight_cast(a, &s) && !fight_cast(a, &s) && a->wanted == 7);
+	assert(a->cast_stage == 0 && a->stage_pixels == a->stage[0].pixels &&
+	       a->stage_used == a->stage[0].images && a->cast_images[0] == SYN_FRAMES &&
+	       a->cast_images[1] == SYN_FRAMES && a->cast_pixels[0] == ch->pixels &&
+	       a->cast_pixels[1] == ch->pixels);
 	for (int i = 0; i < 2; i++)
 		for (unsigned f = 0; f < SYN_FRAMES; f++) {
 			const struct image *im = &a->image[a->look[i][f]];
-			assert(a->look[i][f] >= 0 && im->frame == f && im->palette == (unsigned)i);
+			assert(a->look[i][f] >= (int)a->region_image[1 + i] &&
+			       a->look[i][f] < (int)(a->region_image[1 + i] + SYN_FRAMES) &&
+			       im->frame == f && im->palette == (unsigned)i);
 		}
 	s.pal[1] = 0;
-	assert(fight_cast(a, &s) && a->image[a->look[1][0]].palette == 0);
+	assert(fight_cast(a, &s) == 1 && a->image[a->look[1][0]].palette == 0 &&
+	       a->image[a->look[0][0]].palette == 0);
+	/* Back on the select screen side 1 and the stage keep what they hold. */
+	s.mode = MODE_SELECT;
+	assert(!fight_cast(a, &s) && a->wanted == 1 && a->cast[1][1] == 0 && a->cast_stage == 0);
 	/* Mirroring: right-facing box at anchor 100 covers 90..109; left-facing
 	 * mirrors around the anchor pixel boundary like the sprite does. */
 	const struct box b = {-10, -29, 20, 20}, hit = {5, -15, 21, 6};
@@ -1488,6 +1546,93 @@ static void bench(struct assets *a)
 		a->stages = stages;
 	}
 }
+/* The cache filled a budget at a time, as libretro.c does (prefetch, then
+ * what the scene still misses), draws exactly what a fully expanded cache
+ * draws on every tick, and no call expands much more than its budget: the
+ * select screen with the cursor moving every other tick, the versus card
+ * (after which the stage and both fighters are complete, so a fight never
+ * waits for the stage), fights, result and clear screens of Auto ladders. */
+static void incremental_cache(struct assets *full, struct assets *lazy)
+{
+	static struct scene s, t;
+	static uint16_t fb[2][FW * FH];
+	const uint32_t budget = 49152;
+	uint32_t biggest = 0, worst = 0, demanded = 0;
+	for (unsigned f = 0; f < lazy->frames; f++)
+		biggest = lazy->frame[f].count > biggest ? lazy->frame[f].count : biggest;
+	biggest = biggest > MAX_COVER ? biggest : MAX_COVER;
+	struct fight_state st;
+	unsigned intros = 0, moves = 0;
+	for (int automatic = 0; automatic < 2; automatic++) {
+		fight_reset(&st, automatic);
+		for (unsigned n = 0; n < (automatic ? 9000u : 120u); n++) {
+			uint32_t keys = !automatic && n % 2 == 0 ? 1u << 7 : 0; /* RIGHT */
+			uint32_t before = st.chr[0];
+			fight_step(&st, lazy, keys, 0, 0);
+			moves += st.mode == MODE_SELECT && st.chr[0] != before;
+			fight_want(lazy, &st);
+			uint32_t done = fight_prefetch(lazy, budget);
+			assert(done < budget + biggest);
+			fight_scene(&st, lazy, &s);
+			assert(!s.stage_missing);
+			if (s.misses) {
+				assert(s.misses <= SCENE_MISSES);
+				uint32_t more = fight_demand(lazy, &s);
+				assert(more <= s.misses * biggest);
+				demanded += s.misses;
+				done += more;
+				fight_scene(&st, lazy, &s);
+				assert(!s.misses);
+			}
+			worst = done > worst ? done : worst;
+			if (st.mode == MODE_FIGHT && st.timer == INTRO_TICKS - 1)
+				intros++;
+			if (st.mode == MODE_FIGHT && st.timer == INTRO_TICKS)
+				assert(fight_ready(lazy));
+			fight_cast(full, &st);
+			fight_scene(&st, full, &t);
+			noise(fb[0]);
+			memcpy(fb[1], fb[0], sizeof(fb[0]));
+			fight_render(lazy, &s, fb[0]);
+			fight_render(full, &t, fb[1]);
+			if (memcmp(fb[0], fb[1], sizeof(fb[0]))) {
+				fprintf(stderr, "incremental cache: tick %u mode %u timer %u differs\n",
+					st.tick, st.mode, st.timer);
+				abort();
+			}
+		}
+	}
+	assert(moves >= 50 && intros >= 3 && demanded > 0);
+	if (!getenv("FIGHTER_BENCH"))
+		return;
+	printf("fighter-bench: cache worst run %u px (budget %u, largest frame or row %u), %u "
+	       "frames on demand\n",
+	       worst, budget, biggest, demanded);
+	/* A whole cast at once (the heaviest character mirrored on the first
+	 * stage), as every select cursor move used to cost. */
+	unsigned heavy = 0;
+	for (unsigned c = 0; c < lazy->characters; c++)
+		heavy = lazy->chr[c].pixels > lazy->chr[heavy].pixels ? c : heavy;
+	struct timespec t0, t1;
+	double us = 0;
+	uint32_t px = 0;
+	for (int r = 0; r < 20; r++) {
+		fight_reset(&st, 0);
+		fight_start(&st, lazy, heavy ? 0 : 1, heavy ? 0 : 1);
+		st.arena = 1 % lazy->stages;
+		fight_want(lazy, &st);
+		fight_start(&st, lazy, heavy, heavy);
+		st.arena = 0;
+		fight_want(lazy, &st);
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		px = fight_prefetch(lazy, UINT32_MAX);
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		us += ((double)(t1.tv_sec - t0.tv_sec) * 1e9 + (double)(t1.tv_nsec - t0.tv_nsec)) /
+		      1000 / 20;
+	}
+	printf("fighter-bench: full cast %s mirror on %s %u px in %.0f us (%.2f ns/px)\n",
+	       lazy->chr[heavy].name, lazy->stage[0].name, px, us, us * 1000 / px);
+}
 /* SYN moved to system "ss": damage and chip scaled by 800 per mille
  * (rounded half up), crouch HK and the projectile take ss's class values,
  * the stats ss's defaults except SYN's own walk and height. */
@@ -1555,6 +1700,8 @@ void render_tests(const uint8_t *real, size_t real_len)
 	attacker_front(&assets_a);
 	overlay(&assets_a);
 	effect_cap(&assets_a);
+	assert(fight_assets(&assets_b, real, real_len, &automatic));
+	incremental_cache(&assets_a, &assets_b);
 	if (getenv("FIGHTER_BENCH"))
 		bench(&assets_a);
 }

@@ -1,4 +1,4 @@
-/* Portable fighter state, FIGHTP06 content (system profiles with walls and
+/* Portable fighter state, FIGHTP07 content (system profiles with walls and
  * effect sets, a roster of characters with stats, frames, per-step boxes and
  * motion, normals, specials and projectiles, spark animations and parallax
  * stages), bounded draw commands, the per-tick sound events and the RGB565
@@ -6,8 +6,9 @@
  * boxes, moves and each character's resolved stats, keep the camera, the
  * spark pool and the sound events in the state and only emit draw commands;
  * render.c owns the pack decoder (which fills stats and class defaults from
- * the character's system and applies its damage scale), the per-match cast
- * (two fighters and the stage) and the pixel loops. */
+ * the character's system and applies its damage scale), the render cache
+ * (the fighters and stage the state shows, expanded to RGB565 lazily and in
+ * bounded slices) and the pixel loops. */
 #ifndef FIGHTER_H
 #define FIGHTER_H
 #include <stddef.h>
@@ -112,6 +113,12 @@
 #define HISTORY 32
 /* Rounds a fighter must win to take a match (1 = single round). */
 #define ROUNDS_TO_WIN 1
+/* Ticks of the versus card before a ladder round: the rules hold still
+ * (no input, no AI) while the core fills the render cache; ROUND_START
+ * sounds when it ends. */
+#define INTRO_TICKS 45
+/* Cast frames a scene can report missing (see struct scene). */
+#define SCENE_MISSES 16
 enum action {
 	IDLE, WALK_FORWARD, WALK_BACK, JUMP, GUARD, HURT, KO, CROUCH, CROUCH_GUARD,
 	CROUCH_HURT, ACTIONS
@@ -121,8 +128,14 @@ enum trigger {
 	STAND_LP, STAND_HP, STAND_LK, STAND_HK, CROUCH_LP, CROUCH_HP, CROUCH_LK,
 	CROUCH_HK, MOVES
 };
-/* Special move motions, directions relative to facing; [d] holds d. */
-enum motion { MOTION_236, MOTION_214, MOTION_623, CHARGE_46, CHARGE_28, MOTIONS };
+/* Special move motions, directions relative to facing; [d] holds d. From
+ * MOTION_ANY on a follow-up's command is the button with a direction held
+ * on the press (any, none, up, down, forward or back; numpad 7/8/9 count as
+ * up, 1/2/3 as down, 3/6/9 forward, 1/4/7 back). */
+enum motion {
+	MOTION_236, MOTION_214, MOTION_623, CHARGE_46, CHARGE_28, MOTION_ANY, HOLD_5, HOLD_8,
+	HOLD_2, HOLD_6, HOLD_4, MOTIONS
+};
 /* Button bits of a special's trigger. */
 enum button { BUTTON_LP = 1, BUTTON_HP = 2, BUTTON_LK = 4, BUTTON_HK = 8 };
 /* high: stand or crouch block; low: crouch block only; overhead: stand only. */
@@ -167,10 +180,11 @@ enum mode { MODE_SELECT, MODE_FIGHT, MODE_RESULT, MODE_CLEAR, MODES };
  * ticks (age). charge packs back held/grace and down held/grace ticks, one
  * byte each; history holds the last HISTORY raw directions (4 bits each,
  * newest in the low bits of history[0]). plan/plan_tick drive the AI's
- * special inputs. */
+ * special inputs. clock counts every tick (frozen ones too, at most 255)
+ * since the current move started: a follow-up's motion must lie within it. */
 struct fighter {
 	int32_t x, y, vy, hp, face, walk, block, crouch, move, elapsed, hit, stun,
-	    freeze, slide, keys, corner, squat, buffer, age, plan, plan_tick;
+	    freeze, slide, keys, corner, squat, buffer, age, plan, plan_tick, clock;
 	uint32_t charge, history[HISTORY / 8];
 };
 /* A live projectile: kind is the owner's projectile index + 1 (0 = free). */
@@ -227,7 +241,8 @@ struct sound_event {
  * side; in the select screen chr[0] is the cursor. beaten has a bit per
  * character beaten in this ladder run, stage counts from 1, wins counts
  * rounds in the current match, timer counts ticks in a select, result or
- * clear screen, run counts ladder runs (the Auto rotation). arena is the
+ * clear screen and, in the fight mode, the intro (the round runs once it
+ * reaches INTRO_TICKS), run counts ladder runs (the Auto rotation). arena is the
  * pack stage of the fight (0 without stages), cam the camera column, shake
  * and flash the remaining screen shake and KO flash ticks. */
 struct fight_state {
@@ -288,12 +303,15 @@ struct hit {
 /* Startup, active, recovery and reach are derived from the steps at load.
  * Specials have a motion and button bits; spawn is the projectile + 1 the
  * move launches (0 = none); slash is set for weapon moves (the character's
- * slash mask). */
+ * slash mask). A follow-up (the next stage of a rekka) has after = its
+ * parent move + 1: it never starts on its own, only from the parent once
+ * that has shown an elapsed in open..close (and connected when contact is
+ * set); see fighter.c. */
 struct move {
 	struct anim anim;
 	struct hit hit;
 	uint8_t cancel, groups, startup, active, recovery, special, motion, buttons,
-	    spawn, slash;
+	    spawn, slash, after, open, close, contact;
 	int16_t reach; /* furthest hitbox edge in front of the anchor */
 };
 struct projectile {
@@ -395,18 +413,30 @@ struct stage {
 	uint32_t pixels, rows, spans;
 	unsigned images;
 };
-/* cast[i] is the (character, palette) whose frames image[] currently holds
- * for side i (-1 = none); look[i][frame] is that side's image or -1.
- * cast_stage is the expanded stage (-1 = none): layer_image[k] is its
- * layer k's image (-1 = nothing to draw) covering layer pixels from
- * (layer_x0, layer_y0), stage_look[step] each anim step's image or -1.
- * Rows and spans past pack_rows/pack_spans belong to the expanded layers. */
+/* The render cache (never part of the state). After the effects, image[]
+ * and pixel[] hold three regions sized at load for the largest stage and
+ * the largest character: the stage's (region 0), side 0's and side 1's;
+ * images and pixels are their end, slots not yet filled have w 0.
+ * cast[i] is the (character, palette) side i's region belongs to (-1 =
+ * none); look[i][frame] is that side's image or -1 while not expanded,
+ * cast_images/cast_pixels what it holds and cast_next the next character
+ * step the prefetch looks at. cast_stage is the stage of region 0 (-1 =
+ * none): its layers are expanded in order, stage_layer the one in progress
+ * (layers = complete) and stage_row the next row of its image, then its
+ * anim steps (-1: not begun); layer_image[k] is layer k's image (-1 =
+ * nothing to draw) covering layer pixels from (layer_x0, layer_y0),
+ * stage_look[step] each anim step's image or -1. Rows and spans past
+ * pack_rows/pack_spans belong to the expanded layers. wanted has bit i for
+ * side i and bit 2 for the stage when the state draws them. */
 struct assets {
 	uint32_t hash;
 	unsigned systems, characters, palettes, frames, rows, spans, indices, steps, boxes,
 	    effects, images, pixels, effect_images, effect_pixels, sparks, spark_steps, stages,
 	    layers, anims, stage_steps, pack_rows, pack_spans;
-	int cast[2][2], cast_stage;
+	uint32_t region_image[3], region_pixel[3], char_images, char_pixels, stage_images,
+	    stage_cap;
+	int cast[2][2], cast_stage, stage_row;
+	unsigned cast_images[2], cast_next[2], stage_layer, stage_used, wanted;
 	uint32_t cast_pixels[2], stage_pixels;
 	int layer_image[MAX_LAYERS];
 	int16_t layer_x0[MAX_LAYERS], layer_y0[MAX_LAYERS];
@@ -441,10 +471,15 @@ struct command {
 	uint8_t alpha;
 };
 /* effects_requested/effects_drawn count blended effect sprites this frame,
- * sparks the spark sprites, layers the stage layer and anim sprites. */
+ * sparks the spark sprites, layers the stage layer and anim sprites. The
+ * cast frames the scene wanted but the cache has not expanded yet are in
+ * miss (side << 15 | frame, at most SCENE_MISSES, misses counts all) and
+ * were left out; stage_missing is set when the arena's stage is still
+ * incomplete and the flat background stood in. fight_demand fills both. */
 struct scene {
 	struct command cmd[COMMANDS];
-	unsigned count, effects_requested, effects_drawn, sparks, layers;
+	unsigned count, effects_requested, effects_drawn, sparks, layers, misses, stage_missing;
+	uint16_t miss[SCENE_MISSES];
 };
 /* Screen rectangle of a box for a fighter anchored at x, GROUND + y. */
 struct area {
@@ -471,9 +506,22 @@ void fight_render(const struct assets *a, const struct scene *scene, uint16_t *f
 int fight_assets(struct assets *a, const void *data, size_t size, int *automatic);
 /* Screen x of a stage layer's left edge with the camera at cam. */
 int fight_layer_x(const struct layer *l, int cam);
-/* Expand the state's two cast fighters and its stage into resident RGB565
- * images if they changed; returns 1 when it expanded. Never fails for a
- * loaded pack. */
+/* The render cache (render.c). fight_want points it at what state s draws:
+ * in the fight mode both sides' (character, palette) and the arena's
+ * stage, otherwise side 0 only (the select, result and clear screens show
+ * P1; side 1 and the stage keep what they hold). A region whose owner
+ * changes is emptied; nothing is expanded. Returns bit i when side i
+ * changed, bit 2 for the stage. fight_prefetch expands about budget pixels
+ * of what is still missing (a stage row counts its width): the stage, then
+ * side 0, then side 1; it returns the pixels done. fight_demand expands
+ * what a scene reported missing (its frames, an incomplete stage) so the
+ * scene can be built again; fight_ready tells whether everything wanted is
+ * expanded. fight_cast is all of it at once (returns 1 if it expanded
+ * anything); it never fails for a loaded pack. */
+unsigned fight_want(struct assets *a, const struct fight_state *s);
+uint32_t fight_prefetch(struct assets *a, uint32_t budget);
+uint32_t fight_demand(struct assets *a, const struct scene *scene);
+int fight_ready(const struct assets *a);
 int fight_cast(struct assets *a, const struct fight_state *s);
 void fight_encode(const struct fight_state *s, uint32_t words[STATE_WORDS]);
 int fight_decode(struct fight_state *s, const struct assets *a,

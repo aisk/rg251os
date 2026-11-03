@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a FIGHTP06 content pack from ripped sprite sheets and their manifests.
+"""Build a FIGHTP07 content pack from ripped sprite sheets and their manifests.
 
 Each manifest (assets/fighter/<name>.json) describes one sheet and is the
 source of truth for it: every frame is a hand-checked sheet rectangle plus a
@@ -72,7 +72,18 @@ top-level keys such as "notes" are ignored):
               "trigger": {"motion": M, "buttons": B} with M one of 236, 214,
               623, [4]6, [2]8 (directions relative to facing; [d] = charge)
               and B "P", "K" or a list of lp/hp/lk/hk. Specials are checked
-              in manifest order, the first match wins. Every move has
+              in manifest order, the first match wins. A follow-up (the next
+              stage of a rekka) adds "after": the special or normal it
+              continues, "window": [open, close] (elapsed ticks of that move,
+              0 <= open <= close < its length) and optional "contact" (true:
+              only when that move hit or was guarded). Its motion may also be
+              a direction held with the button: 5 (none), 8 (up), 2 (down), 6
+              (forward), 4 (back) or "any". It never comes out on its own: a
+              press while the parent move shows elapsed <= close is checked
+              against the parent's follow-ups first, with the motion entered
+              after the parent began, is buffered like any press and starts
+              on the first unfrozen tick on which the parent has shown an
+              elapsed in the window. Every move has
               "steps", guard (high = stand or crouch block, low = crouch block
               only, overhead = stand block only) and cancel (list of chain,
               special, super: chain and special are enforced, super is stored
@@ -166,7 +177,7 @@ hyper_hop, chip, meters, mechanics, scaling, stun and guard are accepted for
 later steps and not packed.
 
 Pack layout, all little endian (the C loader in app/fighter/render.c checks it):
-  header     "FIGHTP06", u32 size, u32 FNV-1a of bytes 16..size, u32 flags
+  header     "FIGHTP07", u32 size, u32 FNV-1a of bytes 16..size, u32 flags
              (bit 0 automatic), u32 palettes, frames, characters, effects,
              systems, sparks, stages
   palette    u16 sheet, u16 n (1..256), n x u16 RGB565
@@ -188,11 +199,14 @@ Pack layout, all little endian (the C loader in app/fighter/render.c checks it):
              palette; u16 system, u16 override mask (bit per stat), 11 stats
              x u16 as above (0 where the mask bit is clear); u16 steps, boxes,
              moves, projectiles; 10 actions x (u16 first step, u16 steps);
-             moves x 16 u16 (kind 0 normal or 1 special, trigger or motion,
-             buttons, first step, steps, damage, chip, hitstun, blockstun,
-             hitstop, pushback, block_pushback, guard, cancel bits, class 0
-             none or 1 + class, defaults: bit 0 hitstun, 1 blockstun, 2
-             hitstop from the class, packed as 0): the eight normals, then the
+             moves x 20 u16 (kind 0 normal or 1 special, trigger or motion
+             (0 236, 1 214, 2 623, 3 [4]6, 4 [2]8, follow-ups also 5 any,
+             6 5, 7 8, 8 2, 9 6, 10 4), buttons, first step, steps, damage,
+             chip, hitstun, blockstun, hitstop, pushback, block_pushback,
+             guard, cancel bits, class 0 none or 1 + class, defaults: bit 0
+             hitstun, 1 blockstun, 2 hitstop from the class, packed as 0;
+             after = parent move index + 1 or 0, window open, close, contact
+             0 or 1, all 0 without a parent): the eight normals, then the
              specials in priority order; projectiles x 18 u16 (first step,
              steps, speed, lifetime, i16 offset x, i16 offset y, damage, chip,
              hitstun, blockstun, hitstop, pushback, block_pushback, guard,
@@ -221,13 +235,15 @@ import struct
 import sys
 import zlib
 
-MAGIC = b'FIGHTP06'
+MAGIC = b'FIGHTP07'
 # Order matters: these are the C enums in app/fighter/fighter.h.
 ACTIONS = ['idle', 'walk_forward', 'walk_back', 'jump', 'guard', 'hurt', 'ko',
            'crouch', 'crouch_guard', 'crouch_hurt']
 MOVES = ['stand_lp', 'stand_hp', 'stand_lk', 'stand_hk',
          'crouch_lp', 'crouch_hp', 'crouch_lk', 'crouch_hk']
-MOTIONS = ['236', '214', '623', '[4]6', '[2]8']
+MOTIONS = ['236', '214', '623', '[4]6', '[2]8', 'any', '5', '8', '2', '6', '4']
+# Motions from 'any' on are a direction held with the button: follow-ups only.
+FOLLOW_ONLY = MOTIONS.index('any')
 BUTTONS = ['lp', 'hp', 'lk', 'hk']
 GUARDS = ['high', 'low', 'overhead']
 CANCELS = ['chain', 'special', 'super']
@@ -780,6 +796,8 @@ class Character:
         self.display = display_name(name)
         self.steps, self.boxes, self.actions = [], [], []
         self.moves, self.move_names, self.projectiles, self.projectile_names = [], [], [], []
+        # Per move: None or (parent name, [open, close], contact).
+        self.follow = []
         self.hits, self.projectile_hits = [], []
         hurt = m['hurtboxes']
         index = {f: base + i for i, f in enumerate(frame_names)}
@@ -934,17 +952,46 @@ class Character:
                     not set(mv['cancel']) <= set(CANCELS):
                 raise ValueError(f'{what}: guard must be one of {GUARDS}, cancel of {CANCELS}')
             cancel = sum(1 << CANCELS.index(c) for c in set(mv['cancel']))
+            follow = None
             if special:
                 tr = mv['trigger']
-                if not isinstance(tr, dict) or set(tr) != {'motion', 'buttons'} or \
+                if not isinstance(tr, dict) or not {'motion', 'buttons'} <= set(tr) or \
+                        set(tr) - {'motion', 'buttons', 'after', 'window', 'contact'} or \
                         tr['motion'] not in MOTIONS:
-                    raise ValueError(f'{what}: trigger is {{"motion": one of {MOTIONS}, "buttons"}}')
+                    raise ValueError(f'{what}: trigger is {{"motion": one of {MOTIONS}, "buttons"}}'
+                                     f' plus "after", "window" and "contact" for a follow-up')
+                if 'after' in tr:
+                    window = tr.get('window')
+                    if not isinstance(tr['after'], str) or not isinstance(window, list) or \
+                            len(window) != 2 or not isinstance(tr.get('contact', False), bool):
+                        raise ValueError(f'{what}: a follow-up needs "after" (a move name), '
+                                         f'"window": [open, close] and optionally "contact" '
+                                         f'(true or false)')
+                    follow = (tr['after'], window, tr.get('contact', False))
+                elif set(tr) - {'motion', 'buttons'}:
+                    raise ValueError(f'{what}: "window" and "contact" need "after"')
+                elif MOTIONS.index(tr['motion']) >= FOLLOW_ONLY:
+                    raise ValueError(f'{what}: motion {tr["motion"]} is only for follow-ups')
                 head = (1, MOTIONS.index(tr['motion']), button_mask(tr['buttons'], what))
             else:
                 head = (0, MOVES.index(move), 0)
             self.moves.append((*head, first, count, *hit.packed, GUARDS.index(mv['guard']), cancel,
-                               *hit.tail()))
+                               *hit.tail(), 0, 0, 0, 0))
             self.move_names.append(move)
+            self.follow.append(follow)
+        # Follow-ups name their parent; the window lies inside its length.
+        for k, follow in enumerate(self.follow):
+            if follow is None:
+                continue
+            what = f'{name} {self.move_names[k]}'
+            parent, (open_, close), contact = follow
+            if parent not in self.move_names or parent == self.move_names[k]:
+                raise ValueError(f'{what}: after must name another move of {name}')
+            p = self.move_names.index(parent)
+            total = self.frame_data(p)[3]
+            check_int(open_, 0, total - 1, f'{what}: window open')
+            check_int(close, open_, total - 1, f'{what}: window close (open .. {total - 1})')
+            self.moves[k] = self.moves[k][:16] + (p + 1, open_, close, int(contact))
 
     def frames(self):
         return {s[0] for s in self.steps}
@@ -960,7 +1007,7 @@ class Character:
         for first, count in self.actions:
             out += struct.pack('<HH', first, count)
         for mv in self.moves:
-            out += struct.pack('<16H', *mv)
+            out += struct.pack('<20H', *mv)
         for pr in self.projectiles:
             out += struct.pack('<4H2h12H', *pr)
         for s in self.steps:
@@ -1448,6 +1495,9 @@ def frame_data(sheets, systems):
                 cls = CLASSES[c.hits[k].cls - 1] if c.hits[k].cls else '-'
                 trig = f'{MOTIONS[mv[1]]}+' + '/'.join(b for i, b in enumerate(BUTTONS)
                                                        if mv[2] >> i & 1) if mv[0] else 'normal'
+                if mv[16]:
+                    trig += (f' after {c.move_names[mv[16] - 1]} {mv[17]}..{mv[18]}'
+                             f'{" on contact" if mv[19] else ""}')
                 print(f'  {move:12} {s:2}/{a:2}/{r:2} {t:3} {hits}  {h[0]:4}/{h[1]:3}  '
                       f'{h[2]:3}/{h[3]:3}/{h[4]:2}  {h[2] - a - r:+3}/{h[3] - a - r:+3}  '
                       f'{GUARDS[mv[12]]:8} {cls:8} {trig}')

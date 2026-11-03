@@ -6,7 +6,8 @@
  * walls, hit sparks, screen shake, the KO flash, sound events, the select,
  * result and clear screens and the stress scenes, plus the draw-command list
  * (parallax stage or the flat fallback, the attacking fighter drawn on top,
- * sparks, L overlays the real boxes). Rules pick an
+ * sparks, L overlays the real boxes; a frame or stage the render cache has
+ * not expanded yet is left out and reported in the scene). Rules pick an
  * action or move and its elapsed ticks; the pack's steps map that onto
  * frames, boxes and motion, so what is drawn is what collides. Feel comes
  * from each character's resolved stats (life, defense, weight, walk speeds,
@@ -74,6 +75,15 @@
  * released at most grace ticks ago (or still held), and forward/up in the
  * last release ticks (all from the fighter's stats). A projectile special
  * is not recognised while its owner has one alive.
+ * Follow-ups (rekkas): a special with after set is only looked for while
+ * its parent runs, before any other special, up to the end of its window,
+ * and its motion must lie inside the parent's clock (ticks since it began,
+ * frozen ones included). The [5]/[8]/[2]/[6]/[4] commands and "any" read
+ * the direction held on the press. It starts on the first unfrozen tick
+ * the parent shows an elapsed inside open..close (with a contact when the
+ * move requires one), from the buffer like a cancel; a buffered follow-up
+ * whose parent is no longer running is dropped. The AI takes a follow-up
+ * once per move, always after a contact and on every other whiff.
  * Cancels: a normal whose hit connected (hit or block) can be cancelled
  * into a special (cancel "special") or another normal (cancel "chain")
  * while its elapsed is inside startup + active; the buffered move starts on
@@ -84,9 +94,13 @@
  * stage is a match of ROUNDS_TO_WIN won rounds against a random character
  * not yet beaten in this run (a mirror with the alternate palette only for
  * a one-character roster), fought on that opponent's home stage, or on
- * pack stage (opponent index % stages) when it has none. A loss shows the result screen, beating
- * everyone the clear screen; both return to select. Auto skips select and
- * rotates P1 through the roster each run. */
+ * pack stage (opponent index % stages) when it has none. Every ladder round
+ * opens with a versus card of INTRO_TICKS ticks (stage number, both
+ * fighters, names and stage name) during which nothing moves and held keys
+ * are only recorded, so a button held over it is no press; ROUND_START
+ * sounds as it ends (fight_start has no card and sounds it at once). A loss
+ * shows the result screen, beating everyone the clear screen; both return
+ * to select. Auto skips select and rotates P1 through the roster each run. */
 #include "fighter.h"
 #include "libretro.h"
 #include <stdlib.h>
@@ -174,7 +188,10 @@ void fight_reset(struct fight_state *s, int automatic)
 	s->pal[1] = 1;
 	place(s);
 }
-void fight_start(struct fight_state *s, const struct assets *a, unsigned c0, unsigned c1)
+/* A round between c0 and c1; with intro it opens with the versus card and
+ * ROUND_START sounds when that ends, otherwise at once. */
+static void begin_round(struct fight_state *s, const struct assets *a, unsigned c0, unsigned c1,
+			int intro)
 {
 	place(s);
 	const struct character *opponent = &a->chr[c1 < a->characters ? c1 : 0];
@@ -187,12 +204,17 @@ void fight_start(struct fight_state *s, const struct assets *a, unsigned c0, uns
 	s->p[0].hp = a->chr[c0 < a->characters ? c0 : 0].stats.life;
 	s->p[1].hp = opponent->stats.life;
 	s->mode = MODE_FIGHT;
-	s->timer = 0;
+	s->timer = intro ? 0 : INTRO_TICKS;
 	s->chr[0] = c0;
 	s->chr[1] = c1;
 	s->pal[0] = 0;
 	s->pal[1] = c0 == c1;
-	sound(s, a, SOUND_ROUND_START, 0, 0);
+	if (!intro)
+		sound(s, a, SOUND_ROUND_START, 0, 0);
+}
+void fight_start(struct fight_state *s, const struct assets *a, unsigned c0, unsigned c1)
+{
+	begin_round(s, a, c0, c1, 0);
 }
 static int grounded(const struct fighter *p) { return !p->y && !p->vy; }
 static uint32_t back_key(const struct fighter *p)
@@ -245,13 +267,33 @@ static int charged(uint32_t c, const struct stats *st, int which)
 {
 	return charge_byte(c, 2 * which) >= st->charge || charge_byte(c, 2 * which + 1);
 }
-int fight_motion(const struct fighter *p, const struct stats *st, int motion)
+/* Motion m in the last limit ticks of history at most (a follow-up's
+ * motion must come after its parent began); the held-direction commands
+ * look at this tick's direction only. */
+static int motion_in(const struct fighter *p, const struct stats *st, int motion, unsigned limit)
 {
 	static const int seq[3][3] = {{2, 3, 6}, {2, 1, 4}, {6, 2, 3}};
+	if (motion >= MOTION_ANY && motion < MOTIONS) {
+		int n = numpad(history_at(p, 0), p->face);
+		switch (motion) {
+		case HOLD_5:
+			return n == 5;
+		case HOLD_8:
+			return n >= 7;
+		case HOLD_2:
+			return n <= 3;
+		case HOLD_6:
+			return n % 3 == 0;
+		case HOLD_4:
+			return n % 3 == 1;
+		default:
+			return 1;
+		}
+	}
 	if (motion == CHARGE_46 || motion == CHARGE_28) {
 		if (!charged(p->charge, st, motion == CHARGE_28))
 			return 0;
-		for (unsigned i = 0; i < st->release; i++) {
+		for (unsigned i = 0; i < st->release && i < limit; i++) {
 			int n = numpad(history_at(p, i), p->face);
 			if (motion == CHARGE_46 ? n % 3 == 0 : n >= 7)
 				return 1;
@@ -262,10 +304,14 @@ int fight_motion(const struct fighter *p, const struct stats *st, int motion)
 		return 0;
 	unsigned window = motion == MOTION_623 ? st->dragon : st->quarter;
 	int k = 2;
-	for (unsigned i = 0; i < window && k >= 0; i++)
+	for (unsigned i = 0; i < window && i < limit && k >= 0; i++)
 		if (numpad(history_at(p, i), p->face) == seq[motion][k])
 			k--;
 	return k < 0;
+}
+int fight_motion(const struct fighter *p, const struct stats *st, int motion)
+{
+	return motion_in(p, st, motion, HISTORY);
 }
 /* ---- poses ---- */
 /* Step index for an animation after t ticks; looping wraps, others hold.
@@ -389,6 +435,12 @@ static uint32_t macro(int motion, uint32_t charge, uint32_t t, int face, uint32_
 		return t < charge + 2 ? hold : t == charge + 2 ? release | button : 0;
 	}
 	static const int seq[3][3] = {{2, 3, 6}, {2, 1, 4}, {6, 2, 3}};
+	if (motion >= MOTION_ANY) {
+		static const int held[] = {5, 5, 8, 2, 6, 4};
+		int n = held[motion - MOTION_ANY];
+		uint32_t key = n == 8 ? KEY(UP) : n == 2 ? down : n == 6 ? fwd : n == 4 ? back : 0;
+		return t ? 0 : key | button;
+	}
 	if (t >= 5)
 		return 0;
 	int n = seq[motion][t / 2];
@@ -435,13 +487,40 @@ static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
 		    (((s->tick - (uint32_t)sh->age) * 2654435761u + (unsigned)i) >> 27) < 22)
 			return away;
 	}
-	/* Now and then a special: the projectile from afar, else any. */
-	unsigned specials = c->moves - MOVES;
+	/* In a move with follow-ups: once per move, go on always after a hit or
+	 * a guard, every other time after a whiff (never without the contact a
+	 * follow-up needs), timed so the press lands in its window. */
+	if (p->move && !p->plan && !p->buffer) {
+		unsigned parent = (unsigned)p->move, options = 0, pick = 0;
+		uint32_t h = (s->tick - (uint32_t)p->clock) * 2654435761u + (unsigned)i * 977u;
+		for (unsigned k = MOVES; k < c->moves; k++) {
+			const struct move *m = &c->move[k];
+			if (m->after != parent || (m->contact && !p->hit))
+				continue;
+			unsigned lead = m->motion >= MOTION_ANY ? 0 : 4;
+			int from = (int)m->open - (int)lead, to = (int)m->close - (int)lead;
+			if (p->elapsed >= from && p->elapsed <= to && h % (options + 1) == 0)
+				pick = k;
+			options += p->elapsed >= from && p->elapsed <= to;
+		}
+		if (options && (p->hit || (h >> 16) & 1)) {
+			const struct move *m = &c->move[pick];
+			p->plan = (int32_t)pick + 1;
+			p->plan_tick = 1;
+			return macro(m->motion, c->stats.charge, 0, p->face, button_key(m->buttons));
+		}
+	}
+	/* Now and then a special that starts on its own: the projectile from
+	 * afar, else any. */
+	unsigned specials = 0, own[MAX_SPECIALS];
+	for (unsigned k = MOVES; k < c->moves; k++)
+		if (!c->move[k].after)
+			own[specials++] = k;
 	if (specials && !p->move && !p->stun && grounded(p) && !((r >> 8) & 63)) {
-		unsigned k = MOVES + (r >> 16) % specials;
-		for (unsigned j = MOVES; dist > 180 && j < c->moves; j++)
-			if (c->move[j].spawn)
-				k = j;
+		unsigned k = own[(r >> 16) % specials];
+		for (unsigned j = 0; dist > 180 && j < specials; j++)
+			if (c->move[own[j]].spawn)
+				k = own[j];
 		if (!(c->move[k].spawn && owns_shot(s, i))) {
 			p->plan = (int32_t)k + 1;
 			p->plan_tick = 1;
@@ -504,9 +583,19 @@ static int resolve(const struct fight_state *s, const struct assets *a, int i, u
 			pressed |= button_bit[k];
 	if (!pressed)
 		return -1;
+	const struct fighter *p = &s->p[i];
+	/* The current move's follow-ups first, up to the end of their window,
+	 * with a motion entered after the move began. */
+	for (unsigned k = MOVES; p->move && k < c->moves; k++) {
+		const struct move *m = &c->move[k];
+		if (m->after == (unsigned)p->move && p->elapsed <= m->close && (m->buttons & pressed) &&
+		    motion_in(p, &c->stats, m->motion, (unsigned)p->clock) &&
+		    !(m->spawn && owns_shot(s, i)))
+			return (int)k;
+	}
 	for (unsigned k = MOVES; k < c->moves; k++) {
 		const struct move *m = &c->move[k];
-		if ((m->buttons & pressed) && fight_motion(&s->p[i], &c->stats, m->motion) &&
+		if (!m->after && (m->buttons & pressed) && fight_motion(p, &c->stats, m->motion) &&
 		    !(m->spawn && owns_shot(s, i)))
 			return (int)k;
 	}
@@ -538,17 +627,22 @@ static void start(struct fight_state *s, const struct assets *a, int i, int k)
 	const struct character *c = who(s, a, i);
 	struct fighter *p = &s->p[i];
 	p->move = k + 1;
-	p->elapsed = p->hit = p->block = p->squat = p->walk = 0;
+	p->elapsed = p->hit = p->block = p->squat = p->walk = p->clock = 0;
 	p->buffer = p->age = 0;
 	p->crouch = k >= CROUCH_LP && k <= CROUCH_HK;
 	if (c->move[k].special)
 		s->specials++;
 	sound(s, a, SOUND_WHOOSH_LIGHT + tier(&c->move[k].hit, k), i, k + 1);
 }
-/* Can the connected current move be cancelled into move k now? */
+/* Can the current move be cancelled into move k now? A follow-up: its
+ * parent has shown an elapsed in its window (and connected if it must);
+ * otherwise the current move is a connected normal that allows it. */
 static int cancellable(const struct character *c, const struct fighter *p, int k)
 {
-	const struct move *m = &c->move[p->move - 1];
+	const struct move *m = &c->move[p->move - 1], *f = &c->move[k];
+	if (f->after)
+		return f->after == (unsigned)p->move && p->elapsed >= f->open &&
+		       p->elapsed <= f->close && (!f->contact || p->hit);
 	unsigned need = c->move[k].special ? CANCEL_SPECIAL : CANCEL_CHAIN;
 	return p->hit && !m->special && (m->cancel & need) &&
 	       p->elapsed < (int)m->startup + m->active;
@@ -574,6 +668,8 @@ static int update(struct fight_state *s, const struct assets *a, int i, uint32_t
 	uint32_t edge = keys & ~(uint32_t)p->keys;
 	p->keys = (int32_t)(keys & 0xffffu);
 	record(p, &c->stats, keys);
+	if (p->move && p->clock < 255)
+		p->clock++;
 	int k = edge & ATTACKS ? resolve(s, a, i, edge, keys) : -1;
 	if (k >= 0 && !(p->buffer && c->move[p->buffer - 1].special && !c->move[k].special)) {
 		p->buffer = k + 1;
@@ -587,6 +683,10 @@ static int update(struct fight_state *s, const struct assets *a, int i, uint32_t
 		start(s, a, i, p->buffer - 1);
 	else if (p->move && ++p->elapsed >= c->move[p->move - 1].anim.total)
 		p->move = p->elapsed = p->hit = 0;
+	/* A follow-up only ever starts from its parent. */
+	if (p->buffer && c->move[p->buffer - 1].after &&
+	    c->move[p->buffer - 1].after != (unsigned)p->move)
+		p->buffer = p->age = 0;
 	if (p->stun) {
 		age(p);
 		if (!--p->stun)
@@ -909,7 +1009,7 @@ static void next_stage(struct fight_state *s, const struct assets *a)
 			break;
 	s->stage = count(s->beaten) + 1;
 	s->wins[0] = s->wins[1] = 0;
-	fight_start(s, a, s->chr[0], c);
+	begin_round(s, a, s->chr[0], c, 1);
 }
 static void begin_run(struct fight_state *s, const struct assets *a, unsigned c0)
 {
@@ -952,7 +1052,7 @@ static void round_over(struct fight_state *s, const struct assets *a)
 		s->wins[0] = s->wins[1] = 0;
 	} else {
 		/* Another round of the same match, both at full life. */
-		fight_start(s, a, s->chr[0], s->chr[1]);
+		begin_round(s, a, s->chr[0], s->chr[1], 1);
 	}
 }
 static void select_screen(struct fight_state *s, const struct assets *a, uint32_t pressed)
@@ -1017,6 +1117,15 @@ void fight_step(struct fight_state *s, const struct assets *a, uint32_t input,
 		if (s->timer > (s->automatic ? AUTO_SCREEN : SCREEN_TICKS) ||
 		    (s->timer > SCREEN_SKIP && (pressed & ATTACKS)))
 			to_select(s, a);
+		return;
+	}
+	if (s->timer < INTRO_TICKS) {
+		/* The versus card: nothing moves and the AI waits; buttons held
+		 * now are no press when the round begins. */
+		s->p[0].keys = (int32_t)((s->automatic ? 0 : input) & 0xffffu);
+		s->p[1].keys = (int32_t)((human ? second : 0) & 0xffffu);
+		if (++s->timer == INTRO_TICKS)
+			sound(s, a, SOUND_ROUND_START, 0, 0);
 		return;
 	}
 	if (s->ended) {
@@ -1100,11 +1209,19 @@ static void effect(struct scene *s, const struct assets *a, int image, int x, in
 	s->effects_drawn++;
 	sprite(s, a, image, x, y, flip, blend, alpha);
 }
-/* Side i's image of a frame, or -1 when the cast does not match the state. */
-static int cast_image(const struct fight_state *s, const struct assets *a, int i, unsigned f)
+/* Side i's image of a frame, or -1 when the cache does not hold it: not
+ * expanded yet is reported in the scene (fight_demand fills it), a cache
+ * that belongs to another cast draws nothing. */
+static int cast_image(struct scene *out, const struct fight_state *s, const struct assets *a,
+		      int i, unsigned f)
 {
 	if (a->cast[i][0] != (int)s->chr[i] || a->cast[i][1] != (int)s->pal[i])
 		return -1;
+	if (a->look[i][f] < 0) {
+		if (out->misses < SCENE_MISSES)
+			out->miss[out->misses] = (uint16_t)((unsigned)i << 15 | f);
+		out->misses++;
+	}
 	return a->look[i][f];
 }
 /* Box overlay: a one-pixel opaque outline, hitboxes also tinted. */
@@ -1131,7 +1248,9 @@ static void flat_stage(struct scene *out, int dy)
  * frames; a layer image already covers every camera and shake. */
 static void stage(struct scene *out, const struct fight_state *s, const struct assets *a, int dy)
 {
-	if (!a->stages || a->cast_stage != (int)s->arena) {
+	if (!a->stages || a->cast_stage != (int)s->arena ||
+	    a->stage_layer < a->stage[s->arena].layers) {
+		out->stage_missing = a->stages && a->cast_stage == (int)s->arena;
 		flat_stage(out, dy);
 		return;
 	}
@@ -1164,7 +1283,7 @@ static void idle_sprite(struct scene *out, const struct fight_state *s, const st
 {
 	const struct character *c = who(s, a, i);
 	const struct step *st = &a->step[step_at(a, &c->action[IDLE], s->tick, 1, NULL)];
-	int im = cast_image(s, a, i, st->frame);
+	int im = cast_image(out, s, a, i, st->frame);
 	if (im >= 0)
 		sprite(out, a, im, x, y, flip, OPAQUE, 255);
 }
@@ -1229,15 +1348,44 @@ static int front_fighter(const struct fight_state *s)
 		return p->stun != 0;
 	return 1;
 }
+/* The versus card of a ladder round: both idle poses facing each other,
+ * the names, the ladder stage and the arena; no stage art, so it never
+ * waits for the stage cache. */
+static void intro_scene(const struct fight_state *s, const struct assets *a, struct scene *out)
+{
+	char line[16] = "STAGE ";
+	rect(out, 0, 0, FW, FH, 0x0841, OPAQUE, 255);
+	number(line + 6, s->stage);
+	size_t len = strlen(line);
+	line[len++] = '/';
+	number(line + len, count(opponents(a, s->chr[0])));
+	text(out, 240 - text_width(line) / 2, 40, line, 0xffff);
+	rect(out, 0, 262, FW, 2, 0x8c50, OPAQUE, 255);
+	idle_sprite(out, s, a, 0, 140, 262, 0);
+	idle_sprite(out, s, a, 1, 340, 262, 1);
+	text(out, 240 - text_width("VS") / 2, 160, "VS", 0xffe0);
+	for (int i = 0; i < 2; i++) {
+		const char *name = who(s, a, i)->name;
+		text(out, (i ? 340 : 140) - text_width(name) / 2, 276, name, 0xffff);
+	}
+	if (a->stages && s->arena < a->stages)
+		text(out, 240 - text_width(a->stage[s->arena].name) / 2, 300,
+		     a->stage[s->arena].name, 0x8410);
+}
 void fight_scene(const struct fight_state *s, const struct assets *a, struct scene *out)
 {
 	out->count = out->effects_requested = out->effects_drawn = out->sparks = out->layers = 0;
+	out->misses = out->stage_missing = 0;
 	if (s->mode == MODE_SELECT) {
 		select_scene(s, a, out);
 		return;
 	}
 	if (s->mode != MODE_FIGHT) {
 		screen_scene(s, a, out);
+		return;
+	}
+	if (s->timer < INTRO_TICKS) {
+		intro_scene(s, a, out);
 		return;
 	}
 	/* World commands shift by the camera (x) and the shake (y); a KO flash
@@ -1258,7 +1406,7 @@ void fight_scene(const struct fight_state *s, const struct assets *a, struct sce
 		const struct fighter *p = &s->p[i];
 		/* Sheet art faces right; the foot anchor stands on the ground. */
 		const struct step *st = &a->step[fight_pose(s, a, i)];
-		int im = cast_image(s, a, i, st->frame);
+		int im = cast_image(out, s, a, i, st->frame);
 		if (im >= 0)
 			sprite(out, a, im, px(p) + cx, GROUND + p->y + dy, p->face < 0, OPAQUE, 255);
 	}
@@ -1269,7 +1417,7 @@ void fight_scene(const struct fight_state *s, const struct assets *a, struct sce
 		if (!sh->kind)
 			continue;
 		const struct projectile *t = shot_type(s, a, sh);
-		int im = cast_image(s, a, sh->owner, a->step[shot_step(s, a, sh)].frame);
+		int im = cast_image(out, s, a, sh->owner, a->step[shot_step(s, a, sh)].frame);
 		if (im < 0)
 			continue;
 		if (t->blend == OPAQUE)
@@ -1351,7 +1499,7 @@ hud:
 	     255);
 }
 /* ---- state words ---- */
-#define FIGHTER_WORDS 26
+#define FIGHTER_WORDS 27
 #define SHOT_WORDS 6
 #define GLOBAL_WORDS 19
 #define SHOTS_AT (GLOBAL_WORDS + 2 * FIGHTER_WORDS)
@@ -1369,12 +1517,12 @@ static void fighter_fields(struct fighter *p, int32_t *v[FIGHTER_WORDS])
 	int32_t *f[] = {&p->x,	   &p->y,     &p->vy,	     &p->hp,	&p->face,  &p->walk,
 			&p->block, &p->crouch, &p->move,     &p->elapsed, &p->hit,   &p->stun,
 			&p->freeze, &p->slide, &p->keys,     &p->corner, &p->squat, &p->buffer,
-			&p->age,   &p->plan,   &p->plan_tick};
-	for (int k = 0; k < 21; k++)
+			&p->age,   &p->plan,   &p->plan_tick, &p->clock};
+	for (int k = 0; k < 22; k++)
 		v[k] = f[k];
-	v[21] = (int32_t *)(void *)&p->charge;
+	v[22] = (int32_t *)(void *)&p->charge;
 	for (int k = 0; k < HISTORY / 8; k++)
-		v[22 + k] = (int32_t *)(void *)&p->history[k];
+		v[23 + k] = (int32_t *)(void *)&p->history[k];
 }
 static void global_fields(struct fight_state *s, uint32_t *v[GLOBAL_WORDS])
 {
@@ -1451,7 +1599,8 @@ static int valid(const struct fight_state *s, const struct fighter *p, const str
 	    p->buffer < 0 || p->buffer > (int)c->moves || p->age < 0 ||
 	    p->age > st->buffer || (!p->buffer && p->age) || p->plan < 0 ||
 	    p->plan > (int)c->moves || (p->plan && p->plan <= MOVES) || p->plan_tick < 0 ||
-	    p->plan_tick > st->charge + 3 || (!p->plan && p->plan_tick))
+	    p->plan_tick > st->charge + 3 || (!p->plan && p->plan_tick) || p->clock < 0 ||
+	    p->clock > 255)
 		return 0;
 	for (int k = 0; k < 2; k++) {
 		unsigned held = charge_byte(p->charge, 2 * k), grace = charge_byte(p->charge, 2 * k + 1);
@@ -1539,6 +1688,8 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 		return 0;
 	if (t.mode == MODE_FIGHT) {
 		uint32_t opp = opponents(a, t.chr[0]);
+		if (t.timer > INTRO_TICKS || (t.timer < INTRO_TICKS && (t.ended || t.shake || t.flash)))
+			return 0;
 		/* A mirror is always a valid fight (tests and versus set one up). */
 		if (t.pal[0] || t.pal[1] != (t.chr[0] == t.chr[1]) ||
 		    (!((opp >> t.chr[1]) & 1) && t.chr[0] != t.chr[1]) ||
@@ -1574,6 +1725,10 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 		    sh->age >= a->chr[t.chr[sh->owner]].projectile[sh->kind - 1].lifetime)
 			return 0;
 	}
+	/* Nothing moves during the versus card. */
+	for (int i = 0; t.mode == MODE_FIGHT && t.timer < INTRO_TICKS && i < 2; i++)
+		if (t.p[i].move || t.p[i].stun || t.p[i].buffer || owned[i])
+			return 0;
 	*s = t;
 	return 1;
 }

@@ -1,4 +1,4 @@
-/* FIGHTP06 pack decoder, per-match cast and clipped RGB565 software
+/* FIGHTP07 pack decoder, render cache and clipped RGB565 software
  * draw-command backend. The decoder checks every count, offset and index
  * against the file length and the resident limits in fighter.h (palettes
  * and frames per sheet, system profiles with walls and effect sets, stats,
@@ -10,14 +10,20 @@
  * speed derived and bounded), fills hitstun/blockstun/hitstop a move takes
  * from its class and scales damage and chip by the system's damage scale,
  * derives hit groups, startup/active/recovery, reach and the weapon flag per
- * move, and expands the effects and sparks once. fight_cast expands the two
- * fighters of the current match (character, palette) and its stage into
- * RGB565 runs when they change, so only two characters' and one stage's
- * pixels are ever resident; the loader proves any pair plus any stage
- * fits. A stage layer is expanded into one image that covers every screen
- * pixel it can reach for any camera and shake, with its edge rules already
- * applied, so drawing it is the sprite path: an opaque row is one span, a
- * row copy. Drawing a sprite is span
+ * move, checks follow-up links and windows, and expands the effects and
+ * sparks once. The render cache holds three regions after the effects: the
+ * stage (sized for the largest stage) and one per side (sized for the
+ * largest character), so only two characters' and one stage's RGB565 pixels
+ * are ever resident and the loader proves any pair plus any stage fits.
+ * fight_want only names what the state shows (the select screen wants side
+ * 0 alone) and empties a region whose owner changed; frames are expanded
+ * by fight_prefetch within a pixel budget per call (the stage row by row,
+ * resuming where it stopped, then side 0, then side 1), by fight_demand for
+ * exactly what a scene missed, or all at once by fight_cast. A stage layer
+ * is expanded into one image that covers every screen pixel it can reach
+ * for any camera and shake, with its edge rules already applied, so drawing
+ * it is the sprite path: an opaque row is one span, a row copy. A missing
+ * frame has width 0. Drawing a sprite is span
  * copies (mirroring reverses the span), rectangles are row fills, and
  * constant alpha/additive blending have their own loops without per-pixel
  * mode branches or divisions. All destination reads stay in the cached
@@ -114,20 +120,27 @@ static int paints(const struct assets *a, unsigned f, unsigned c)
 	return a->frame[f].sheet == a->palette_sheet[c] &&
 	       a->frame[f].max_index < a->palette_size[c];
 }
-/* Expand frame f with palette c into a new image; the loader has already
- * proven the limits, so this cannot overflow for a cast character. */
-static int image(struct assets *a, unsigned f, unsigned c)
+/* Expand frame f with palette c into image slot k with its pixels at
+ * pixel[at]; returns the pixel count. Callers have proven the room. */
+static uint32_t expand_frame(struct assets *a, unsigned f, unsigned c, unsigned k, uint32_t at)
 {
 	const struct frame *s = &a->frame[f];
-	if (a->images >= MAX_IMAGES || s->count > MAX_PIXELS - a->pixels)
+	a->image[k] = (struct image){s->w, s->h, s->ax, s->ay, s->first_row, at, s->count,
+				     (uint16_t)f, (uint16_t)c};
+	const uint8_t *src = a->index + s->index;
+	const uint16_t *pal = a->palette[c];
+	uint16_t *dst = a->pixel + at;
+	for (uint32_t i = 0, n = s->count; i < n; i++)
+		dst[i] = pal[src[i]];
+	return s->count;
+}
+/* Expand frame f with palette c into a new image at the end (effects and
+ * sparks at load); -1 when it does not fit. */
+static int image(struct assets *a, unsigned f, unsigned c)
+{
+	if (a->images >= MAX_IMAGES || a->frame[f].count > MAX_PIXELS - a->pixels)
 		return -1;
-	struct image *im = &a->image[a->images];
-	*im = (struct image){s->w,	   s->h,      s->ax,	       s->ay,
-			     s->first_row, a->pixels, s->count, (uint16_t)f,
-			     (uint16_t)c};
-	for (uint32_t i = 0; i < s->count; i++)
-		a->pixel[a->pixels + i] = a->palette[c][a->index[s->index + i]];
-	a->pixels += s->count;
+	a->pixels += expand_frame(a, f, c, a->images, a->pixels);
 	return (int)a->images++;
 }
 /* ---- systems and stats ---- */
@@ -422,12 +435,23 @@ static int character(struct reader *r, struct assets *a, struct character *c, un
 		if (!hit_fields(r, v))
 			return 0;
 		unsigned guard = u16(r), cancel = u16(r), cls = u16(r), defaults = u16(r);
+		unsigned after = u16(r), open = u16(r), close = u16(r), contact = u16(r);
+		/* Follow-ups are specials with another parent; only they may use
+		 * the held-direction commands. The window is checked once the
+		 * parent's length is known. */
 		if (!r->ok || !resolve_hit(&m->hit, v, cls, defaults, sy) || kind != (k >= MOVES) ||
 		    (kind ? trigger >= MOTIONS || !buttons || buttons > 15
 			  : trigger != k || buttons) ||
 		    guard >= GUARD_TYPES || (cancel & ~(unsigned)CANCEL_MASK) ||
-		    !anim(&m->anim, first, count, steps, base))
+		    !anim(&m->anim, first, count, steps, base) || after > moves || after == k + 1 ||
+		    (after && !kind) || (!after && trigger >= MOTION_ANY && kind) ||
+		    (!after && (open || close || contact)) || open > close ||
+		    close >= MAX_MOVE_TICKS || contact > 1)
 			return 0;
+		m->after = (uint8_t)after;
+		m->open = (uint8_t)open;
+		m->close = (uint8_t)close;
+		m->contact = (uint8_t)contact;
 		m->hit.guard = (uint8_t)guard;
 		m->cancel = (uint8_t)cancel;
 		m->special = (uint8_t)kind;
@@ -517,6 +541,11 @@ static int character(struct reader *r, struct assets *a, struct character *c, un
 	for (unsigned k = 0; k < moves; k++)
 		if (!derive(a, &c->move[k]))
 			return 0;
+	for (unsigned k = 0; k < moves; k++) {
+		const struct move *m = &c->move[k];
+		if (m->after && m->close >= c->move[m->after - 1].anim.total)
+			return 0;
+	}
 	/* Every frame the character shows paints with both its palettes; count
 	 * what a cast of it costs. */
 	stamp++;
@@ -597,119 +626,125 @@ struct need {
 	uint32_t pixels, rows, spans;
 	unsigned images;
 };
-/* Expand layer l of a stage W wide into one image covering every pixel it
- * can show (any camera, any shake), or only count what that takes when
- * commit is 0. Returns the image (-1: nothing visible, -2: too large) and
- * the covered origin in layer pixels. */
-static int expand_layer(struct assets *a, const struct stage *st, const struct layer *l,
-			int commit, struct need *n, int *x0, int *y0)
+/* The rectangle of layer pixels (xl, yl, w x h) a layer's image covers:
+ * every pixel it can show for any camera and shake. 0 when nothing is
+ * visible, -1 when it is wider than MAX_COVER. */
+struct cover {
+	int xl, yl, w, h;
+};
+static int layer_cover(const struct stage *st, const struct layer *l, struct cover *cv)
 {
-	static int16_t line[MAX_SIDE];
-	const struct frame *f = &a->frame[l->frame];
-	int left = -f->ax, top = -f->ay, cmax = st->width - FW;
+	int cmax = st->width - FW;
 	int sx0 = fight_layer_x(l, 0), sx1 = fight_layer_x(l, cmax),
 	    sy = GROUND - st->ground + l->y;
 	int xl, xh, yl, yh;
 	cover(sx0 < sx1 ? sx0 : sx1, sx0 < sx1 ? sx1 : sx0, FW, l->w, l->edge[0], &xl, &xh);
 	cover(sy - SHAKE_MAX, sy + SHAKE_MAX, FH, l->h, l->edge[1], &yl, &yh);
-	*x0 = xl;
-	*y0 = yl;
+	*cv = (struct cover){xl, yl, xh - xl, yh - yl};
 	if (xl >= xh || yl >= yh)
-		return -1;
-	int w = xh - xl, h = yh - yl;
-	if (w > MAX_COVER)
-		return -2;
-	uint32_t row0 = a->rows, span0 = a->spans, pix0 = a->pixels, pixels = 0, spans = 0;
-	const uint16_t *pal = a->palette[l->palette];
-	int cached = -3;
-	for (int y = 0; y < h; y++) {
-		int sr = edge_map(yl + y, l->h, l->edge[1]);
-		if (sr >= 0 && sr != cached) {
-			/* Palette indices of source row sr, -1 where transparent. */
-			for (int i = 0; i < l->w; i++)
-				line[i] = -1;
-			int fr = sr - top;
-			if (fr >= 0 && fr < f->h)
-				for (uint32_t k = a->row[f->first_row + fr];
-				     k < a->row[f->first_row + fr + 1]; k++) {
-					const struct span *sp = &a->span[k];
-					for (unsigned i = 0; i < sp->len; i++)
-						line[left + sp->x + i] =
-						    a->index[f->index + sp->pixel + i];
-				}
-			cached = sr;
-		}
-		if (commit)
-			a->row[row0 + (unsigned)y] = span0 + spans;
-		int x = 0;
-		while (x < w) {
-			int c = -1;
-			for (; x < w; x++) {
-				int sc = edge_map(xl + x, l->w, l->edge[0]);
-				c = sr == -2 || sc == -2 ? -2 : sr < 0 || sc < 0 ? -1 : line[sc];
-				if (c != -1)
-					break;
-			}
-			if (x == w)
-				break;
-			int start = x;
-			for (; x < w; x++) {
-				int sc = edge_map(xl + x, l->w, l->edge[0]);
-				c = sr == -2 || sc == -2 ? -2 : sr < 0 || sc < 0 ? -1 : line[sc];
-				if (c == -1)
-					break;
-				if (commit)
-					a->pixel[pix0 + pixels + (unsigned)(x - start)] =
-					    c == -2 ? l->color : pal[c];
-			}
-			if (commit)
-				a->span[span0 + spans] = (struct span){
-				    (uint16_t)start, (uint16_t)(x - start), pixels};
-			pixels += (uint32_t)(x - start);
-			spans++;
-		}
-	}
-	n->pixels += pixels;
-	n->rows += (uint32_t)h + 1;
-	n->spans += spans;
-	n->images++;
-	if (!commit)
 		return 0;
-	a->row[row0 + (unsigned)h] = span0 + spans;
-	a->rows += (unsigned)h + 1;
-	a->spans += spans;
-	a->pixels += pixels;
-	struct image *im = &a->image[a->images];
-	*im = (struct image){w, h, 0, 0, row0, pix0, pixels, l->frame, l->palette};
-	return (int)a->images++;
+	return xh - xl > MAX_COVER ? -1 : 1;
 }
-/* Expand (commit) or count stage k: its layers and every anim step frame. */
-static int expand_stage(struct assets *a, unsigned k, int commit, struct need *n)
+/* Row expansion of one layer: the source column of each cover column (or
+ * -1 transparent, -2 the fill colour) and the palette indices of the last
+ * source row read (-1 transparent). */
+struct layer_rows {
+	const struct layer *l;
+	int sr;
+	int16_t column[MAX_COVER], line[MAX_SIDE];
+};
+static void layer_rows_begin(struct layer_rows *lr, const struct layer *l, const struct cover *cv)
 {
+	lr->l = l;
+	lr->sr = -3;
+	for (int x = 0; x < cv->w; x++)
+		lr->column[x] = (int16_t)edge_map(cv->xl + x, l->w, l->edge[0]);
+}
+/* Row y of the cover as spans: with span and pixel set, the spans go to
+ * span[] (pixel offsets from at, the image's pixels so far) and the RGB565
+ * to pixel[at..]. Returns the spans; *n gets the pixels. */
+static unsigned layer_row(const struct assets *a, struct layer_rows *lr, const struct cover *cv,
+			  int y, struct span *span, uint16_t *pixel, uint32_t at, uint32_t *n)
+{
+	const struct layer *l = lr->l;
+	const struct frame *f = &a->frame[l->frame];
+	int sr = edge_map(cv->yl + y, l->h, l->edge[1]);
+	if (sr >= 0 && sr != lr->sr) {
+		for (int i = 0; i < l->w; i++)
+			lr->line[i] = -1;
+		int fr = sr + f->ay;
+		if (fr >= 0 && fr < f->h)
+			for (uint32_t k = a->row[f->first_row + fr]; k < a->row[f->first_row + fr + 1];
+			     k++) {
+				const struct span *sp = &a->span[k];
+				const uint8_t *src = a->index + f->index + sp->pixel;
+				int16_t *dst = lr->line - f->ax + sp->x;
+				for (unsigned i = 0; i < sp->len; i++)
+					dst[i] = src[i];
+			}
+		lr->sr = sr;
+	}
+	const uint16_t *pal = a->palette[l->palette];
+	unsigned spans = 0;
+	uint32_t pixels = 0;
+	int x = 0, w = cv->w;
+	while (x < w) {
+		int c = -1;
+		for (; x < w; x++) {
+			int sc = lr->column[x];
+			c = sr == -2 || sc == -2 ? -2 : sr < 0 || sc < 0 ? -1 : lr->line[sc];
+			if (c != -1)
+				break;
+		}
+		if (x == w)
+			break;
+		int start = x;
+		for (; x < w; x++) {
+			int sc = lr->column[x];
+			c = sr == -2 || sc == -2 ? -2 : sr < 0 || sc < 0 ? -1 : lr->line[sc];
+			if (c == -1)
+				break;
+			if (pixel)
+				pixel[at + pixels + (unsigned)(x - start)] = c == -2 ? l->color : pal[c];
+		}
+		if (span)
+			span[spans] = (struct span){(uint16_t)start, (uint16_t)(x - start), at + pixels};
+		pixels += (uint32_t)(x - start);
+		spans++;
+	}
+	*n = pixels;
+	return spans;
+}
+/* What expanding stage k takes (its layers' images and every anim step
+ * frame); 0 if a layer is too wide. */
+static int measure_stage(struct assets *a, unsigned k, struct need *n)
+{
+	static struct layer_rows lr;
 	const struct stage *st = &a->stage[k];
 	for (unsigned i = 0; i < st->layers; i++) {
 		const struct layer *l = &a->layer[st->first_layer + i];
-		int x0, y0, im = expand_layer(a, st, l, commit, n, &x0, &y0);
-		if (im == -2)
+		struct cover cv;
+		int got = layer_cover(st, l, &cv);
+		if (got < 0)
 			return 0;
-		if (commit) {
-			a->layer_image[i] = im;
-			a->layer_x0[i] = (int16_t)x0;
-			a->layer_y0[i] = (int16_t)y0;
+		if (got) {
+			layer_rows_begin(&lr, l, &cv);
+			for (int y = 0; y < cv.h; y++) {
+				uint32_t px;
+				n->spans += layer_row(a, &lr, &cv, y, NULL, NULL, 0, &px);
+				n->pixels += px;
+			}
+			n->rows += (uint32_t)cv.h + 1;
+			n->images++;
 		}
 		for (unsigned j = 0; j < l->anims; j++) {
 			const struct stage_anim *an = &a->anim[l->first_anim + j];
 			for (unsigned t = 0; t < an->count; t++) {
 				const struct stage_step *sp = &a->stage_step[an->first + t];
-				int got = -1;
 				if (sp->frame != 0xffff) {
 					n->pixels += a->frame[sp->frame].count;
 					n->images++;
-					if (commit)
-						got = image(a, sp->frame, l->palette);
 				}
-				if (commit)
-					a->stage_look[an->first + t] = (int16_t)got;
 			}
 		}
 	}
@@ -779,7 +814,7 @@ static int read_stages(struct reader *r, struct assets *a, unsigned n)
 			}
 		}
 		struct need need = {0, 0, 0, 0};
-		if (!expand_stage(a, k, 0, &need))
+		if (!measure_stage(a, k, &need))
 			return 0;
 		st->pixels = need.pixels;
 		st->rows = need.rows;
@@ -792,7 +827,7 @@ static int read_stages(struct reader *r, struct assets *a, unsigned n)
 int fight_assets(struct assets *a, const void *data, size_t size, int *automatic)
 {
 	struct reader r = {data, 0, size, 1};
-	if (!data || size < 48 || memcmp(data, "FIGHTP06", 8))
+	if (!data || size < 48 || memcmp(data, "FIGHTP07", 8))
 		return 0;
 	r.at = 8;
 	uint32_t length = u32(&r), hash = u32(&r), flags = u32(&r);
@@ -844,18 +879,14 @@ int fight_assets(struct assets *a, const void *data, size_t size, int *automatic
 	}
 	if (!read_stages(&r, a, stages) || !r.ok || r.at != size)
 		return 0;
-	/* Any two cast characters (a mirror match casts one twice) and any
-	 * stage must fit. */
-	uint32_t pixels = 0, rows = 0, spans = 0;
-	unsigned images = 0, stage_images = 0;
-	for (unsigned i = 0; i < ncharacters; i++)
-		for (unsigned j = i; j < ncharacters; j++) {
-			uint32_t p = a->chr[i].pixels + a->chr[j].pixels;
-			unsigned n = a->chr[i].images + a->chr[j].images;
-			pixels = p > pixels ? p : pixels;
-			images = n > images ? n : images;
-		}
-	uint32_t stage_pixels = 0;
+	/* The cache regions: the largest stage, then the largest character
+	 * twice (a mirror match casts one character on both sides). */
+	uint32_t char_pixels = 0, stage_pixels = 0, rows = 0, spans = 0;
+	unsigned char_images = 0, stage_images = 0;
+	for (unsigned i = 0; i < ncharacters; i++) {
+		char_pixels = a->chr[i].pixels > char_pixels ? a->chr[i].pixels : char_pixels;
+		char_images = a->chr[i].images > char_images ? a->chr[i].images : char_images;
+	}
 	for (unsigned k = 0; k < stages; k++) {
 		const struct stage *st = &a->stage[k];
 		stage_pixels = st->pixels > stage_pixels ? st->pixels : stage_pixels;
@@ -863,53 +894,222 @@ int fight_assets(struct assets *a, const void *data, size_t size, int *automatic
 		spans = st->spans > spans ? st->spans : spans;
 		stage_images = st->images > stage_images ? st->images : stage_images;
 	}
-	if (pixels > MAX_PIXELS - a->pixels || stage_pixels > MAX_PIXELS - a->pixels - pixels ||
-	    images > MAX_IMAGES - a->images || stage_images > MAX_IMAGES - a->images - images ||
+	if (char_pixels > (MAX_PIXELS - a->pixels) / 2 ||
+	    stage_pixels > MAX_PIXELS - a->pixels - 2 * char_pixels ||
+	    char_images > (MAX_IMAGES - a->images) / 2 ||
+	    stage_images > MAX_IMAGES - a->images - 2 * char_images ||
 	    rows > MAX_ROWS + 1 - a->rows || spans > MAX_SPANS - a->spans)
 		return 0;
 	a->effect_images = a->images;
 	a->effect_pixels = a->pixels;
 	a->pack_rows = a->rows;
 	a->pack_spans = a->spans;
-	a->cast[0][0] = a->cast[1][0] = -1;
+	a->char_images = char_images;
+	a->char_pixels = char_pixels;
+	a->stage_images = stage_images;
+	a->stage_cap = stage_pixels;
+	a->region_image[0] = a->images;
+	a->region_pixel[0] = a->pixels;
+	a->region_image[1] = a->region_image[0] + stage_images;
+	a->region_pixel[1] = a->region_pixel[0] + stage_pixels;
+	a->region_image[2] = a->region_image[1] + char_images;
+	a->region_pixel[2] = a->region_pixel[1] + char_pixels;
+	a->images = a->region_image[2] + char_images;
+	a->pixels = a->region_pixel[2] + char_pixels;
+	memset(a->image + a->effect_images, 0,
+	       (a->images - a->effect_images) * sizeof(struct image));
+	a->cast[0][0] = a->cast[1][0] = a->cast[0][1] = a->cast[1][1] = -1;
 	a->cast_stage = -1;
+	a->wanted = 0;
 	*automatic = (int)flags;
 	return 1;
 }
-int fight_cast(struct assets *a, const struct fight_state *s)
+/* ---- the render cache ---- */
+/* Empty side i's region for character chr with palette pal. */
+static void reset_side(struct assets *a, int i, int chr, int pal)
 {
-	int stage = a->stages ? (int)(s->arena < a->stages ? s->arena : 0) : -1;
-	if (a->cast[0][0] == (int)s->chr[0] && a->cast[0][1] == (int)s->pal[0] &&
-	    a->cast[1][0] == (int)s->chr[1] && a->cast[1][1] == (int)s->pal[1] &&
-	    a->cast_stage == stage)
-		return 0;
-	a->images = a->effect_images;
-	a->pixels = a->effect_pixels;
+	memset(a->look[i], 0xff, sizeof(a->look[i]));
+	memset(a->image + a->region_image[1 + i], 0, a->char_images * sizeof(struct image));
+	a->cast[i][0] = chr;
+	a->cast[i][1] = pal;
+	a->cast_images[i] = a->cast_next[i] = 0;
+	a->cast_pixels[i] = 0;
+}
+static void reset_stage(struct assets *a, int stage)
+{
+	memset(a->image + a->region_image[0], 0, a->stage_images * sizeof(struct image));
+	for (int k = 0; k < MAX_LAYERS; k++)
+		a->layer_image[k] = -1;
 	a->rows = a->pack_rows;
 	a->spans = a->pack_spans;
-	a->stage_pixels = 0;
-	if (stage >= 0) {
-		struct need n = {0, 0, 0, 0};
-		uint32_t start = a->pixels;
-		expand_stage(a, (unsigned)stage, 1, &n);
-		a->stage_pixels = a->pixels - start;
-	}
 	a->cast_stage = stage;
-	for (int i = 0; i < 2; i++) {
-		const struct character *c = &a->chr[s->chr[i] < a->characters ? s->chr[i] : 0];
-		unsigned palette = c->palette[s->pal[i] ? 1 : 0];
-		uint32_t start = a->pixels;
-		memset(a->look[i], 0xff, sizeof(a->look[i]));
-		for (unsigned k = 0; k < c->steps; k++) {
-			unsigned f = a->step[c->first_step + k].frame;
-			if (a->look[i][f] < 0)
-				a->look[i][f] = (int16_t)image(a, f, palette);
+	a->stage_layer = 0;
+	a->stage_row = -1;
+	a->stage_used = 0;
+	a->stage_pixels = 0;
+}
+unsigned fight_want(struct assets *a, const struct fight_state *s)
+{
+	int fight = s->mode == MODE_FIGHT;
+	unsigned changed = 0;
+	for (int i = 0; i < (fight ? 2 : 1); i++) {
+		int chr = (int)(s->chr[i] < a->characters ? s->chr[i] : 0), pal = s->pal[i] ? 1 : 0;
+		if (a->cast[i][0] != chr || a->cast[i][1] != pal) {
+			reset_side(a, i, chr, pal);
+			changed |= 1u << i;
 		}
-		a->cast[i][0] = (int)(c - a->chr);
-		a->cast[i][1] = s->pal[i] ? 1 : 0;
-		a->cast_pixels[i] = a->pixels - start;
 	}
-	return 1;
+	a->wanted = fight ? 3u : 1u;
+	if (fight && a->stages) {
+		int stage = (int)(s->arena < a->stages ? s->arena : 0);
+		if (a->cast_stage != stage) {
+			reset_stage(a, stage);
+			changed |= 4;
+		}
+		a->wanted |= 4;
+	}
+	return changed;
+}
+/* Expand frame f into side i's region; 0 when it is not the side's
+ * character's (the region only has room for those) or already there. */
+static uint32_t side_frame(struct assets *a, int i, unsigned f)
+{
+	if (a->cast[i][0] < 0 || f >= a->frames || a->look[i][f] >= 0)
+		return 0;
+	const struct character *c = &a->chr[a->cast[i][0]];
+	unsigned palette = c->palette[a->cast[i][1]];
+	if (a->cast_images[i] >= c->images || a->frame[f].count > c->pixels - a->cast_pixels[i] ||
+	    !paints(a, f, palette))
+		return 0;
+	unsigned k = a->region_image[1 + i] + a->cast_images[i]++;
+	uint32_t n = expand_frame(a, f, palette, k, a->region_pixel[1 + i] + a->cast_pixels[i]);
+	a->cast_pixels[i] += n;
+	a->look[i][f] = (int16_t)k;
+	return n ? n : 1;
+}
+static uint32_t side_work(struct assets *a, int i, uint32_t budget)
+{
+	if (!(a->wanted >> i & 1) || a->cast[i][0] < 0)
+		return 0;
+	const struct character *c = &a->chr[a->cast[i][0]];
+	uint32_t done = 0;
+	while (a->cast_next[i] < c->steps && done < budget)
+		done += side_frame(a, i, a->step[c->first_step + a->cast_next[i]++].frame);
+	return done;
+}
+/* Expand the cast stage in order: each layer's image row by row (a row
+ * costs its width), then the layer's anim steps. */
+static uint32_t stage_work(struct assets *a, uint32_t budget)
+{
+	static struct layer_rows lr;
+	if (!(a->wanted & 4) || a->cast_stage < 0)
+		return 0;
+	const struct stage *st = &a->stage[a->cast_stage];
+	uint32_t done = 0;
+	lr.l = NULL;
+	while (a->stage_layer < st->layers && done < budget) {
+		unsigned i = a->stage_layer;
+		const struct layer *l = &a->layer[st->first_layer + i];
+		struct cover cv;
+		int visible = layer_cover(st, l, &cv) > 0;
+		if (a->stage_row < 0) {
+			a->layer_x0[i] = (int16_t)cv.xl;
+			a->layer_y0[i] = (int16_t)cv.yl;
+			a->layer_image[i] = -1;
+			if (visible) {
+				int k = (int)(a->region_image[0] + a->stage_used++);
+				a->image[k] = (struct image){cv.w,
+							     cv.h,
+							     0,
+							     0,
+							     a->rows,
+							     a->region_pixel[0] + a->stage_pixels,
+							     0,
+							     l->frame,
+							     l->palette};
+				a->layer_image[i] = k;
+				a->rows += (unsigned)cv.h + 1;
+			}
+			a->stage_row = 0;
+		}
+		int h = visible ? cv.h : 0;
+		if (a->stage_row < h) {
+			struct image *im = &a->image[a->layer_image[i]];
+			if (lr.l != l)
+				layer_rows_begin(&lr, l, &cv);
+			while (a->stage_row < h && done < budget) {
+				uint32_t n;
+				a->row[im->first_row + (unsigned)a->stage_row] = a->spans;
+				a->spans += layer_row(a, &lr, &cv, a->stage_row, a->span + a->spans,
+						      a->pixel + im->pixels, im->count, &n);
+				im->count += n;
+				a->stage_row++;
+				done += (uint32_t)cv.w;
+			}
+			if (a->stage_row < h)
+				break;
+			a->row[im->first_row + (unsigned)h] = a->spans;
+			a->stage_pixels += im->count;
+		}
+		/* The anim steps of this layer are contiguous in stage_step. */
+		unsigned s0 = l->anims ? a->anim[l->first_anim].first : 0,
+			 s1 = l->anims ? a->anim[l->first_anim + l->anims - 1].first +
+					     a->anim[l->first_anim + l->anims - 1].count
+				       : 0;
+		while (s0 + (unsigned)(a->stage_row - h) < s1 && done < budget) {
+			unsigned t = s0 + (unsigned)(a->stage_row - h);
+			const struct stage_step *sp = &a->stage_step[t];
+			a->stage_look[t] = -1;
+			if (sp->frame != 0xffff) {
+				unsigned k = a->region_image[0] + a->stage_used++;
+				uint32_t n = expand_frame(a, sp->frame, l->palette, k,
+							  a->region_pixel[0] + a->stage_pixels);
+				a->stage_pixels += n;
+				a->stage_look[t] = (int16_t)k;
+				done += n;
+			}
+			done++;
+			a->stage_row++;
+		}
+		if (s0 + (unsigned)(a->stage_row - h) < s1)
+			break;
+		a->stage_layer++;
+		a->stage_row = -1;
+	}
+	return done;
+}
+static int stage_complete(const struct assets *a)
+{
+	return a->cast_stage < 0 || a->stage_layer >= a->stage[a->cast_stage].layers;
+}
+int fight_ready(const struct assets *a)
+{
+	for (int i = 0; i < 2; i++)
+		if ((a->wanted >> i & 1) &&
+		    (a->cast[i][0] < 0 || a->cast_next[i] < a->chr[a->cast[i][0]].steps))
+			return 0;
+	return !(a->wanted & 4) || stage_complete(a);
+}
+uint32_t fight_prefetch(struct assets *a, uint32_t budget)
+{
+	uint32_t done = stage_work(a, budget);
+	for (int i = 0; i < 2 && done < budget; i++)
+		done += side_work(a, i, budget - done);
+	return done;
+}
+uint32_t fight_demand(struct assets *a, const struct scene *scene)
+{
+	uint32_t done = 0;
+	for (unsigned k = 0; k < scene->misses && k < SCENE_MISSES; k++)
+		done += side_frame(a, scene->miss[k] >> 15, scene->miss[k] & 0x7fffu);
+	if (scene->stage_missing)
+		done += stage_work(a, UINT32_MAX);
+	return done;
+}
+int fight_cast(struct assets *a, const struct fight_state *s)
+{
+	unsigned changed = fight_want(a, s);
+	return fight_prefetch(a, UINT32_MAX) > 0 || changed;
 }
 
 static inline unsigned div255(unsigned x) { return (x + 1 + (x >> 8)) >> 8; }

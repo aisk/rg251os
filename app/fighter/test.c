@@ -5,7 +5,10 @@
  * pushback and corner transfer, guard heights, trades, motion and charge
  * commands, the input buffer and prejump, special and chain cancels, Power
  * Wave flight, hits, guard and clash, Burn Knuckle motion, Rising Tackle
- * height, the arcade ladder (select, opponents, loss, clear, Auto rotation,
+ * height, follow-ups (Iori's three Aoi Hana stages: windows, the buffer,
+ * expiry, contact, the move clock across a state load; May Lee's Tatsuo
+ * Kyaku branches by held direction), the arcade ladder (the versus card
+ * freezing the rules, select, opponents, loss, clear, Auto rotation,
  * replay), state round-trip and rejection, the AI's use of every move, and
  * the stats: each character's system and resolved stats, walk speeds, jump
  * arcs and prejump, life, defense, weight, push distance, guard range, input
@@ -119,6 +122,8 @@ static uint8_t *read_all(const char *path, size_t *n)
 static void save(void *buf, size_t n) { assert(retro_serialize(buf, n)); }
 /* ---- rules on exact ticks; expected numbers come from terry.json ---- */
 #define K(k) (1u << RETRO_DEVICE_ID_JOYPAD_##k)
+/* Words per fighter in a saved state, mirroring FIGHTER_WORDS in fighter.c. */
+#define FIGHTER_WORDS_T 27
 static struct assets pack;
 static unsigned terry;
 enum { POWER_WAVE = MOVES, BURN_KNUCKLE, RISING_TACKLE };
@@ -650,10 +655,162 @@ static void rising_tackle(void)
 		step2(&s, n <= 30 ? K(DOWN) : n == 31 ? K(UP) | K(Y) : 0, 0);
 	assert(s.p[1].hp == 900 && s.p[0].y == -18 && s.p[0].freeze == 10);
 }
+/* Follow-ups (rekkas) on Iori's three-stage Aoi Hana and May Lee's Tatsuo
+ * Kyaku branches. A first 214+P lands on call 5, so stage 1 shows elapsed
+ * n - 6 when call n checks a cancel: a follow-up pressed on call n starts
+ * there once n - 6 reaches open, from the buffer if pressed up to
+ * stats.buffer calls before. */
+static unsigned character(const char *name)
+{
+	unsigned c = 0;
+	while (strcmp(pack.chr[c].name, name))
+		assert(++c < pack.characters);
+	return c;
+}
+static unsigned child(const struct character *c, unsigned parent, int motion)
+{
+	for (unsigned k = MOVES; k < c->moves; k++)
+		if (c->move[k].after == parent + 1 && c->move[k].motion == motion)
+			return k;
+	abort();
+}
+/* Iori at 100 against a far P1 (or one at x1): 214+P on call 5, then the
+ * keys of `second` on calls up to `last`; returns the first call that shows
+ * move k + 1, or 0. */
+static int aoi_run(unsigned iori, int x1, int second, uint32_t button, int last, unsigned k,
+		   struct fight_state *s)
+{
+	int seen = 0;
+	match(s, iori, terry, 100, x1);
+	for (int n = 1; n <= last; n++) {
+		uint32_t in = motion(MOTION_214, n, 5, 1, K(Y));
+		if (second)
+			in |= button == K(Y) ? motion(MOTION_214, n, second, 1, K(Y))
+					       : n == second ? button : 0;
+		step2(s, in, 0);
+		if (!seen && s->p[0].move == (int)k + 1)
+			seen = n;
+	}
+	return seen;
+}
+static void follow_ups(void)
+{
+	struct fight_state s, t;
+	uint32_t w[STATE_WORDS], v[STATE_WORDS];
+	unsigned iori = character("IORI"), maylee = character("MAYLEE");
+	struct character *c = &pack.chr[iori];
+	unsigned a1 = MOVES;
+	while (c->move[a1].motion != MOTION_214 || c->move[a1].after)
+		assert(++a1 < c->moves);
+	unsigned a2 = child(c, a1, MOTION_214), a3 = child(c, a2, MOTION_214);
+	const struct move *m1 = &c->move[a1], *m2 = &c->move[a2], *m3 = &c->move[a3];
+	int open = m2->open, buf = c->stats.buffer, total = m1->anim.total;
+	assert(m2->special && !m2->contact && m3->hit.guard == GUARD_OVERHEAD &&
+	       m1->hit.guard != GUARD_OVERHEAD && open <= m2->close && m2->close < total);
+	/* One 214+P plays stage 1 alone and ends. */
+	assert(aoi_run(iori, 400, 0, 0, 5 + total + 4, a2, &s) == 0 && !s.p[0].move);
+	assert(aoi_run(iori, 400, 0, 0, 5, a1, &s) == 5);
+	/* A second one in the window starts stage 2 on that call; up to
+	 * stats.buffer calls early it waits in the buffer, earlier it expires. */
+	assert(aoi_run(iori, 400, 6 + open + 2, K(Y), 6 + open + 2, a2, &s) == 6 + open + 2 &&
+	       !s.p[0].elapsed && !s.p[0].clock);
+	assert(aoi_run(iori, 400, 6 + open - buf, K(Y), 6 + open, a2, &s) == 6 + open);
+	assert(aoi_run(iori, 400, 5 + open - buf, K(Y), 5 + total + 4, a2, &s) == 0);
+	/* Past close, or P alone, never. */
+	assert(aoi_run(iori, 400, 7 + m2->close, K(Y), 5 + total + 4, a2, &s) == 0);
+	assert(aoi_run(iori, 400, 6 + open + 2, K(X), 5 + total + 4, a2, &s) == 0);
+	/* Stage 3 follows stage 2 (started on call f) the same way, only
+	 * from it. */
+	int f = 6 + open + 2, g = f + 1 + m3->open;
+	match(&s, iori, terry, 100, 400);
+	for (int n = 1; n <= g; n++)
+		step2(&s, motion(MOTION_214, n, 5, 1, K(Y)) | motion(MOTION_214, n, f, 1, K(Y)) |
+			      motion(MOTION_214, n, g, 1, K(Y)), 0);
+	assert(s.p[0].move == (int)a3 + 1 && !s.p[0].elapsed);
+	/* The state carries the move clock: a copy decoded mid stage 2 takes
+	 * the same stage 3 press. */
+	match(&s, iori, terry, 100, 400);
+	for (int n = 1; n <= g + 6; n++) {
+		if (n == g - 3) {
+			fight_encode(&s, w);
+			assert(fight_decode(&t, &pack, w) && t.p[0].clock == s.p[0].clock &&
+			       t.p[0].clock > 0);
+		}
+		uint32_t in = motion(MOTION_214, n, 5, 1, K(Y)) | motion(MOTION_214, n, f, 1, K(Y)) |
+				motion(MOTION_214, n, g, 1, K(Y));
+		step2(&s, in, 0);
+		if (n >= g - 3)
+			step2(&t, in, 0);
+	}
+	fight_encode(&s, w);
+	fight_encode(&t, v);
+	assert(s.p[0].move == (int)a3 + 1 && !memcmp(w, v, sizeof(w)));
+	/* With contact required a whiff has no stage 2; after a hit the press
+	 * on the call after stage 1 shows open unfrozen starts it. */
+	c->move[a2].contact = 1;
+	assert(aoi_run(iori, 400, 6 + open + 2, K(Y), 5 + total + 4, a2, &s) == 0);
+	int x1 = 100 + m1->reach, hit_at = 0;
+	match(&s, iori, terry, 100, x1);
+	for (int n = 1; n <= 60 && !hit_at; n++) {
+		step2(&s, motion(MOTION_214, n, 5, 1, K(Y)), 0);
+		if (s.p[0].move == (int)a1 + 1 && s.p[0].hit && !s.p[0].freeze &&
+		    s.p[0].elapsed == open)
+			hit_at = n + 1;
+	}
+	assert(hit_at && s.p[1].hp < pack.chr[terry].stats.life);
+	assert(aoi_run(iori, x1, hit_at, K(Y), hit_at, a2, &s) == hit_at);
+	c->move[a2].contact = 0;
+	/* May Lee: Tatsuo Kyaku (236+K on call 5), then K on call 6 + open
+	 * with up, down or any other direction (none included) picks its
+	 * branch; outside the window it does nothing. */
+	const struct character *ml = &pack.chr[maylee];
+	unsigned tk = MOVES;
+	while (ml->move[tk].motion != MOTION_236 || ml->move[tk].after)
+		assert(++tk < ml->moves);
+	unsigned up = child(ml, tk, HOLD_8), down = child(ml, tk, HOLD_2),
+		 any = child(ml, tk, MOTION_ANY);
+	static const uint32_t dir[5] = {K(UP), K(DOWN), 0, K(RIGHT), K(LEFT)};
+	for (int d = 0; d < 5; d++) {
+		unsigned want = d == 0 ? up : d == 1 ? down : any;
+		int at = 6 + ml->move[want].open;
+		assert(ml->move[want].open == ml->move[any].open);
+		for (int late = 0; late < 2; late++) {
+			int press = late ? 7 + ml->move[want].close : at;
+			match(&s, maylee, terry, 100, 400);
+			int seen = 0;
+			for (int n = 1; n <= press; n++) {
+				step2(&s, motion(MOTION_236, n, 5, 1, K(B)) |
+					      (n == press ? dir[d] | K(B) : 0), 0);
+				seen |= s.p[0].move == (int)want + 1;
+			}
+			assert(late ? !seen && s.p[0].move != (int)want + 1
+				    : s.p[0].move == (int)want + 1 && !s.p[0].elapsed);
+		}
+	}
+}
 /* The arcade ladder on a four-character roster made of Terry copies:
  * select, random unbeaten opponents, a loss, a clear and save/replay. */
+/* Step through a ladder round's versus card: nothing moves, a held button
+ * is no press afterwards and ROUND_START sounds on its last tick. */
+static void intro(struct fight_state *s)
+{
+	assert(s->mode == MODE_FIGHT);
+	struct fight_state t = *s;
+	for (uint32_t n = s->timer; n < INTRO_TICKS; n++) {
+		step2(s, K(A) | K(LEFT), K(B));
+		assert(s->p[0].x == t.p[0].x && !s->p[0].move && !s->p[1].move &&
+		       s->p[0].keys == (int32_t)(K(A) | K(LEFT)) &&
+		       (s->timer == INTRO_TICKS || !s->sounds));
+	}
+	assert(s->timer == INTRO_TICKS && s->sounds == 1 && s->sound[0].id == SOUND_ROUND_START);
+	/* A, still held, does not kick when the round begins. */
+	step2(s, K(A), 0);
+	assert(!s->p[0].move);
+}
 static void win_round(struct fight_state *s, int winner)
 {
+	if (s->timer < INTRO_TICKS)
+		intro(s);
 	/* Stand LP into a 10 hp loser: KO on call 4, round over after 180. */
 	s->p[0].x = QX(200);
 	s->p[1].x = QX(260);
@@ -777,10 +934,10 @@ static void state_words(void)
 	assert(fight_decode(&t, &pack, w));
 	enum { W_X, W_Y, W_VY, W_HP, W_FACE, W_WALK, W_BLOCK, W_CROUCH, W_MOVE, W_ELAPSED,
 	       W_HIT, W_STUN, W_FREEZE, W_SLIDE, W_KEYS, W_CORNER, W_SQUAT, W_BUFFER, W_AGE,
-	       W_PLAN, W_PLAN_TICK, W_CHARGE };
+	       W_PLAN, W_PLAN_TICK, W_CLOCK, W_CHARGE };
 	enum { G_MODE = 8, G_TIMER, G_BEATEN, G_STAGE, G_RUN, G_WIN0, G_WIN1, G_CHR0, G_CHR1,
 	       G_PAL0, G_PAL1 };
-	const int P = 19, S = 19 + 2 * 26;
+	const int P = 19, S = 19 + 2 * FIGHTER_WORDS_T;
 	int shot = S + 6 * (int)(shot_of(&s, 1) - s.shot);
 	static const struct {
 		int at, who, field;
@@ -798,7 +955,7 @@ static void state_words(void)
 	    {0, 0, W_SQUAT, 1},	   {0, 0, W_BUFFER, MOVES + 4}, {0, 0, W_AGE, 4 + 1},
 	    {0, 1, W_AGE, 1},		   {0, 1, W_PLAN, STAND_HK + 1}, {0, 1, W_PLAN, MOVES + 4},
 	    {0, 1, W_PLAN_TICK, 1},	   {0, 1, W_CHARGE, (10 + 1) << 8},
-	    {0, 1, W_CHARGE, 1 | 1 << 8},
+	    {0, 1, W_CHARGE, 1 | 1 << 8}, {0, 0, W_CLOCK, 256},
 	    /* Globals. */
 	    {1, 0, G_MODE, MODES},	   {1, 0, G_TIMER, 256},	       {1, 0, G_BEATEN, 1},
 	    {1, 0, G_BEATEN, 2},	   {1, 0, G_STAGE, 2},	       {1, 0, G_WIN0, ROUNDS_TO_WIN},
@@ -814,7 +971,7 @@ static void state_words(void)
 	};
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
 		memcpy(bad, w, sizeof(w));
-		int at = cases[i].at == 0 ? P + cases[i].who * 26 + cases[i].field
+		int at = cases[i].at == 0 ? P + cases[i].who * FIGHTER_WORDS_T + cases[i].field
 		       : cases[i].at == 1 ? cases[i].field
 					  : shot + cases[i].field;
 		bad[at] = cases[i].value;
@@ -841,8 +998,8 @@ static void state_words(void)
 	assert(!fight_decode(&t, &pack, bad));
 	/* Crouching in the air. */
 	memcpy(bad, w, sizeof(w));
-	bad[P + 26 + W_CROUCH] = 1;
-	bad[P + 26 + W_Y] = (uint32_t)-10;
+	bad[P + FIGHTER_WORDS_T + W_CROUCH] = 1;
+	bad[P + FIGHTER_WORDS_T + W_Y] = (uint32_t)-10;
 	assert(!fight_decode(&t, &pack, bad));
 }
 /* ---- camera, walls, sparks and sound events on the pack's stages ---- */
@@ -1163,11 +1320,11 @@ static void spark_sound_tests(void)
 	fight_scene(&s, &pack, &sc);
 	assert(sc.layers > 0);
 	int starts = 0;
-	for (int n = 0; n < 200 && !starts; n++) {
+	for (int n = 0; n < 200 + INTRO_TICKS && !starts; n++) {
 		step2(&s, 0, 0);
 		starts = heard(&s, SOUND_ROUND_START, 0);
 	}
-	assert(starts == 1 && s.mode == MODE_FIGHT && !s.ended);
+	assert(starts == 1 && s.mode == MODE_FIGHT && !s.ended && s.timer == INTRO_TICKS);
 	/* A paused tick emits nothing and changes nothing. */
 	staged(&s, korea, terry, terry, 346, 406);
 	step2(&s, K(START), 0);
@@ -1193,7 +1350,7 @@ static void stage_state(void)
 	assert(s.hits == 1 && s.sounds && slot < SPARK_SLOTS && s.cam == 0);
 	fight_encode(&s, w);
 	assert(fight_decode(&t, &pack, w));
-	const int S = 19 + 2 * 26, X = S + 6 * MAX_PROJECTILES + 7, SP = X + 4,
+	const int S = 19 + 2 * FIGHTER_WORDS_T, X = S + 6 * MAX_PROJECTILES + 7, SP = X + 4,
 		  SO = SP + 5 * SPARK_SLOTS;
 	assert(w[SP + 5 * slot] == (uint32_t)s.spark[slot].kind && w[SO] == s.sounds &&
 	       w[X] == korea && w[X + 1] == s.cam && w[X + 2] == s.shake);
@@ -1629,6 +1786,7 @@ static void logic_tests(const uint8_t *data, size_t len)
 	projectile();
 	burn_knuckle();
 	rising_tackle();
+	follow_ups();
 	ladder();
 	state_words();
 	stat_tests();
@@ -1725,6 +1883,9 @@ int main(int argc, char **argv)
 	copy[7] = '5'; /* FGSTATE5, before the camera, sparks and sound events */
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
+	copy[7] = '6'; /* FGSTATE6, before the intro and follow-up inputs */
+	assert(!retro_unserialize(copy, n));
+	memcpy(copy, end, n);
 	memset(copy + 16 + 8 * 4, 0xff, 4);
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
@@ -1767,10 +1928,13 @@ int main(int argc, char **argv)
 	use32 = false;
 	players = "two";
 	assert(retro_load_game(&g));
-	/* Port 1 drives the ladder's opponent once P1 picked a fighter. */
+	/* Port 1 drives the ladder's opponent once P1 picked a fighter and the
+	 * versus card is over. */
 	keys[0] = 1u << RETRO_DEVICE_ID_JOYPAD_Y;
 	retro_run();
 	keys[0] = 0;
+	for (int i = 0; i < INTRO_TICKS; i++)
+		retro_run();
 	keys[1] = 1u << RETRO_DEVICE_ID_JOYPAD_LEFT;
 	retro_run();
 	save(start, n);
@@ -1779,7 +1943,8 @@ int main(int argc, char **argv)
 	keys[0] = 1u << RETRO_DEVICE_ID_JOYPAD_Y;
 	retro_run();
 	keys[0] = 0;
-	retro_run();
+	for (int i = 0; i <= INTRO_TICKS; i++)
+		retro_run();
 	save(end, n);
 	assert(memcmp(start, end, n));
 	/* A disconnected port must neither move nor attack. */
@@ -1788,6 +1953,8 @@ int main(int argc, char **argv)
 	keys[0] = 1u << RETRO_DEVICE_ID_JOYPAD_Y;
 	retro_run();
 	keys[0] = 0;
+	for (int i = 0; i < INTRO_TICKS; i++)
+		retro_run();
 	keys[1] = 1u << RETRO_DEVICE_ID_JOYPAD_LEFT;
 	retro_run();
 	save(copy, n);
@@ -1822,7 +1989,7 @@ int main(int argc, char **argv)
 	     "effect budget, camera and walls, sparks, sound events, content, "
 	     "RGB565/XRGB8888, audio, ports, replay, pause, state validation, frame "
 	     "data, hit/block/hitstop ticks, pushback and corner, guard heights, "
-	     "trades, commands, buffer, prejump, cancels, projectiles and clash, "
+	     "trades, commands, buffer, prejump, cancels, follow-ups, projectiles and clash, "
 	     "specials, ladder, systems and stats, AI coverage and stress cycle "
 	     "passed");
 	return 0;
