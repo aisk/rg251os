@@ -7,6 +7,13 @@ foot anchor, every action a list of (frame, ticks) steps. Pixels stay 1:1;
 the sheet background is transparent and each frame is trimmed and stored as
 per-row opaque spans of palette indices. Frames must have a background border
 and may not touch the sheet's credit box or its white animation underlines.
+Boxed sheets (kilburto's Spriters Resource exports: every frame in its own
+background box, boxes separated by lines of a "separator" colour, which the
+sprites may use too) have neither; a frame must lie inside one box, with
+background or the box's edge around it.
+"mirror": true marks a sheet drawn facing left: frames are flipped as they
+are read, so anchors, hurtboxes and hitboxes describe the right-facing frame
+(the anchor is relative to the flipped rectangle).
 
 A pack is built from a roster (assets/fighter/roster.json) or from a single
 manifest, which then acts as a roster of its own characters:
@@ -321,12 +328,13 @@ ESTIMATE_WARNING = 50
 
 
 def read_png(path, alpha=False):
-    """Decode an 8-bit, non-interlaced RGB or RGBA PNG to (w, h, RGB rows);
-    with alpha, RGBA rows are returned as they are (RGB rows get alpha 255)."""
+    """Decode an 8-bit, non-interlaced RGB, RGBA or palette PNG to (w, h, RGB
+    rows); with alpha, RGBA rows are returned as they are (RGB and palette rows
+    get alpha 255; a palette image's tRNS is ignored)."""
     data = pathlib.Path(path).read_bytes()
     if data[:8] != b'\x89PNG\r\n\x1a\n':
         raise ValueError(f'{path}: not a PNG')
-    pos, idat, header = 8, [], None
+    pos, idat, header, plte = 8, [], None, None
     while pos < len(data):
         n, kind = struct.unpack('>I4s', data[pos:pos + 8])
         body = data[pos + 8:pos + 8 + n]
@@ -334,11 +342,13 @@ def read_png(path, alpha=False):
             header = struct.unpack('>IIBBBBB', body)
         elif kind == b'IDAT':
             idat.append(body)
+        elif kind == b'PLTE':
+            plte = body
         pos += 12 + n
     w, h, depth, color, _, _, interlace = header
-    if depth != 8 or color not in (2, 6) or interlace:
-        raise ValueError(f'{path}: only 8-bit non-interlaced RGB/RGBA is supported')
-    bpp = 3 if color == 2 else 4
+    if depth != 8 or color not in (2, 3, 6) or interlace or (color == 3 and plte is None):
+        raise ValueError(f'{path}: only 8-bit non-interlaced RGB/RGBA/palette is supported')
+    bpp = {2: 3, 3: 1, 6: 4}[color]
     stride = w * bpp
     raw = zlib.decompress(b''.join(idat))
     if len(raw) != h * (stride + 1):
@@ -367,7 +377,14 @@ def read_png(path, alpha=False):
         elif kind:
             raise ValueError(f'{path}: bad filter {kind} on row {y}')
         prev = line
-        if alpha:
+        if color == 3:
+            if max(line) * 3 + 3 > len(plte):
+                raise ValueError(f'{path}: palette index out of range on row {y}')
+            line = b''.join(plte[i * 3:i * 3 + 3] for i in line)
+            if alpha:
+                line = b''.join(line[i:i + 3] + b'\xff' for i in range(0, w * 3, 3))
+            rows.append(line)
+        elif alpha:
             rows.append(bytes(line) if bpp == 4 else bytes(
                 b for i in range(0, stride, 3) for b in line[i:i + 3] + b'\xff'))
         else:
@@ -386,10 +403,18 @@ class Sheet:
             raise ValueError(f'{path}: SHA256 {digest} does not match the manifest')
         self.w, self.h, self.rows = read_png(path)
         self.bg = bytes.fromhex(self.m['background'])
-        self.bands = self._bands()
-        # The credit text box is the sheet's first band; nothing may come from it.
-        self.credit = self.bands[0]
-        self.underlines = self._underlines()
+        self.mirror = self.m.get('mirror', False) is True
+        sep = self.m.get('separator')
+        self.sep = bytes.fromhex(sep) if sep else None
+        if self.sep:
+            # Boxed sheet: no credit box and no underlines.
+            self.credit, self.underlines = (0, 0), []
+            self.boxes = box_rects(self)
+        else:
+            self.bands = self._bands()
+            # The credit text box is the sheet's first band; nothing may come from it.
+            self.credit = self.bands[0]
+            self.underlines = self._underlines()
 
     def px(self, x, y):
         return self.rows[y][x * 3:x * 3 + 3]
@@ -447,15 +472,28 @@ class Sheet:
             if y <= uy < y + h and x < ux1 and ux0 < x + w:
                 raise ValueError(f'{name}: contains the underline at y={uy} x={ux0}..{ux1}')
         # A background border proves the rectangle neither cuts a sprite nor
-        # reaches into its neighbour.
+        # reaches into its neighbour. On a boxed sheet the rectangle must lie
+        # in one box and the border is background or that box's edge.
+        inbox = lambda xx, yy: True
+        if self.sep:
+            box = next((b for b in self.boxes if b[0] <= x and b[1] <= y and
+                        x + w <= b[0] + b[2] and y + h <= b[1] + b[3]), None)
+            if box is None:
+                raise ValueError(f'{name}: not inside one box')
+            inbox = lambda xx, yy: (box[0] <= xx < box[0] + box[2] and
+                                    box[1] <= yy < box[1] + box[3])
         for xx in range(x - 1, x + w + 1):
-            if self.px(xx, y - 1) != self.bg or self.px(xx, y + h) != self.bg:
-                raise ValueError(f'{name}: no background border above/below')
+            for yy in (y - 1, y + h):
+                if inbox(xx, yy) and self.px(xx, yy) != self.bg:
+                    raise ValueError(f'{name}: no background border above/below')
         for yy in range(y - 1, y + h + 1):
-            if self.px(x - 1, yy) != self.bg or self.px(x + w, yy) != self.bg:
-                raise ValueError(f'{name}: no background border left/right')
+            for xx in (x - 1, x + w):
+                if inbox(xx, yy) and self.px(xx, yy) != self.bg:
+                    raise ValueError(f'{name}: no background border left/right')
         pixels = [[None if self.px(x + i, y + j) == self.bg else self.px(x + i, y + j)
                    for i in range(w)] for j in range(h)]
+        if self.mirror:
+            pixels = [row[::-1] for row in pixels]
         used_rows = [j for j in range(h) if any(p is not None for p in pixels[j])]
         used_cols = [i for i in range(w) if any(pixels[j][i] is not None for j in range(h))]
         if not used_rows:
@@ -1520,7 +1558,56 @@ def frame_data(sheets, systems):
                       f'estimates (more than {ESTIMATE_WARNING}%)')
 
 
+def box_rects(sheet):
+    """The boxes [x, y, w, h] of a boxed sheet. A box starts at a pixel that
+    is not separator and not inside a known box, and runs right along its top
+    row and down its left column to the next separator; its inside is never
+    looked at, so sprites may use the separator colour as long as they keep
+    off the box's top row and left column."""
+    inside, out = {}, []
+    for y in range(sheet.h):
+        x = 0
+        while x < sheet.w:
+            if (x, y) in inside:
+                x = inside[x, y]
+                continue
+            if sheet.px(x, y) == sheet.sep:
+                x += 1
+                continue
+            x1, y1 = x, y
+            while x1 < sheet.w and sheet.px(x1, y) != sheet.sep:
+                x1 += 1
+            while y1 < sheet.h and sheet.px(x, y1) != sheet.sep:
+                y1 += 1
+            inside.update(((x, yy), x1) for yy in range(y, y1))
+            out.append([x, y, x1 - x, y1 - y])
+            x = x1
+    return out
+
+
+def sheet_boxes(sheet):
+    """[(box, trimmed sprite [x, y, w, h] or None)] of a boxed sheet."""
+    out = []
+    for x, y, w, h in sheet.boxes:
+        used = [(i, j) for j in range(y, y + h) for i in range(x, x + w) if sheet.px(i, j) != sheet.bg]
+        sprite = None
+        if used:
+            xs, ys = [u[0] for u in used], [u[1] for u in used]
+            sprite = [min(xs), min(ys), max(xs) - min(xs) + 1, max(ys) - min(ys) + 1]
+        out.append(([x, y, w, h], sprite))
+    return out
+
+
 def detect(sheet):
+    if sheet.sep:
+        print(f'background {sheet.m["background"]}, boxed by {sheet.m["separator"]}; '
+              'rows of boxes: [x, y, w, h] of the sprite inside each box')
+        by_top = {}
+        for box, sprite in sheet_boxes(sheet):
+            by_top.setdefault(box[1], []).append(sprite)
+        for top, sprites in sorted(by_top.items()):
+            print(f'boxes at y={top}: ' + ' '.join(str(r) for r in sprites if r))
+        return
     print(f'background {sheet.m["background"]}, credit box rows {sheet.credit}')
     for x0, y, x1 in sheet.underlines:
         print(f'underline y={y} x={x0}..{x1}')
