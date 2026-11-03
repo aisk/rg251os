@@ -172,6 +172,7 @@ python3 tools/fighter/report.py /path/to/log/boot-NNNN/
    - 打击效果：KOF 火花（EXUM fightfx）和侍魂刀光加血（NRF 霸王丸），火花池 8 槽，生成在判定重叠区中点，不透明；重击和必杀震屏 10 tick，KO 震屏 16 tick 加白闪 3 tick。没做受击剪影、尘土和对消特效。
    - 声音：规则每 tick 发出最多 16 个声音事件（`fighter.h` 的 `enum sound_id`：挥空、命中、防御、斩击、跳跃、落地、发射、对消、KO、开场）。`app/fighter/audio.c` 是 8 声部混音器（IMA ADPCM、线性插值到 48 kHz、声像、主/音乐/音效三档音量的核心选项），音乐用核心私有的 pl_mpeg（`mp2.c`）解 MP2，跳转时先解前一帧并还原合成滤波位置，读档后的声音和连续播放逐位相同。声音放在与内容包同名的 `.fightsnd` 伴随文件（FIGHTSND v1，由 `tools/fighter/sound.py` 从 `assets/fighter/sound/` 生成），缺失或损坏时静音并记一条 WARN。音效 110 个片段（通用 25 个，取自 EXUM 和 SS vs LB 霸王丸；11 人的原作语音），音乐 14 首（vgmrips 的 KOF 2002 九首，用 libvgm 渲染；侍魂的找不到，侍魂体系暂用月华剑士五首），整个文件约 13 MB，载入时一次读入内存。选人放选人曲，开打按对手的体系和关卡选曲，KO 淡出后接胜利曲。真机估平均每帧约 0.55 ms，最坏约 1 ms。来源记在 `assets/fighter/sound/README.md`。需要试听：几处语音是推断的，128 kbps 的循环接缝。
 8. **有能实际打的内容后集中一次上机**：必须 `make image`、`make frontend-test` 零 warning 后再提交。同一次开机测 Max/Adaptive、真实对局负载、新 blit 计时、持续十分钟、恢复/休眠与主观手感和延迟。初始正常对战总工作目标 p99<12ms。
+9. **以后的优化方向：音乐实时合成（2026-11-04 记下，暂不做）**。现在的音乐是离线把 VGM 渲染成 MP2 再播放，等于播录音。更像真机的做法是在核心里模拟 YM2610（FM、SSG、ADPCM-A/B），直接回放 VGM 的寄存器写入，可选 ymfm（BSD）或 libvgm 的芯片核心。好处是音色和原作逐样本一致、循环无缝，还能按声道静音或变速。代价是体积省不了多少（KOF 2002 的 VGM 包 32 首约 8.3 MB，大部分是 ADPCM 采样），CPU 要实测（FM 按 55.5 kHz 逐样本模拟，A35 上估每帧 1 到 4 ms，现在 MP2 约 0.55 ms），读档要序列化芯片状态，跳转要快照。做之前先在主机用 ymfm 回放一首 KOF 2002 VGM 测耗时，再上真机，每帧 2 ms 以内才值得换，MP2 留作后备。
 
 ## 开发注意事项
 
