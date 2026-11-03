@@ -6,7 +6,8 @@ source of truth for it: every frame is a hand-checked sheet rectangle plus a
 foot anchor, every action a list of (frame, ticks) steps. Pixels stay 1:1;
 the sheet background is transparent and each frame is trimmed and stored as
 per-row opaque spans of palette indices. Frames must have a background border
-and may not touch the sheet's credit box or its white animation underlines.
+and may not touch the sheet's credit box or its white animation underlines
+(boxed sheets: see "boxed" below).
 
 A pack is built from a roster (assets/fighter/roster.json) or from a single
 manifest, which then acts as a roster of its own characters:
@@ -110,6 +111,15 @@ top-level keys such as "notes" are ignored):
               character's normal palette, slot 2 its mirror-match alternate
               (characters not listed use the first and second palette)
   palettes    name -> {sheet RGB hex: replacement hex}
+  boxed       optional separator colour (RGB hex) of a sheet that draws every
+              frame on its own background-filled box with separator lines
+              between the boxes (kilburto's full exports): there is no credit
+              box or underline, and a frame rectangle is either bordered by
+              background or is exactly one box (its border all separator).
+              The separator colour may also be a sprite colour.
+  mirror      optional true: the sheet faces left; frames are flipped to face
+              right and their anchor x counts from the rectangle's left edge
+              after the flip (from its right edge on the sheet)
   effects     [frame, palette] pairs for the effect sprites
   home_stage  (in a character) optional stage name: the ladder fights this
               character on it; otherwise opponent c fights on stage
@@ -321,12 +331,13 @@ ESTIMATE_WARNING = 50
 
 
 def read_png(path, alpha=False):
-    """Decode an 8-bit, non-interlaced RGB or RGBA PNG to (w, h, RGB rows);
-    with alpha, RGBA rows are returned as they are (RGB rows get alpha 255)."""
+    """Decode an 8-bit, non-interlaced RGB, RGBA or palette PNG to (w, h, RGB
+    rows); with alpha, RGBA rows are returned as they are (RGB and palette
+    rows get alpha 255)."""
     data = pathlib.Path(path).read_bytes()
     if data[:8] != b'\x89PNG\r\n\x1a\n':
         raise ValueError(f'{path}: not a PNG')
-    pos, idat, header = 8, [], None
+    pos, idat, header, plte = 8, [], None, None
     while pos < len(data):
         n, kind = struct.unpack('>I4s', data[pos:pos + 8])
         body = data[pos + 8:pos + 8 + n]
@@ -334,11 +345,13 @@ def read_png(path, alpha=False):
             header = struct.unpack('>IIBBBBB', body)
         elif kind == b'IDAT':
             idat.append(body)
+        elif kind == b'PLTE':
+            plte = body
         pos += 12 + n
     w, h, depth, color, _, _, interlace = header
-    if depth != 8 or color not in (2, 6) or interlace:
-        raise ValueError(f'{path}: only 8-bit non-interlaced RGB/RGBA is supported')
-    bpp = 3 if color == 2 else 4
+    if depth != 8 or color not in (2, 3, 6) or interlace or (color == 3 and not plte):
+        raise ValueError(f'{path}: only 8-bit non-interlaced RGB/RGBA/palette is supported')
+    bpp = {2: 3, 3: 1, 6: 4}[color]
     stride = w * bpp
     raw = zlib.decompress(b''.join(idat))
     if len(raw) != h * (stride + 1):
@@ -367,7 +380,12 @@ def read_png(path, alpha=False):
         elif kind:
             raise ValueError(f'{path}: bad filter {kind} on row {y}')
         prev = line
-        if alpha:
+        if bpp == 1:
+            if max(line, default=0) * 3 + 3 > len(plte):
+                raise ValueError(f'{path}: pixel outside the palette on row {y}')
+            rows.append(b''.join(plte[i * 3:i * 3 + 3] + (b'\xff' if alpha else b'')
+                                 for i in line))
+        elif alpha:
             rows.append(bytes(line) if bpp == 4 else bytes(
                 b for i in range(0, stride, 3) for b in line[i:i + 3] + b'\xff'))
         else:
@@ -386,6 +404,16 @@ class Sheet:
             raise ValueError(f'{path}: SHA256 {digest} does not match the manifest')
         self.w, self.h, self.rows = read_png(path)
         self.bg = bytes.fromhex(self.m['background'])
+        self.mirror = self.m.get('mirror', False)
+        if self.mirror not in (True, False):
+            raise ValueError(f'{path}: mirror must be true or false')
+        self.separator = bytes.fromhex(self.m['boxed']) if 'boxed' in self.m else None
+        if self.separator == self.bg:
+            raise ValueError(f'{path}: the box separator is the background colour')
+        if self.separator:
+            # Boxed sheets have neither a credit box nor underlines.
+            self.bands, self.credit, self.underlines = [], None, []
+            return
         self.bands = self._bands()
         # The credit text box is the sheet's first band; nothing may come from it.
         self.credit = self.bands[0]
@@ -440,22 +468,24 @@ class Sheet:
         x, y, w, h, ax, ay = self.m['frames'][name]
         if x < 1 or y < 1 or x + w >= self.w or y + h >= self.h or w < 1 or h < 1:
             raise ValueError(f'{name}: rectangle outside the sheet')
-        ct, cb = self.credit
+        ct, cb = self.credit or (0, 0)
         if y < cb and y + h > ct:
             raise ValueError(f'{name}: overlaps the credit box rows {ct}..{cb}')
         for ux0, uy, ux1 in self.underlines:
             if y <= uy < y + h and x < ux1 and ux0 < x + w:
                 raise ValueError(f'{name}: contains the underline at y={uy} x={ux0}..{ux1}')
         # A background border proves the rectangle neither cuts a sprite nor
-        # reaches into its neighbour.
-        for xx in range(x - 1, x + w + 1):
-            if self.px(xx, y - 1) != self.bg or self.px(xx, y + h) != self.bg:
-                raise ValueError(f'{name}: no background border above/below')
-        for yy in range(y - 1, y + h + 1):
-            if self.px(x - 1, yy) != self.bg or self.px(x + w, yy) != self.bg:
-                raise ValueError(f'{name}: no background border left/right')
+        # reaches into its neighbour; on a boxed sheet a border made only of
+        # separator pixels proves the rectangle is one whole box.
+        ring = {self.px(xx, yy) for xx in range(x - 1, x + w + 1) for yy in (y - 1, y + h)}
+        ring |= {self.px(xx, yy) for xx in (x - 1, x + w) for yy in range(y - 1, y + h + 1)}
+        if ring != {self.bg} and (not self.separator or ring != {self.separator}):
+            raise ValueError(f'{name}: no background border' +
+                             (' and not one whole box' if self.separator else ''))
         pixels = [[None if self.px(x + i, y + j) == self.bg else self.px(x + i, y + j)
                    for i in range(w)] for j in range(h)]
+        if self.mirror:
+            pixels = [row[::-1] for row in pixels]
         used_rows = [j for j in range(h) if any(p is not None for p in pixels[j])]
         used_cols = [i for i in range(w) if any(pixels[j][i] is not None for j in range(h))]
         if not used_rows:
