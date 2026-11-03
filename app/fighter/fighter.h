@@ -265,8 +265,9 @@ struct sound_event {
  * 0 = none) for show more ticks once the combo ended, best the longest
  * combo of this round. list is set while the select screen shows the
  * highlighted character's command list (START toggles it there). level is
- * the CPU difficulty (enum level, LEVEL_NORMAL after fight_reset; the core
- * sets it from its option while the select screen shows). */
+ * the CPU difficulty (enum level, LEVEL_NORMAL after fight_reset; R cycles
+ * it on the select screen, the core sets its option at load, reset and when
+ * the option changes while the select screen shows). */
 struct fight_state {
 	uint32_t tick, rng, previous, paused, stress, boxes, automatic, round;
 	uint32_t mode, timer, beaten, stage, run, wins[2], chr[2], pal[2];

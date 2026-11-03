@@ -50,7 +50,8 @@
  * by its button (LP/LK light, HP/HK heavy, specials and projectiles
  * special). Sound events (enum sound_id) are appended to the state as the
  * rules act.
- * CPU difficulty (the state's level): the levels table sets the AI's guard
+ * CPU difficulty (the state's level, set by R on the select screen or the
+ * core option): the levels table sets the AI's guard
  * rate, wrong-height guards and guard reaction, how often it starts
  * specials and normals, its follow-ups, Hard's cancels of connected
  * normals into motion specials, and on Easy the ladder CPU's damage (75%).
@@ -104,7 +105,9 @@
  * the first unfrozen tick, so a cancel from hitstop starts on
  * C + hitstop + 1.
  *
- * Ladder: the select screen picks P1 (d-pad, any attack confirms); each
+ * Ladder: the select screen picks P1 (d-pad, any attack confirms; R
+ * cycles the CPU level, shown top right, since the handheld has no core
+ * option rows); each
  * stage is a match of ROUNDS_TO_WIN won rounds against a random character
  * not yet beaten in this run (a mirror with the alternate palette only for
  * a one-character roster), fought on that opponent's home stage, or on
@@ -1190,7 +1193,11 @@ void fight_step(struct fight_state *s, const struct assets *a, uint32_t input,
 	}
 	if (pressed & KEY(L))
 		s->boxes ^= 1;
-	if (pressed & KEY(R))
+	/* R cycles the stress scene, or on the select screen the CPU level
+	 * (Easy, Normal, Hard). */
+	if ((pressed & KEY(R)) && s->mode == MODE_SELECT && !s->automatic && !s->paused)
+		s->level = (s->level + 1) % LEVELS;
+	else if (pressed & KEY(R))
 		s->stress = (s->stress + 1) % 4;
 	if (s->paused)
 		return;
@@ -1545,6 +1552,12 @@ static void difficulty(struct scene *out, const struct fight_state *s, int y)
 	const char *name = names[s->level];
 	text(out, 464 - text_width(name), y, name, colors[s->level]);
 }
+/* The select screen's difficulty, with the key that changes it. */
+static void select_difficulty(struct scene *out, const struct fight_state *s)
+{
+	difficulty(out, s, 12);
+	text(out, 464 - text_width("R CHANGE"), 26, "R CHANGE", 0x8410);
+}
 /* The select screen's command list: the highlighted fighter on the left,
  * its list in a panel on the right. */
 static void select_list(const struct fight_state *s, const struct assets *a, struct scene *out)
@@ -1563,7 +1576,7 @@ static void select_scene(const struct fight_state *s, const struct assets *a, st
 {
 	rect(out, 0, 0, FW, FH, 0x0841, OPAQUE, 255);
 	text(out, 240 - text_width("SELECT") / 2, 12, "SELECT", 0xffff);
-	difficulty(out, s, 12);
+	select_difficulty(out, s);
 	if (s->list) {
 		select_list(s, a, out);
 		return;

@@ -26,9 +26,11 @@
  * track; every 600 runs the voices started and stolen, the peak, the music
  * position and loops and the MP2 frames, seeks and decode time. Options
  * fight_volume, fight_music_volume and fight_sfx_volume set the levels.
- * fight_difficulty (easy, normal, hard) sets the CPU (fighter.c): the state
- * takes it at load, reset and on the select screen (logged when it
- * changes), the load line, each KO and the 600-run summary name it.
+ * fight_difficulty (easy, normal, hard) is the CPU's initial level
+ * (fighter.c): the state takes it at load and reset, and when the option
+ * changes while the select screen shows; R on the select screen cycles the
+ * state's level (the device has no option rows for this core). Every change
+ * is logged; the load line, each KO and the 600-run summary name it.
  *
  * Buttons (RetroPad ids; the RG351P shell labels match, SNES layout):
  * Y (left) light punch, X (top) heavy punch, B (bottom) light kick,
@@ -38,8 +40,8 @@
  * it hits). Back guards (down-back guards low), UP jumps, L
  * toggles the hurt/hit box overlay, R cycles the stress scene, START
  * pauses (showing P1's command list); A or B skips the KO screen. In the
- * select screen the d-pad moves, any attack button picks and START shows
- * or hides the highlighted character's command list. The desktop option fight_players=two lets
+ * select screen the d-pad moves, any attack button picks, R cycles the CPU
+ * level and START shows or hides the highlighted character's command list. The desktop option fight_players=two lets
  * port 1 drive the ladder's opponent; the device only has port 0. */
 #include "libretro.h"
 #include "audio.h"
@@ -66,10 +68,12 @@ static int16_t audio[1600];
 static struct audio sound;
 static char sound_path[4096];
 static int loaded, format32, two_players;
-/* The fight_difficulty option (enum level); the state takes it on the
- * select screen and at load or reset, so a ladder run keeps the level it
- * started with and a state loaded mid-run keeps its own. */
+/* The fight_difficulty option (enum level); the state takes it at load or
+ * reset and, once changed (level_changed), on the select screen, so a
+ * ladder run keeps the level it started with, a state loaded mid-run keeps
+ * its own and a level picked with R stays until the option changes. */
 static unsigned level = LEVEL_NORMAL;
+static int level_changed;
 static const char *const level_names[LEVELS] = {"easy", "normal", "hard"};
 static unsigned devices[2] = {RETRO_DEVICE_JOYPAD, RETRO_DEVICE_JOYPAD};
 static unsigned benchmark_runs;
@@ -276,20 +280,25 @@ static void options(void)
 	sound.music_level = volume("fight_music_volume", 60);
 	sound.sfx_level = volume("fight_sfx_volume", 100);
 	struct retro_variable d = {"fight_difficulty", NULL};
-	level = LEVEL_NORMAL;
+	unsigned option = LEVEL_NORMAL;
 	if (env && env(RETRO_ENVIRONMENT_GET_VARIABLE, &d) && d.value)
 		for (unsigned k = 0; k < LEVELS; k++)
 			if (!strcmp(d.value, level_names[k]))
-				level = k;
+				option = k;
+	level_changed |= option != level;
+	level = option;
 }
-/* Hand the option to the state (on the select screen, or always with
+/* Hand a changed option to the state (on the select screen, or always with
  * force) and log a change. */
 static void apply_level(int force)
 {
-	if ((force || state.mode == MODE_SELECT) && state.level != level) {
-		state.level = level;
-		if (logger)
-			logger(RETRO_LOG_INFO, "fight: difficulty %s\n", level_names[level]);
+	if (force || (level_changed && state.mode == MODE_SELECT)) {
+		level_changed = 0;
+		if (state.level != level) {
+			state.level = level;
+			if (logger)
+				logger(RETRO_LOG_INFO, "fight: difficulty %s\n", level_names[level]);
+		}
 	}
 }
 /* Load the sound bank next to the content; without it the game is silent. */
@@ -356,6 +365,7 @@ bool retro_load_game(const struct retro_game_info *g)
 	fight_reset(&state, automatic);
 	options();
 	state.level = level;
+	level_changed = 0;
 	open_sound(g);
 	sample_count = 0;
 	effects_requested = effects_drawn = 0;
@@ -492,10 +502,13 @@ void retro_run(void)
 				if (input(p, RETRO_DEVICE_JOYPAD, 0, k))
 					keys[p] |= 1u << k;
 	apply_level(0);
-	uint32_t old_tick = state.tick, old_ended = state.ended;
+	uint32_t old_tick = state.tick, old_ended = state.ended, old_level = state.level;
 	uint64_t t0 = tick_us();
 	fight_step(&state, &assets, keys[0], keys[1], two_players);
 	uint64_t t1 = tick_us();
+	if (state.level != old_level && logger)
+		logger(RETRO_LOG_INFO, "fight: difficulty %s (select screen R)\n",
+		       level_names[state.level]);
 	if (!old_ended && state.ended && logger)
 		logger(RETRO_LOG_INFO,
 		       "fight: KO stage %u round %u %s vs %s life %d/%d, max combo %u/%u, "

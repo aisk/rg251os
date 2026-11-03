@@ -11,7 +11,7 @@
  * versus card and READY freezing the rules, held buttons no press at FIGHT,
  * the banner, select, opponents, loss, clear, Auto rotation, replay), state
  * round-trip and rejection, the AI's use of every move, the difficulty
- * (Easy damage, guards, specials and Hard's cancels per level), and
+ * (R on the select screen, Easy damage, guards, specials and Hard's cancels per level), and
  * the stats: each character's system and resolved stats, walk speeds, jump
  * arcs and prejump, life, defense, weight, push distance, guard range, input
  * windows and the samsho5sp damage scale changing the fight by exact
@@ -1172,6 +1172,38 @@ static void difficulty(void)
 	assert(fight_decode(&t, &pack, w) && t.level == LEVEL_HARD);
 	w[LEVEL_W] = LEVELS;
 	assert(!fight_decode(&t, &pack, w));
+	/* R on the select screen cycles Easy, Normal, Hard (a held R once);
+	 * paused or in a fight it changes the stress scene instead. */
+	fight_reset(&s, 0);
+	static const uint32_t cycle[] = {LEVEL_HARD, LEVEL_EASY, LEVEL_NORMAL};
+	for (int k = 0; k < 3; k++) {
+		fight_step(&s, &pack, K(R), 0, 0);
+		fight_step(&s, &pack, K(R), 0, 0);
+		assert(s.level == cycle[k] && s.stress == 0 && s.mode == MODE_SELECT);
+		fight_step(&s, &pack, 0, 0, 0);
+	}
+	fight_step(&s, &pack, K(START), 0, 0);
+	fight_step(&s, &pack, 0, 0, 0);
+	assert(s.list);
+	fight_step(&s, &pack, K(R), 0, 0);
+	fight_step(&s, &pack, 0, 0, 0);
+	assert(s.level == LEVEL_HARD);
+	fight_step(&s, &pack, K(Y), 0, 0);
+	fight_step(&s, &pack, K(R), 0, 0);
+	assert(s.mode == MODE_FIGHT && s.level == LEVEL_HARD && s.stress == 1);
+	struct scene *sc = malloc(sizeof(*sc));
+	assert(sc);
+	fight_reset(&s, 0);
+	s.level = LEVEL_HARD;
+	fight_scene(&s, &pack, sc);
+	struct fight_state u = s;
+	u.level = LEVEL_EASY;
+	struct scene *other = malloc(sizeof(*other));
+	assert(other);
+	fight_scene(&u, &pack, other);
+	assert(sc->count != other->count || memcmp(sc->cmd, other->cmd, sc->count * sizeof(sc->cmd[0])));
+	free(sc);
+	free(other);
 	for (int level = LEVEL_EASY; level <= LEVEL_NORMAL; level++) {
 		unsigned checked = 0;
 		fight_reset(&s, 0);
@@ -2347,6 +2379,19 @@ int main(int argc, char **argv)
 	retro_reset();
 	save(copy, n);
 	assert(get_word(copy, LEVEL_W) == LEVEL_EASY && level_logs == 1);
+	/* R picks Normal on the select screen and it stays while the option
+	 * does not change; a changed option is applied there again. */
+	keys[0] = 1u << RETRO_DEVICE_ID_JOYPAD_R;
+	retro_run();
+	keys[0] = 0;
+	retro_run();
+	retro_run();
+	save(copy, n);
+	assert(get_word(copy, LEVEL_W) == LEVEL_NORMAL && level_logs == 2);
+	difficulty_option = "hard";
+	retro_run();
+	save(copy, n);
+	assert(get_word(copy, LEVEL_W) == LEVEL_HARD && level_logs == 3);
 	retro_unload_game();
 	difficulty_option = "normal";
 	free(data);
