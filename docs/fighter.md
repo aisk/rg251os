@@ -206,7 +206,20 @@ python3 tools/fighter/report.py /path/to/log/boot-NNNN/
 6. **数值体系**：[数值设计](fighter-stats.md)的第一步已完成。`assets/fighter/systems.json` 定义 `kof2002`（参考尺度，默认）和 `samsho5sp`（伤害按 800 千分比缩放，跳跃 -42/2 而不是设计稿的 -56/2，后者会飞出屏幕），霸王丸通过其中的 `characters` 映射归入侍魂体系。体力、防御倍率、体重、走速、跳跃、prejump、推挤距离、防御显示距离和输入窗口都从 C 常量搬进了数据，由体系默认值加角色覆盖合成；招式有 `class`（light/heavy/special 等），没写的硬直和 hitstop 取体系表；`src` 和顶层 `sources` 记录来源，只在 `pack.py data` 里统计，不进包。`tools/fighter/convert-stats.py` 已经把全部清单补上 system、class 和 src（数值不变，可重复运行）；`--adopt-class` 会让普通技改用体系表的硬直（KOF 2002 轻 11/9、重 19/17，来自 Dream Cancel），会改变帧数据，还没用。KOF 角色走速从 2/2 px 变为 1.75/1.5 px。下一步是护栏和命中效果（与投技、倒地一起）。
 7. **表现层（2026-11-04 完成第一版）**：按[表现层设计](fighter-presentation.md)实现。
    - 镜头和墙：`cam` 在规则状态里，取两人中点夹在舞台范围内；墙是舞台墙加屏幕墙（体系的 `margin` 24、`play_width` 480），两人最远拉开 432 px，墙角推开转移对两种墙都生效，飞行道具出镜头 64 px 消失。
-   - 舞台：最多 8 层视差、边缘规则、只存差异像素的动画，加载时每层展开成整图，绘制是行复制。两张：KOF 2002 Korea（Misamu 的 MUGEN 移植，取自 KOF EXUM 2019，2 层 4 个动画）和侍魂 V Special 水月神社（the shirt ninja，Spriters Resource 89319 的 Wayback 存档）。两张都是精确的 5 bit 色阶。对手有 `home_stage` 就用（霸王丸 mizuki，May Lee korea），否则轮流；没有舞台的包退回旧的平地背景。主机渲染 Korea 约 45 µs、Mizuki 约 36 µs，真机估 1.5 到 4.5 ms，待上机实测。
+   - 舞台：最多 8 层视差、边缘规则、只存差异像素的动画，加载时每层展开成整图，绘制是行复制。最初两张：KOF 2002 Korea（Misamu 的 MUGEN 移植，取自 KOF EXUM 2019，2 层 4 个动画）和侍魂 V Special 水月神社（the shirt ninja，Spriters Resource 89319 的 Wayback 存档），都是精确的 5 bit 色阶。主机渲染 Korea 约 45 µs、Mizuki 约 36 µs，真机估 1.5 到 4.5 ms，待上机实测。
+   - 2026-11-04 又加了五张，都取自 KOF EXUM 2019 的 MUGEN 舞台（来源和 SHA256 见 `assets/fighter/README.md`）。下表的“展开”是开打时展开成 RGB565 的像素数（含动画差异块，按 `render.c` 的 `measure_stage` 算），舞台缓存区按最大的一张分配，Korea 459,862 像素（约 898 KiB）仍是最大，所以加了这五张常驻 RGB565 不变；包从约 11.9 MB 增加到约 13.8 MB（调色板索引常驻）。
+
+     | 舞台 | 作品、移植者 | 层和动画 | 颜色 | 宽 | 展开 | 主场 | 音乐 |
+     |---|---|---|---|---|---|---|---|
+     | CHINA | KOF 2002 China 早晨，Misamu | 湖景远景加宫殿墙，水面 2 个、灯笼和人物各 1 个 | 与 Korea 同一 32 级色阶 | 752 | 458,989 | 陈可汗 | kof-china |
+     | HONGKONG | KOF 2003 Hong Kong 夜晚天台，Misamu | 城市远景 8 帧，天台 3 个动画 | 同上 | 752 | 442,338 | 八神庵、不知火舞 | kof-japan |
+     | TEMPLE | SVC Chaos 守护犬寺（韩国），light | 单层，火盆、门里灯光、蜡烛 | 全是 8 的倍数 | 752 | 275,657 | 色 | lb-theme3 |
+     | POWER | SVC Chaos Power Generation Room，Adzeer | 竖井远景加机房，机房 4 帧 | 全是 8 的倍数 | 752 | 348,213 | Zero、火星人、Politank-Z | kof-italy |
+     | COURTYARD | 月华剑士庭院（红叶和山门），Claudio Toxi | 门外海景单独一层（7/8 速度）加庭院 | 全是 4 的倍数（5 bit 加 Neo Geo 的暗位） | 800 | 275,251 | 镜真之介 | lb-theme1 |
+
+     没导入的：Hong Kong 以外的 KOF 2003 舞台（Japan 的颜色不在色阶上，是转换过的），Power 远景的 6 帧动画（几乎每个像素都变，约 66 万像素，超过缓存），Courtyard 的落叶（BGCtrl 速度动画）。地面行都按 def 的 zoffset 加精灵轴点算，图下面不够的行用镜像补。
+   - 对手有 `home_stage` 就用，否则轮流（对手 c 用舞台 c % 舞台数）；没有舞台的包退回旧的平地背景。主场：霸王丸和莉姆露露 mizuki，May Lee korea，其余见上表。
+   - 舞台音乐：`sound.json` 的 music 行的 scope 可以写舞台显示名（如 `CHINA`），这个舞台上开打时优先放它，否则还是按对手体系的那一行和关卡号选曲。Korea 放 kof-korea，Mizuki 没有自己的行。选曲没有试听，是按曲名和舞台挑的。
    - 打击效果：KOF 火花（EXUM fightfx）和侍魂刀光加血（NRF 霸王丸），火花池 8 槽，生成在判定重叠区中点，不透明；重击和必杀震屏 10 tick，KO 震屏 16 tick 加白闪 3 tick。没做受击剪影、尘土和对消特效。
    - 声音：规则每 tick 发出最多 16 个声音事件（`fighter.h` 的 `enum sound_id`：挥空、命中、防御、斩击、跳跃、落地、发射、对消、KO、开场）。`app/fighter/audio.c` 是 8 声部混音器（IMA ADPCM、线性插值到 48 kHz、声像、主/音乐/音效三档音量的核心选项），音乐用核心私有的 pl_mpeg（`mp2.c`）解 MP2，跳转时先解前一帧并还原合成滤波位置，读档后的声音和连续播放逐位相同。声音放在与内容包同名的 `.fightsnd` 伴随文件（FIGHTSND v1，由 `tools/fighter/sound.py` 从 `assets/fighter/sound/` 生成），缺失或损坏时静音并记一条 WARN。音效 110 个片段（通用 25 个，取自 EXUM 和 SS vs LB 霸王丸；11 人的原作语音），音乐 14 首（vgmrips 的 KOF 2002 九首，用 libvgm 渲染；侍魂的找不到，侍魂体系暂用月华剑士五首），整个文件约 13 MB，载入时一次读入内存。选人放选人曲，开打按对手的体系和关卡选曲，KO 淡出后接胜利曲。真机估平均每帧约 0.55 ms，最坏约 1 ms。来源记在 `assets/fighter/sound/README.md`。需要试听：几处语音是推断的，128 kbps 的循环接缝。
 8. **有能实际打的内容后集中一次上机**：下一次重点看渲染缓存（选人快速移光标、开打时的对阵卡、对战中读档的阻塞展开日志）和追加输入的手感（葵花三段、May Lee 的方向分支）。必须 `make image`、`make frontend-test` 零 warning 后再提交。同一次开机测 Max/Adaptive、真实对局负载、新 blit 计时、持续十分钟、恢复/休眠与主观手感和延迟。初始正常对战总工作目标 p99<12ms。

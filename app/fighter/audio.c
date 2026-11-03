@@ -1,11 +1,11 @@
 /* The fighter's sound (see audio.h): reads and checks a FIGHTSND bank
  * (header, CRC-32, every table entry, every ADPCM block header and every
- * MP2 frame header), resolves its cue scopes against the pack's systems and
- * characters, turns each tick's sound events into voices (the most
+ * MP2 frame header), resolves its cue scopes against the pack's systems,
+ * characters and (music only) stages, turns each tick's sound events into voices (the most
  * specific matching cue of each kind: character + move, character, system
  * + move, system, any + move, any; the variant picked from the tick),
- * follows the game mode with the music (select, fight by the opponent's
- * system and the ladder stage, a fade on KO into the winner's jingle,
+ * follows the game mode with the music (select, fight by the arena's stage
+ * or else the opponent's system and the ladder stage, a fade on KO into the winner's jingle,
  * continue, clear) and mixes 8 voices (ADPCM decoded a 256-sample block at
  * a time, linear interpolation to 48 kHz, panned) and the music with the
  * master, music and effect levels, saturating to int16. */
@@ -26,6 +26,8 @@
 /* Music fades out over this many output frames on a KO. */
 #define KO_FADE (AUDIO_RATE * 3 / 4)
 #define ANY_SYSTEM 0xffffffffu
+/* No arena: music rows scoped to a stage never match. */
+#define NO_ARENA (-1)
 
 static const int16_t steps[89] = {
     7,     8,     9,     10,    11,    12,    13,    14,    16,    17,    19,    21,
@@ -156,6 +158,12 @@ static void scope(const uint8_t *p, const struct assets *a, uint8_t *kind, uint8
 			*index = (uint8_t)c;
 			return;
 		}
+	for (unsigned k = 0; k < a->stages; k++)
+		if (!strcmp(s, a->stage[k].name)) {
+			*kind = 4;
+			*index = (uint8_t)k;
+			return;
+		}
 	++*unmatched;
 }
 
@@ -276,6 +284,11 @@ int audio_bank(struct audio *au, uint8_t *d, size_t size, const struct assets *a
 		c->count = (uint8_t)count;
 		c->gain = (uint16_t)get16(p + 28);
 		scope(p, a, &c->kind, &c->scope, &au->unmatched);
+		if (c->kind == 4) {
+			/* Effects follow characters and systems only. */
+			c->kind = 3;
+			au->unmatched++;
+		}
 	}
 	for (unsigned i = 0; i < music; i++, p += 32) {
 		struct music_row *r = &au->row[i];
@@ -441,27 +454,31 @@ static void event(struct audio *au, const struct fight_state *s, const struct as
 	}
 }
 
-static int music_row(const struct audio *au, unsigned cue, uint32_t system)
+/* The row of a cue: the arena's stage, else the system, else any. */
+static int music_row(const struct audio *au, unsigned cue, uint32_t system, int arena)
 {
-	int any = -1;
+	int sys = -1, any = -1;
 	for (unsigned i = 0; i < au->music; i++) {
 		const struct music_row *r = &au->row[i];
 		if (r->cue != cue)
 			continue;
-		if (r->kind == 1 && r->scope == system)
+		if (r->kind == 4 && (int)r->scope == arena)
 			return (int)i;
+		if (r->kind == 1 && r->scope == system && sys < 0)
+			sys = (int)i;
 		if (r->kind == 0 && any < 0)
 			any = (int)i;
 	}
-	return any;
+	return sys >= 0 ? sys : any;
 }
 
 /* Start a cue's track (pick-th of its list); a track already playing
  * unfaded keeps going. No row: silence. */
-static void music_start(struct audio *au, unsigned cue, uint32_t system, uint32_t pick)
+static void music_start(struct audio *au, unsigned cue, uint32_t system, int arena,
+			uint32_t pick)
 {
 	struct audio_state *st = &au->s;
-	int r = music_row(au, cue, system);
+	int r = music_row(au, cue, system, arena);
 	st->pending = st->pending_system = 0;
 	if (r < 0) {
 		st->track = 0;
@@ -479,7 +496,7 @@ static void music_fade(struct audio *au, uint32_t frames, unsigned cue, uint32_t
 {
 	struct audio_state *st = &au->s;
 	if (!st->track) {
-		music_start(au, cue, system, 0);
+		music_start(au, cue, system, NO_ARENA, 0);
 		return;
 	}
 	if (!st->fade)
@@ -495,16 +512,17 @@ void audio_tick(struct audio *au, const struct fight_state *s, const struct asse
 	uint32_t p1 = s->chr[0] < a->characters ? a->chr[s->chr[0]].system : 0,
 		 p2 = s->chr[1] < a->characters ? a->chr[s->chr[1]].system : 0,
 		 stage = s->stage ? s->stage - 1 : 0;
+	int arena = s->arena < a->stages ? (int)s->arena : NO_ARENA;
 	if (s->mode + 1 != au->s.mode) {
 		au->s.mode = s->mode + 1;
 		if (s->mode == MODE_SELECT)
-			music_start(au, MUSIC_SELECT, ANY_SYSTEM, 0);
+			music_start(au, MUSIC_SELECT, ANY_SYSTEM, NO_ARENA, 0);
 		else if (s->mode == MODE_FIGHT)
-			music_start(au, MUSIC_FIGHT, p2, stage);
+			music_start(au, MUSIC_FIGHT, p2, arena, stage);
 		else if (s->mode == MODE_RESULT)
-			music_start(au, MUSIC_CONTINUE, p1, 0);
+			music_start(au, MUSIC_CONTINUE, p1, NO_ARENA, 0);
 		else if (s->mode == MODE_CLEAR)
-			music_start(au, MUSIC_CLEAR, p1, 0);
+			music_start(au, MUSIC_CLEAR, p1, NO_ARENA, 0);
 	}
 	for (unsigned i = 0; i < s->sounds && i < MAX_SOUND_EVENTS; i++) {
 		const struct sound_event *ev = &s->sound[i];
@@ -512,7 +530,7 @@ void audio_tick(struct audio *au, const struct fight_state *s, const struct asse
 			continue;
 		event(au, s, a, ev);
 		if (ev->id == SOUND_ROUND_START)
-			music_start(au, MUSIC_FIGHT, p2, stage);
+			music_start(au, MUSIC_FIGHT, p2, arena, stage);
 		else if (ev->id == SOUND_KO) {
 			unsigned winner = s->chr[!ev->side];
 			music_fade(au, KO_FADE, MUSIC_WIN,
@@ -626,7 +644,7 @@ static void mix_music(struct audio *au, int32_t *acc, unsigned frames, int32_t g
 			st->track = 0;
 			st->fade_len = 0;
 			if (cue)
-				music_start(au, cue - 1, system, 0);
+				music_start(au, cue - 1, system, NO_ARENA, 0);
 		}
 	}
 }

@@ -54,7 +54,7 @@ struct track {
 	uint32_t frames, frame_bytes, samples, loop_start, loop_end, loops, level;
 };
 /* A cue with its scope resolved against the pack: kind 0 any, 1 system,
- * 2 character, 3 matches nothing. */
+ * 2 character, 3 matches nothing, 4 stage (music rows only). */
 struct cue {
 	uint8_t event, flags, move, count, kind, scope;
 	uint16_t clip[4], gain;
