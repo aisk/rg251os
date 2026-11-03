@@ -92,6 +92,9 @@ static const char *const game_names[GAMES] = {"arcade", "survival", "practice"};
 static const char *const dummy_names[DUMMIES] = {"stand", "crouch", "guard", "cpu"};
 static unsigned devices[2] = {RETRO_DEVICE_JOYPAD, RETRO_DEVICE_JOYPAD};
 static unsigned benchmark_runs;
+/* state.round when the current run's fights began (the run-over log counts
+ * from it; a load or reset restarts the count). */
+static uint32_t run_round;
 static uint64_t samples[4][600];
 static unsigned sample_count, scene_mode;
 static uint64_t effects_requested, effects_drawn, sparks_drawn, layers_drawn;
@@ -499,6 +502,7 @@ bool retro_load_game(const struct retro_game_info *g)
 	}
 	fill.active = 0;
 	fill.superseded = 0;
+	run_round = state.round;
 	want();
 	return true;
 }
@@ -514,6 +518,7 @@ void retro_reset(void)
 	fight_reset(&state, state.automatic);
 	apply_level(1);
 	audio_reset(&sound);
+	run_round = state.round;
 	want();
 	benchmark_runs = 0;
 }
@@ -535,7 +540,8 @@ void retro_run(void)
 					keys[p] |= 1u << k;
 	apply_level(0);
 	uint32_t old_tick = state.tick, old_ended = state.ended, old_level = state.level,
-		 old_game = state.game, old_dummy = state.dummy, old_mode = state.mode;
+		 old_game = state.game, old_dummy = state.dummy, old_mode = state.mode,
+		 old_beaten = state.beaten;
 	uint64_t t0 = tick_us();
 	fight_step(&state, &assets, keys[0], keys[1], two_players);
 	uint64_t t1 = tick_us();
@@ -543,15 +549,18 @@ void retro_run(void)
 		logger(RETRO_LOG_INFO, "fight: game %s (select screen L)\n", game_names[state.game]);
 	if (state.dummy != old_dummy && logger)
 		logger(RETRO_LOG_INFO, "fight: practice dummy %s\n", dummy_names[state.dummy]);
+	if (old_mode != MODE_FIGHT && state.mode == MODE_FIGHT)
+		run_round = state.round;
+	/* Quitting clears the beaten mask: count it from before the step too. */
 	if (old_mode == MODE_FIGHT && state.mode != MODE_FIGHT && logger)
 		logger(RETRO_LOG_INFO, "fight: %s run over (%s) after %u rounds, %u wins, best %u\n",
 		       game_names[state.game],
 		       state.mode == MODE_RESULT  ? "lost"
 		       : state.mode == MODE_CLEAR ? "cleared"
 						  : "quit",
-		       state.round,
+		       state.round - run_round,
 		       state.game == GAME_SURVIVAL ? state.streak
-						   : (unsigned)__builtin_popcount(state.beaten),
+						   : (unsigned)__builtin_popcount(state.beaten | old_beaten),
 		       state.record);
 	if (state.level != old_level && logger)
 		logger(RETRO_LOG_INFO, "fight: difficulty %s (select screen R)\n",
@@ -566,7 +575,9 @@ void retro_run(void)
 		       (state.clock + COUNT_TICKS - 1) / COUNT_TICKS, assets.chr[state.chr[0]].name,
 		       assets.chr[state.chr[1]].name, state.p[0].hp, state.p[1].hp, state.best[0],
 		       state.best[1], state.throws, state.techs, state.runs, state.backdashes,
-		       level_names[state.level], game_names[state.game], state.streak,
+		       level_names[state.level], game_names[state.game],
+		       state.game == GAME_SURVIVAL ? state.streak
+						   : (unsigned)__builtin_popcount(state.beaten),
 		       state.tick);
 	if (state.automatic && state.tick != old_tick && ++benchmark_runs == 36000 &&
 	    logger)
@@ -674,6 +685,7 @@ bool retro_unserialize(const void *data, size_t size)
 		return false;
 	report();
 	state = restored;
+	run_round = state.round;
 	want();
 	/* Mid-fight the scene needs the whole stage at once: fill everything
 	 * now rather than over the next runs. */

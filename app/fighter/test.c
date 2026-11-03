@@ -51,9 +51,16 @@ static uint32_t keys[2], image_hash, sound_hash;
 static unsigned video_count, audio_count, formats;
 static bool use32, reject_formats;
 static unsigned benchmark_complete, sound_banks, level_logs;
+static char run_over[256];
 static void log_line(enum retro_log_level level, const char *fmt, ...)
 {
 	(void)level;
+	if (fmt && strstr(fmt, "run over")) {
+		va_list ap;
+		va_start(ap, fmt);
+		vsnprintf(run_over, sizeof(run_over), fmt, ap);
+		va_end(ap);
+	}
 	if (strstr(fmt, "fight: sound bank"))
 		sound_banks++;
 	if (strstr(fmt, "fight: difficulty %s"))
@@ -138,6 +145,11 @@ static uint32_t get_word(const uint8_t *p, int k)
 {
 	p += 16 + 4 * k;
 	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+static void put32(uint8_t *p, uint32_t v)
+{
+	for (int i = 0; i < 4; i++)
+		p[i] = (uint8_t)(v >> (8 * i));
 }
 /* ---- rules on exact ticks; expected numbers come from terry.json ---- */
 #define K(k) (1u << RETRO_DEVICE_ID_JOYPAD_##k)
@@ -3397,6 +3409,34 @@ int main(int argc, char **argv)
 	retro_run();
 	save(copy, n);
 	assert(get_word(copy, LEVEL_W) == LEVEL_HARD && level_logs == 3);
+	/* A ladder run loaded with one opponent beaten after five rounds of
+	 * the session, then quit: the log counts the run's rounds since the
+	 * load and the opponent beaten before the quit cleared it. */
+	keys[0] = 1u << RETRO_DEVICE_ID_JOYPAD_Y;
+	retro_run();
+	keys[0] = 0;
+	retro_run();
+	save(copy, n);
+	assert(get_word(copy, 8) == MODE_FIGHT && get_word(copy, 10) == 0);
+	unsigned other = 0;
+	while (other == get_word(copy, 15) || other == get_word(copy, 16))
+		other++;
+	const uint32_t patch[][2] = {{7, 5}, {10, 1u << other}, {11, 2}};
+	for (int i = 0; i < 3; i++)
+		put32(copy + 16 + 4 * patch[i][0], patch[i][1]);
+	assert(retro_unserialize(copy, n));
+	static const unsigned quit[] = {RETRO_DEVICE_ID_JOYPAD_START, 16, RETRO_DEVICE_ID_JOYPAD_B};
+	for (int i = 0; i < 3; i++) {
+		keys[0] = quit[i] < 16 ? 1u << quit[i] : 0;
+		retro_run();
+	}
+	keys[0] = 0;
+	save(copy, n);
+	assert(get_word(copy, 8) == MODE_SELECT);
+	if (!strstr(run_over, "arcade run over (quit) after 0 rounds, 1 wins")) {
+		fprintf(stderr, "run over log: %s", run_over);
+		abort();
+	}
 	retro_unload_game();
 	difficulty_option = "normal";
 	free(data);
