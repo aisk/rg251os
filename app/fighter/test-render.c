@@ -1,13 +1,16 @@
 /* Renderer and pack-decoder regression for the fighter core, linked into the
- * callback harness (test.c). It writes its own FIGHTP03 packs from known
+ * callback harness (test.c). It writes its own FIGHTP04 packs from known
  * bitmaps, checks that malformed or truncated packs are rejected, and
  * compares fight_render pixel for pixel with an independent per-pixel
  * reference (straight formulas, divisions, no spans) on fixed edge scenes,
- * seeded random scenes and real game scenes. It also rejects malformed
- * box, step and move data, checks the loader's derived frame data, that
- * boxes mirror with the sprite pixel for pixel, the L box overlay and the
- * effect pixel budget. FIGHTER_BENCH=1 also prints
- * host render times per stress scene; host numbers only show relative change. */
+ * seeded random scenes and real game scenes (with projectiles and the
+ * select and ladder screens). It also rejects malformed palette, frame,
+ * name, box, step, motion, move, special and projectile data, checks the
+ * loader's derived frame data, the cast (resident images follow the
+ * state's fighters and palettes), that boxes mirror with the sprite pixel
+ * for pixel, the L box overlay and the effect pixel budget. FIGHTER_BENCH=1
+ * also prints host render times per stress scene; host numbers only show
+ * relative change. */
 #include "fighter.h"
 #include "test-render.h"
 #include <assert.h>
@@ -36,13 +39,14 @@ static void decode(const uint8_t *p, size_t size, struct decoded *d)
 	d->frames = get32le(p + 24);
 	size_t at = 36;
 	for (unsigned i = 0; i < d->palettes; i++) {
-		d->pal_n[i] = get16(p + at);
-		at += 2;
+		d->pal_n[i] = get16(p + at + 2);
+		at += 4;
 		for (unsigned k = 0; k < d->pal_n[i]; k++, at += 2)
 			d->pal[i][k] = (uint16_t)get16(p + at);
 	}
 	for (unsigned f = 0; f < d->frames; f++) {
 		struct bitmap *b = &d->frame[f];
+		at += 2; /* sheet */
 		b->w = (int)get16(p + at);
 		b->h = (int)get16(p + at + 2);
 		b->ax = (int16_t)get16(p + at + 4);
@@ -155,17 +159,27 @@ static int compare(const struct assets *a, const struct decoded *dec,
 }
 
 /* ---- synthetic pack writer with fault offsets ---- */
+/* Offsets of fields the malformed-pack cases rewrite. */
+enum field {
+	F_FLAGS, F_PALETTES, F_PAL_SHEET, F_PAL_N, F_FRAME_SHEET, F_FRAME_W, F_FRAME_H,
+	F_ROW_COUNT, F_SPAN_X, F_SPAN_LEN, F_SPAN2_X, F_INDEX, F_CHARACTERS, F_NAME_LEN,
+	F_NAME_CHAR, F_CHAR_PAL0, F_CHAR_PAL1, F_CHAR_STEPS, F_CHAR_BOXES, F_CHAR_MOVES,
+	F_CHAR_PROJECTILES, F_ACTION_COUNT, F_ACTION_FIRST, F_MOVE_KIND, F_MOVE_TRIGGER,
+	F_MOVE_BUTTONS, F_MOVE_FIRST, F_MOVE_COUNT, F_MOVE_DAMAGE, F_MOVE_CHIP,
+	F_MOVE_HITSTUN, F_MOVE_BLOCKSTUN, F_MOVE_HITSTOP, F_MOVE_PUSHBACK,
+	F_MOVE_BLOCK_PUSH, F_MOVE_GUARD, F_MOVE_CANCEL, F_SPECIAL_KIND, F_SPECIAL_MOTION,
+	F_SPECIAL_BUTTONS, F_PROJ_FIRST, F_PROJ_COUNT, F_PROJ_SPEED, F_PROJ_LIFETIME,
+	F_PROJ_X, F_PROJ_Y, F_PROJ_DAMAGE, F_PROJ_CHIP, F_PROJ_HITSTUN, F_PROJ_BLOCKSTUN,
+	F_PROJ_HITSTOP, F_PROJ_PUSHBACK, F_PROJ_BLOCK_PUSH, F_PROJ_GUARD, F_PROJ_BLEND,
+	F_PROJ_ALPHA, F_STEP_FRAME, F_STEP_TICKS, F_STEP_BOX, F_STEP_HURT, F_ACTION_STEP_HIT,
+	F_ACTION_STEP_VX, F_ACTION_STEP_SPAWN, F_MOVE_STEP_TICKS, F_RISE_VY, F_LAND_VY,
+	F_RISE_VX, F_RISE_SPAWN, F_PROJ_STEP_HURT, F_PROJ_STEP_HIT, F_PROJ_STEP_VX,
+	F_BOX_X, F_BOX_Y, F_BOX_W, F_BOX_H, F_EFFECT_FRAME, F_EFFECT_PALETTE, FIELDS
+};
 struct pack {
 	uint8_t data[1 << 16];
 	size_t len;
-	/* Offsets of fields the malformed-pack cases rewrite. */
-	size_t flags, palettes, pal_n, frame_w, frame_h, row_count, span_x, span_len,
-	    span2_x, index, characters, char_steps, char_boxes, char_moves, action_count,
-	    action_first, move_trigger, move_first, move_count, move_damage, move_chip,
-	    move_hitstun, move_blockstun, move_hitstop, move_pushback, move_block_push,
-	    move_guard, move_cancel, step_frame, step_ticks, step_box, step_hurt,
-	    action_step_hit, move_step_ticks, box_x, box_y, box_w, box_h, player_char,
-	    player_palette, effect_frame;
+	size_t at[FIELDS];
 };
 static void put(struct pack *p, unsigned v, int bytes)
 {
@@ -186,7 +200,6 @@ static void seal(struct pack *p)
 	set(p, 12, h, 4);
 }
 #define SYN_FRAMES 5
-#define SYN_STEPS 12
 static struct bitmap syn[SYN_FRAMES];
 static int16_t syn_px[SYN_FRAMES][4096];
 static const int syn_size[SYN_FRAMES][4] = {
@@ -217,31 +230,46 @@ static const uint16_t syn_pal[2][16] = {
      0xf81f, 0x07ff, 0x1234, 0xabcd, 0x5555, 0xaaaa},
     {0xffff, 0x0001, 0x0020, 0x0800, 0xf7de, 0x39e7, 0xc618, 0x4208, 0x8000, 0x0400,
      0x0010, 0xfbe0, 0x2945, 0x6b6d, 0x9cd3, 0xe71c}};
+#define MARK(f) (p->at[f] = p->len)
+/* One character "SYN": steps 0..7 for the actions, 8..11 for every normal
+ * (9 and 10 hit), 12..13 for one 236+P special that rises 4 px for 2 ticks,
+ * lands, hits on 13 and launches the projectile on 12; 14..15 are the
+ * projectile's (hitboxes only). Two palettes on sheet 0, plus a third on
+ * sheet 1 that no frame uses. */
+#define SYN_STEPS 16
+static int syn_hits(unsigned i) { return i == 9 || i == 10 || i >= 13; }
+static int syn_hurts(unsigned i) { return i < 14; }
 static void build(struct pack *p, int automatic)
 {
 	memset(p, 0, sizeof(*p));
-	memcpy(p->data, "FIGHTP03", 8);
+	memcpy(p->data, "FIGHTP04", 8);
 	p->len = 16;
-	p->flags = p->len;
+	MARK(F_FLAGS);
 	put(p, (unsigned)automatic, 4);
-	p->palettes = p->len;
-	put(p, 2, 4);
+	MARK(F_PALETTES);
+	put(p, 3, 4);
 	put(p, SYN_FRAMES, 4);
-	p->characters = p->len;
+	MARK(F_CHARACTERS);
 	put(p, 1, 4); /* characters */
 	put(p, 3, 4); /* effects */
-	for (int c = 0; c < 2; c++) {
+	for (int c = 0; c < 3; c++) {
 		if (!c)
-			p->pal_n = p->len;
+			MARK(F_PAL_SHEET);
+		put(p, c == 2, 2);
+		if (!c)
+			MARK(F_PAL_N);
 		put(p, 16, 2);
 		for (int i = 0; i < 16; i++)
-			put(p, syn_pal[c][i], 2);
+			put(p, syn_pal[c & 1][i], 2);
 	}
 	for (int f = 0; f < SYN_FRAMES; f++) {
 		const struct bitmap *b = &syn[f];
+		if (f == 1)
+			MARK(F_FRAME_SHEET);
+		put(p, 0, 2);
 		if (!f) {
-			p->frame_w = p->len;
-			p->frame_h = p->len + 2;
+			MARK(F_FRAME_W);
+			p->at[F_FRAME_H] = p->len + 2;
 		}
 		put(p, (unsigned)b->w, 2);
 		put(p, (unsigned)b->h, 2);
@@ -257,7 +285,7 @@ static void build(struct pack *p, int automatic)
 				    (!x || b->px[y * b->w + x - 1] < 0))
 					counts[y]++;
 			if (!f && !y)
-				p->row_count = p->len;
+				MARK(F_ROW_COUNT);
 			put(p, counts[y], 2);
 			total += counts[y];
 		}
@@ -273,92 +301,139 @@ static void build(struct pack *p, int automatic)
 				while (x < b->w && b->px[y * b->w + x] >= 0)
 					x++;
 				if (!f && n == 0)
-					p->span_x = p->len, p->span_len = p->len + 2;
+					MARK(F_SPAN_X), p->at[F_SPAN_LEN] = p->len + 2;
 				if (!f && n == 1)
-					p->span2_x = p->len;
+					MARK(F_SPAN2_X);
 				put(p, (unsigned)start, 2);
 				put(p, (unsigned)(x - start), 2);
 				n++;
 			}
 		if (!f)
-			p->index = p->len;
+			MARK(F_INDEX);
 		for (int i = 0; i < b->w * b->h; i++)
 			if (b->px[i] >= 0)
 				put(p, (unsigned)b->px[i], 1);
 	}
-	/* One character: 12 steps with a hurtbox each, steps 9 and 10 also
-	 * carry a hitbox; actions use steps 0..7, every move steps 8..11. Moves
-	 * are written in reverse trigger order. */
-	p->char_steps = p->len;
+	unsigned boxes = 0;
+	for (unsigned i = 0; i < SYN_STEPS; i++)
+		boxes += (unsigned)syn_hurts(i) + (unsigned)syn_hits(i);
+	MARK(F_NAME_LEN);
+	put(p, 3, 1);
+	put(p, 'S', 1);
+	MARK(F_NAME_CHAR);
+	put(p, 'Y', 1);
+	put(p, 'N', 1);
+	MARK(F_CHAR_PAL0);
+	put(p, 0, 2);
+	MARK(F_CHAR_PAL1);
+	put(p, 1, 2);
+	MARK(F_CHAR_STEPS);
 	put(p, SYN_STEPS, 2);
-	p->char_boxes = p->len;
-	put(p, SYN_STEPS + 2, 2);
-	p->char_moves = p->len;
-	put(p, MOVES, 2);
+	MARK(F_CHAR_BOXES);
+	put(p, boxes, 2);
+	MARK(F_CHAR_MOVES);
+	put(p, MOVES + 1, 2);
+	MARK(F_CHAR_PROJECTILES);
+	put(p, 1, 2);
 	for (int k = 0; k < ACTIONS; k++) {
 		if (k == HURT) {
-			p->action_first = p->len;
-			p->action_count = p->len + 2;
+			MARK(F_ACTION_FIRST);
+			p->at[F_ACTION_COUNT] = p->len + 2;
 		}
 		put(p, (unsigned)(k % 6), 2);
 		put(p, 1 + (unsigned)(k % 3), 2);
 	}
-	for (int t = MOVES - 1; t >= 0; t--) {
-		const unsigned v[12] = {(unsigned)t, 8, 4, 10 + (unsigned)t, (unsigned)t,
-					5 + (unsigned)t, 3 + (unsigned)t, 2, 6, 8,
-					(unsigned)t % GUARD_TYPES, (unsigned)t & CANCEL_MASK};
-		if (t == STAND_HK) {
-			size_t *at[12] = {&p->move_trigger, &p->move_first, &p->move_count,
-					  &p->move_damage, &p->move_chip, &p->move_hitstun,
-					  &p->move_blockstun, &p->move_hitstop, &p->move_pushback,
-					  &p->move_block_push, &p->move_guard, &p->move_cancel};
-			for (int j = 0; j < 12; j++)
-				*at[j] = p->len + 2 * (size_t)j;
-		}
-		for (int j = 0; j < 12; j++)
+	for (unsigned t = 0; t <= MOVES; t++) {
+		/* kind, trigger, buttons, first, count, damage, chip, hitstun,
+		 * blockstun, hitstop, pushback, block pushback, guard, cancel */
+		const unsigned v[14] = {t == MOVES,
+					t == MOVES ? MOTION_236 : t,
+					t == MOVES ? BUTTON_LP | BUTTON_HP : 0,
+					t == MOVES ? 12 : 8,
+					t == MOVES ? 2 : 4,
+					10 + t, t, 5 + t, 3 + t, 2, 6, 8,
+					t % GUARD_TYPES, t & CANCEL_MASK};
+		if (t == STAND_HK)
+			for (int j = 0; j < 14; j++)
+				p->at[F_MOVE_KIND + j] = p->len + 2 * (size_t)j;
+		if (t == MOVES)
+			for (int j = 0; j < 3; j++)
+				p->at[F_SPECIAL_KIND + j] = p->len + 2 * (size_t)j;
+		for (int j = 0; j < 14; j++)
 			put(p, v[j], 2);
 	}
+	/* first, count, speed, lifetime, x, y, damage, chip, hitstun,
+	 * blockstun, hitstop, pushback, block pushback, guard, blend, alpha */
+	const unsigned proj[16] = {14, 2, 5, 50, 10, (uint16_t)-5, 40, 9, 12, 9, 4, 10, 12,
+				   GUARD_LOW, ALPHA, 200};
+	for (int j = 0; j < 16; j++) {
+		p->at[F_PROJ_FIRST + j] = p->len;
+		put(p, proj[j], 2);
+	}
 	for (unsigned i = 0, box = 0; i < SYN_STEPS; i++) {
-		unsigned hit = i == 9 || i == 10;
-		if (i == 4)
-			p->step_frame = p->len, p->step_ticks = p->len + 2,
-			p->step_box = p->len + 4, p->step_hurt = p->len + 6;
-		if (i == 3)
-			p->action_step_hit = p->len + 7;
+		unsigned hit = (unsigned)syn_hits(i), hurt = (unsigned)syn_hurts(i);
+		int vx = i == 12 ? 3 : 0, vy = i == 12 ? -2 : i == 13 ? 2 : 0;
+		if (i == 4) {
+			MARK(F_STEP_FRAME);
+			p->at[F_STEP_TICKS] = p->len + 2;
+			p->at[F_STEP_BOX] = p->len + 4;
+			p->at[F_STEP_HURT] = p->len + 6;
+		}
+		if (i == 3) {
+			p->at[F_ACTION_STEP_HIT] = p->len + 7;
+			p->at[F_ACTION_STEP_VX] = p->len + 8;
+			p->at[F_ACTION_STEP_SPAWN] = p->len + 10;
+		}
 		if (i == 11)
-			p->move_step_ticks = p->len + 2;
+			p->at[F_MOVE_STEP_TICKS] = p->len + 2;
+		if (i == 12) {
+			p->at[F_RISE_VX] = p->len + 8;
+			p->at[F_RISE_VY] = p->len + 9;
+			p->at[F_RISE_SPAWN] = p->len + 10;
+		}
+		if (i == 13)
+			p->at[F_LAND_VY] = p->len + 9;
+		if (i == 14) {
+			p->at[F_PROJ_STEP_HURT] = p->len + 6;
+			p->at[F_PROJ_STEP_HIT] = p->len + 7;
+			p->at[F_PROJ_STEP_VX] = p->len + 8;
+		}
 		put(p, i % SYN_FRAMES, 2);
-		put(p, 1 + i % 4, 2);
+		put(p, i >= 12 ? 2 : 1 + i % 4, 2);
 		put(p, box, 2);
-		put(p, 1, 1);
+		put(p, hurt, 1);
 		put(p, hit, 1);
-		box += 1 + hit;
+		put(p, (unsigned)(uint8_t)vx, 1);
+		put(p, (unsigned)(uint8_t)vy, 1);
+		put(p, i == 12, 1);
+		box += hurt + hit;
 	}
 	for (unsigned i = 0; i < SYN_STEPS; i++) {
-		if (i == 2)
-			p->box_x = p->len, p->box_y = p->len + 2, p->box_w = p->len + 4,
-			p->box_h = p->len + 6;
-		put(p, (unsigned)(uint16_t)-10, 2);
-		put(p, (unsigned)(uint16_t)(-20 - (int)i), 2);
-		put(p, 20, 2);
-		put(p, 20, 2);
-		if (i == 9 || i == 10) {
+		if (i == 2) {
+			MARK(F_BOX_X);
+			p->at[F_BOX_Y] = p->len + 2;
+			p->at[F_BOX_W] = p->len + 4;
+			p->at[F_BOX_H] = p->len + 6;
+		}
+		if (syn_hurts(i)) {
+			put(p, (unsigned)(uint16_t)-10, 2);
+			put(p, (unsigned)(uint16_t)(-20 - (int)i), 2);
+			put(p, 20, 2);
+			put(p, 20, 2);
+		}
+		if (syn_hits(i)) {
 			put(p, 5, 2);
 			put(p, (unsigned)(uint16_t)-15, 2);
 			put(p, 12 + i, 2);
 			put(p, 6, 2);
 		}
 	}
-	for (int c = 0; c < 2; c++) {
-		if (c == 1)
-			p->player_char = p->len, p->player_palette = p->len + 2;
-		put(p, 0, 2);
-		put(p, (unsigned)c, 2);
-	}
 	static const unsigned effects[3][2] = {{2, 1}, {3, 0}, {4, 1}};
 	for (int i = 0; i < 3; i++) {
-		if (i == 2)
-			p->effect_frame = p->len;
+		if (i == 2) {
+			MARK(F_EFFECT_FRAME);
+			p->at[F_EFFECT_PALETTE] = p->len + 2;
+		}
 		put(p, effects[i][0], 2);
 		put(p, effects[i][1], 2);
 	}
@@ -375,45 +450,70 @@ static void malformed(void)
 	static struct pack good, bad;
 	build(&good, 0);
 	assert(load(&assets_a, &good));
-#define AT(field) offsetof(struct pack, field)
 	struct {
-		size_t field;
+		int field;
 		unsigned value;
 		int bytes;
 	} cases[] = {
-	    {AT(flags), 2, 4},		    {AT(palettes), 0, 4},
-	    {AT(palettes), MAX_PALETTES + 1, 4}, {AT(pal_n), 0, 2},
-	    {AT(pal_n), 257, 2},	    {AT(frame_w), 0, 2},
-	    {AT(frame_h), MAX_SIDE + 1, 2},	    {AT(row_count), 9, 2},
-	    {AT(span_len), 0, 2},	    {AT(span_x), 12, 2},
-	    {AT(span2_x), 0, 2},	    {AT(index), 16, 1},
-	    {AT(action_count), 0, 2},	    {AT(action_first), SYN_STEPS, 2},
-	    {AT(step_frame), SYN_FRAMES, 2},	    {AT(step_ticks), 0, 2},
-	    {AT(effect_frame), SYN_FRAMES, 2},
-	    /* Characters, moves, steps, boxes and players. */
-	    {AT(characters), 0, 4},	    {AT(characters), MAX_CHARACTERS + 1, 4},
-	    {AT(characters), 2, 4},	    {AT(char_steps), 0, 2},
-	    {AT(char_steps), MAX_STEPS + 1, 2}, {AT(char_boxes), SYN_STEPS + 1, 2},
-	    {AT(char_moves), MOVES - 1, 2},	    {AT(char_moves), MOVES + 1, 2},
-	    {AT(move_trigger), MOVES, 2},	    {AT(move_trigger), STAND_LP, 2},
-	    {AT(move_first), SYN_STEPS - 3, 2},  {AT(move_count), 0, 2},
-	    {AT(move_damage), MAX_DAMAGE + 1, 2}, {AT(move_chip), 14, 2},
-	    {AT(move_hitstun), 0, 2},	    {AT(move_hitstun), MAX_STUN + 1, 2},
-	    {AT(move_blockstun), 0, 2},	    {AT(move_blockstun), MAX_STUN + 1, 2},
-	    {AT(move_hitstop), MAX_HITSTOP + 1, 2}, {AT(move_pushback), MAX_PUSH + 1, 2},
-	    {AT(move_block_push), MAX_PUSH + 1, 2}, {AT(move_guard), GUARD_TYPES, 2},
-	    {AT(move_cancel), CANCEL_MASK + 1, 2}, {AT(step_box), SYN_STEPS + 2, 2},
-	    {AT(step_hurt), MAX_STEP_BOXES + 1, 1}, {AT(step_hurt), 11, 1},
-	    {AT(action_step_hit), 1, 1},	    {AT(move_step_ticks), MAX_MOVE_TICKS - 5, 2},
-	    {AT(box_x), MAX_SIDE + 1, 2},	    {AT(box_y), (uint16_t)-(MAX_SIDE + 1), 2},
-	    {AT(box_w), 0, 2},		    {AT(box_h), MAX_SIDE + 1, 2},
-	    {AT(player_char), 1, 2},	    {AT(player_palette), 2, 2},
+	    {F_FLAGS, 2, 4},		    {F_PALETTES, 0, 4},
+	    {F_PALETTES, MAX_PALETTES + 1, 4}, {F_PAL_N, 0, 2},
+	    {F_PAL_N, 257, 2},		    {F_PAL_N, 15, 2}, /* index 15 is used */
+	    {F_PAL_SHEET, 1, 2},	    {F_FRAME_SHEET, 1, 2},
+	    {F_FRAME_W, 0, 2},		    {F_FRAME_H, MAX_SIDE + 1, 2},
+	    {F_ROW_COUNT, 9, 2},	    {F_SPAN_LEN, 0, 2},
+	    {F_SPAN_X, 12, 2},		    {F_SPAN2_X, 0, 2},
+	    {F_INDEX, 16, 1},		    {F_ACTION_COUNT, 0, 2},
+	    {F_ACTION_FIRST, SYN_STEPS, 2},    {F_STEP_FRAME, SYN_FRAMES, 2},
+	    {F_STEP_TICKS, 0, 2},	    {F_EFFECT_FRAME, SYN_FRAMES, 2},
+	    {F_EFFECT_PALETTE, 3, 2},	    {F_EFFECT_PALETTE, 2, 2},
+	    /* Characters and names. */
+	    {F_CHARACTERS, 0, 4},	    {F_CHARACTERS, MAX_CHARACTERS + 1, 4},
+	    {F_CHARACTERS, 2, 4},	    {F_NAME_LEN, 0, 1},
+	    {F_NAME_LEN, MAX_NAME + 1, 1},  {F_NAME_CHAR, 'y', 1},
+	    {F_NAME_CHAR, '_', 1},	    {F_CHAR_PAL0, 3, 2},
+	    {F_CHAR_PAL1, 2, 2},	    {F_CHAR_STEPS, 0, 2},
+	    {F_CHAR_STEPS, MAX_CHARACTER_STEPS + 1, 2}, {F_CHAR_BOXES, 99, 2},
+	    {F_CHAR_MOVES, MOVES - 1, 2},   {F_CHAR_MOVES, MAX_MOVES + 1, 2},
+	    {F_CHAR_MOVES, MOVES, 2},	    {F_CHAR_PROJECTILES, 0, 2},
+	    {F_CHAR_PROJECTILES, MAX_PROJECTILE_TYPES + 1, 2},
+	    /* Normals and specials. */
+	    {F_MOVE_KIND, 1, 2},	    {F_MOVE_TRIGGER, MOVES, 2},
+	    {F_MOVE_TRIGGER, STAND_LP, 2},  {F_MOVE_BUTTONS, 1, 2},
+	    {F_MOVE_FIRST, SYN_STEPS - 3, 2}, {F_MOVE_COUNT, 0, 2},
+	    {F_MOVE_DAMAGE, MAX_DAMAGE + 1, 2}, {F_MOVE_CHIP, 14, 2},
+	    {F_MOVE_HITSTUN, 0, 2},	    {F_MOVE_HITSTUN, MAX_STUN + 1, 2},
+	    {F_MOVE_BLOCKSTUN, 0, 2},	    {F_MOVE_BLOCKSTUN, MAX_STUN + 1, 2},
+	    {F_MOVE_HITSTOP, MAX_HITSTOP + 1, 2}, {F_MOVE_PUSHBACK, MAX_PUSH + 1, 2},
+	    {F_MOVE_BLOCK_PUSH, MAX_PUSH + 1, 2}, {F_MOVE_GUARD, GUARD_TYPES, 2},
+	    {F_MOVE_CANCEL, CANCEL_MASK + 1, 2}, {F_SPECIAL_KIND, 0, 2},
+	    {F_SPECIAL_MOTION, MOTIONS, 2},   {F_SPECIAL_BUTTONS, 0, 2},
+	    {F_SPECIAL_BUTTONS, 16, 2},
+	    /* Projectiles. */
+	    {F_PROJ_FIRST, SYN_STEPS - 1, 2}, {F_PROJ_COUNT, 0, 2},
+	    {F_PROJ_FIRST, 12, 2},	    {F_PROJ_SPEED, 0, 2},
+	    {F_PROJ_SPEED, MAX_VELOCITY + 1, 2}, {F_PROJ_LIFETIME, 0, 2},
+	    {F_PROJ_LIFETIME, MAX_LIFETIME + 1, 2}, {F_PROJ_X, MAX_SIDE + 1, 2},
+	    {F_PROJ_Y, (uint16_t)-(MAX_SIDE + 1), 2}, {F_PROJ_DAMAGE, MAX_DAMAGE + 1, 2},
+	    {F_PROJ_CHIP, 41, 2},	    {F_PROJ_HITSTUN, 0, 2},
+	    {F_PROJ_BLOCKSTUN, MAX_STUN + 1, 2}, {F_PROJ_HITSTOP, MAX_HITSTOP + 1, 2},
+	    {F_PROJ_PUSHBACK, MAX_PUSH + 1, 2}, {F_PROJ_BLOCK_PUSH, MAX_PUSH + 1, 2},
+	    {F_PROJ_GUARD, GUARD_TYPES, 2},   {F_PROJ_BLEND, BLENDS, 2},
+	    {F_PROJ_ALPHA, 0, 2},	    {F_PROJ_ALPHA, 256, 2},
+	    /* Steps, motion and boxes. */
+	    {F_STEP_BOX, 99, 2},	    {F_STEP_HURT, MAX_STEP_BOXES + 1, 1},
+	    {F_STEP_BOX, 19, 2},	    {F_ACTION_STEP_HIT, 1, 1},
+	    {F_ACTION_STEP_VX, 1, 1},	    {F_ACTION_STEP_SPAWN, 1, 1},
+	    {F_MOVE_STEP_TICKS, MAX_MOVE_TICKS - 5, 2}, {F_RISE_VY, 2, 1},
+	    {F_RISE_VY, (uint8_t)-1, 1},    {F_LAND_VY, 1, 1},
+	    {F_RISE_VY, (uint8_t)-(MAX_VELOCITY + 1), 1}, {F_RISE_VX, MAX_VELOCITY + 1, 1},
+	    {F_RISE_SPAWN, 2, 1},	    {F_PROJ_STEP_HURT, 1, 1},
+	    {F_PROJ_STEP_HIT, 0, 1},	    {F_PROJ_STEP_VX, 1, 1},
+	    {F_BOX_X, MAX_SIDE + 1, 2},	    {F_BOX_Y, (uint16_t)-(MAX_SIDE + 1), 2},
+	    {F_BOX_W, 0, 2},		    {F_BOX_H, MAX_SIDE + 1, 2},
 	};
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
 		bad = good;
-		size_t offset;
-		memcpy(&offset, (const char *)&good + cases[i].field, sizeof(offset));
-		set(&bad, offset, cases[i].value, cases[i].bytes);
+		set(&bad, good.at[cases[i].field], cases[i].value, cases[i].bytes);
 		seal(&bad);
 		if (load(&assets_a, &bad)) {
 			fprintf(stderr, "malformed pack case %zu accepted\n", i);
@@ -434,14 +534,13 @@ static void malformed(void)
 	bad.data[bad.len++] = 0;
 	seal(&bad);
 	assert(!load(&assets_a, &bad));
+	for (char v = '1'; v <= '3'; v++) {
+		bad = good;
+		bad.data[7] = (uint8_t)v; /* FIGHTP01..03: retired formats */
+		assert(!load(&assets_a, &bad));
+	}
 	bad = good;
-	bad.data[7] = '1'; /* FIGHTP01, the retired fixed-sprite format */
-	assert(!load(&assets_a, &bad));
-	bad = good;
-	bad.data[7] = '2'; /* FIGHTP02, frames without boxes or moves */
-	assert(!load(&assets_a, &bad));
-	bad = good;
-	bad.data[good.index + 3] ^= 1;
+	bad.data[good.at[F_INDEX] + 3] ^= 1;
 	assert(!load(&assets_a, &bad));
 	build(&bad, 1);
 	int automatic = -1;
@@ -545,21 +644,38 @@ static void random_scenes(const struct assets *a, const struct decoded *dec, int
 		assert(compare(a, dec, &s, what));
 	}
 }
-/* Real scenes from game states: every stress level, flips and the KO. */
-static void game_scenes(const struct assets *a, const struct decoded *dec)
+/* Real scenes from game states: Auto ladder runs (fights, projectiles,
+ * result and clear screens) at every stress level, the select screen,
+ * flips and the KO. */
+static void game_scenes(struct assets *a, const struct decoded *dec)
 {
 	static struct scene s;
 	struct fight_state st;
+	unsigned modes = 0, shots = 0;
+	fight_reset(&st, 0);
+	fight_cast(a, &st);
+	fight_scene(&st, a, &s);
+	assert(compare(a, dec, &s, "select scene"));
 	fight_reset(&st, 1);
-	for (unsigned t = 0; t < 2400; t++) {
+	for (unsigned t = 0; t < 12000; t++) {
 		fight_step(&st, a, 0, 0, 0);
-		if (t % 150 == 7) {
+		fight_cast(a, &st);
+		int shot = 0;
+		for (int k = 0; k < MAX_PROJECTILES; k++)
+			shot |= st.shot[k].kind != 0;
+		if (t % 150 == 7 || (shot && shots < 4) || !((modes >> st.mode) & 1)) {
+			shots += (unsigned)shot;
+			modes |= 1u << st.mode;
 			st.boxes = (t / 150) & 1;
 			fight_scene(&st, a, &s);
 			assert(compare(a, dec, &s, "game scene"));
 		}
 	}
+	assert(shots >= 4 && (modes & (1u << MODE_FIGHT)) &&
+	       (modes & (1u << MODE_RESULT | 1u << MODE_CLEAR)));
 	fight_reset(&st, 0);
+	fight_start(&st, 0, 0);
+	fight_cast(a, &st);
 	st.p[1].hp = 10;
 	st.p[0].x = 240;
 	st.p[1].x = 300;
@@ -571,30 +687,57 @@ static void game_scenes(const struct assets *a, const struct decoded *dec)
 	fight_scene(&st, a, &s);
 	assert(compare(a, dec, &s, "KO scene"));
 }
-/* Moves, steps and boxes of the synthetic pack as the loader derives them. */
-static void synthetic_moves(const struct assets *a)
+/* Moves, steps, boxes and projectile of the synthetic pack as the loader
+ * derives them, and the cast it expands. */
+static void synthetic_moves(struct assets *a)
 {
-	for (int c = 0; c < 2; c++) {
-		const struct character *ch = &a->chr[c];
-		/* Action HURT (5) is steps 5..7 (k % 6, 1 + k % 3), 2 + 3 + 4 ticks. */
-		assert(ch->action[HURT].count == 3 && ch->action[HURT].total == 2 + 3 + 4);
-		for (int t = 0; t < MOVES; t++) {
-			const struct move *m = &ch->move[t];
-			/* Steps 8..11 last 1, 2, 3, 4 ticks; 9 and 10 hit. */
-			assert(m->anim.count == 4 && m->anim.total == 10 && m->startup == 1 &&
-			       m->active == 5 && m->recovery == 4 && m->groups == 1 &&
-			       m->reach == 5 + 12 + 10 && m->damage == 10 + t && m->chip == t &&
-			       m->hitstun == 5 + t && m->blockstun == 3 + t && m->hitstop == 2 &&
-			       m->pushback == 6 && m->block_pushback == 8 &&
-			       m->guard == t % GUARD_TYPES && m->cancel == (t & CANCEL_MASK));
-			const struct step *st = &a->step[m->anim.first + 1];
-			assert(st->hurt == 1 && st->hit == 1 && st->group == 1);
-			const struct box *b = &a->box[st->box];
-			assert(b[0].x == -10 && b[0].y == -29 && b[0].w == 20 && b[0].h == 20);
-			assert(b[1].x == 5 && b[1].y == -15 && b[1].w == 21 && b[1].h == 6);
-			assert(!a->step[m->anim.first].group && !a->step[m->anim.first + 3].group);
-		}
+	const struct character *ch = &a->chr[0];
+	assert(a->characters == 1 && !strcmp(ch->name, "SYN") && ch->moves == MOVES + 1 &&
+	       ch->projectiles == 1 && ch->palette[0] == 0 && ch->palette[1] == 1);
+	/* Action HURT (5) is steps 5..7 (k % 6, 1 + k % 3), 2 + 3 + 4 ticks. */
+	assert(ch->action[HURT].count == 3 && ch->action[HURT].total == 2 + 3 + 4);
+	for (int t = 0; t < MOVES; t++) {
+		const struct move *m = &ch->move[t];
+		/* Steps 8..11 last 1, 2, 3, 4 ticks; 9 and 10 hit. */
+		assert(m->anim.count == 4 && m->anim.total == 10 && m->startup == 1 &&
+		       m->active == 5 && m->recovery == 4 && m->groups == 1 &&
+		       m->reach == 5 + 12 + 10 && m->hit.damage == 10 + t && m->hit.chip == t &&
+		       m->hit.hitstun == 5 + t && m->hit.blockstun == 3 + t &&
+		       m->hit.hitstop == 2 && m->hit.pushback == 6 &&
+		       m->hit.block_pushback == 8 && m->hit.guard == t % GUARD_TYPES &&
+		       m->cancel == (t & CANCEL_MASK) && !m->special && !m->spawn);
+		const struct step *st = &a->step[m->anim.first + 1];
+		assert(st->hurt == 1 && st->hit == 1 && st->group == 1);
+		const struct box *b = &a->box[st->box];
+		assert(b[0].x == -10 && b[0].y == -29 && b[0].w == 20 && b[0].h == 20);
+		assert(b[1].x == 5 && b[1].y == -15 && b[1].w == 21 && b[1].h == 6);
+		assert(!a->step[m->anim.first].group && !a->step[m->anim.first + 3].group);
 	}
+	const struct move *sp = &ch->move[MOVES];
+	const struct step *rise = &a->step[sp->anim.first];
+	assert(sp->special && sp->motion == MOTION_236 &&
+	       sp->buttons == (BUTTON_LP | BUTTON_HP) && sp->anim.total == 4 &&
+	       sp->startup == 2 && sp->active == 2 && !sp->recovery && sp->spawn == 1 &&
+	       rise->vx == 3 && rise->vy == -2 && rise->spawn == 1 && rise[1].vy == 2);
+	const struct projectile *pr = &ch->projectile[0];
+	assert(pr->anim.count == 2 && pr->anim.total == 4 && pr->speed == 5 &&
+	       pr->lifetime == 50 && pr->x == 10 && pr->y == -5 && pr->hit.damage == 40 &&
+	       pr->hit.chip == 9 && pr->hit.guard == GUARD_LOW && pr->blend == ALPHA &&
+	       pr->alpha == 200 && !a->step[pr->anim.first].hurt);
+	/* The cast follows the state: normal and alternate palette images of
+	 * every frame the character uses (all five), recast only on change. */
+	struct fight_state s;
+	fight_reset(&s, 0);
+	assert(a->cast[0][0] == -1 && fight_cast(a, &s) && !fight_cast(a, &s));
+	assert(a->images == a->effect_images + 2 * SYN_FRAMES &&
+	       a->cast_pixels[0] == ch->pixels && a->cast_pixels[1] == ch->pixels);
+	for (int i = 0; i < 2; i++)
+		for (unsigned f = 0; f < SYN_FRAMES; f++) {
+			const struct image *im = &a->image[a->look[i][f]];
+			assert(a->look[i][f] >= 0 && im->frame == f && im->palette == (unsigned)i);
+		}
+	s.pal[1] = 0;
+	assert(fight_cast(a, &s) && a->image[a->look[1][0]].palette == 0);
 	/* Mirroring: right-facing box at anchor 100 covers 90..109; left-facing
 	 * mirrors around the anchor pixel boundary like the sprite does. */
 	const struct box b = {-10, -29, 20, 20}, hit = {5, -15, 21, 6};
@@ -605,29 +748,37 @@ static void synthetic_moves(const struct assets *a)
 	assert(hr.x == 105 && hl.x == 100 - 5 - 21 && hl.w == 21 && hl.y == GROUND - 15);
 }
 /* Every real step's boxes cover the same sprite pixels in both facings.
- * The idle step is pointed at each image in turn so fight_scene places the
+ * The idle step is pointed at each frame in turn so fight_scene places the
  * sprite itself; opaque pixels are those that match on two backgrounds. */
 static void box_flip(struct assets *a)
 {
 	static struct scene s;
 	static uint16_t fb[2][2][FW * FH];
 	struct fight_state st;
+	fight_reset(&st, 0);
+	fight_start(&st, 0, 0);
+	fight_cast(a, &st);
 	unsigned checked = 0, idle = a->chr[0].action[IDLE].first;
-	uint16_t saved = a->step[idle].image;
-	for (unsigned k = 0; k < a->steps; k++) {
+	uint16_t saved = a->step[idle].frame;
+	const struct character *c = &a->chr[0];
+	for (unsigned k = c->first_step; k < c->first_step + c->steps; k++) {
 		const struct step *step = &a->step[k];
-		a->step[idle].image = step->image;
+		if (!step->hurt && !step->hit)
+			continue;
+		a->step[idle].frame = step->frame;
 		for (int f = 0; f < 2; f++) {
 			fight_reset(&st, 0);
+			fight_start(&st, 0, 0);
 			st.p[0].x = 240;
 			st.p[0].face = f ? -1 : 1;
 			assert(fight_pose(&st, a, 0) == idle);
 			fight_scene(&st, a, &s);
-			unsigned c = 0;
-			while (c < s.count && s.cmd[c].op != SPRITE)
-				c++;
-			assert(c < s.count && s.cmd[c].image == step->image && s.cmd[c].flip == f);
-			s.cmd[0] = s.cmd[c];
+			unsigned cmd = 0;
+			while (cmd < s.count && s.cmd[cmd].op != SPRITE)
+				cmd++;
+			assert(cmd < s.count && s.cmd[cmd].image == a->look[0][step->frame] &&
+			       s.cmd[cmd].flip == f);
+			s.cmd[0] = s.cmd[cmd];
 			s.count = 1;
 			for (int bg = 0; bg < 2; bg++) {
 				for (int i = 0; i < FW * FH; i++)
@@ -655,10 +806,11 @@ static void box_flip(struct assets *a)
 				}
 			checked++;
 		}
-		/* Hurtboxes sit on the body: some sprite pixels in every pose. */
-		assert(!step->hurt || covered);
+		/* Hurtboxes sit on the body, projectile hitboxes on the effect:
+		 * some sprite pixels in every pose. */
+		assert(covered);
 	}
-	a->step[idle].image = saved;
+	a->step[idle].frame = saved;
 	assert(checked > 200);
 }
 /* The L overlay draws every hurt and hit box of the shown steps. */
@@ -667,6 +819,7 @@ static void overlay(const struct assets *a)
 	static struct scene s, plain;
 	struct fight_state st;
 	fight_reset(&st, 0);
+	fight_start(&st, 0, 0);
 	st.p[0].x = 200;
 	st.p[1].x = 260;
 	for (int t = 0; t < 4; t++)
@@ -696,6 +849,7 @@ static void effect_cap(const struct assets *a)
 	static struct scene s;
 	struct fight_state st;
 	fight_reset(&st, 0);
+	fight_start(&st, 0, 0);
 	static const unsigned want[4] = {0, 8, 24, 48};
 	for (uint32_t tick = 0; tick < 64; tick += 7)
 		for (unsigned m = 0; m < 4; m++) {
@@ -723,6 +877,7 @@ static void bench(const struct assets *a)
 	static uint16_t fb[FW * FH];
 	struct fight_state st;
 	fight_reset(&st, 0);
+	fight_start(&st, 0, 0);
 	for (int i = 0; i < 300; i++)
 		fight_step(&st, a, 0, 0, 0);
 	for (unsigned m = 0; m < 4; m++) {
@@ -756,6 +911,10 @@ void render_tests(const uint8_t *real, size_t real_len)
 	release(&dec);
 	int automatic;
 	assert(fight_assets(&assets_a, real, real_len, &automatic));
+	struct fight_state st;
+	fight_reset(&st, 0);
+	fight_start(&st, 0, 0);
+	assert(fight_cast(&assets_a, &st));
 	decode(real, real_len, &dec);
 	roundtrip(&assets_a, &dec, NULL);
 	random_scenes(&assets_a, &dec, 100, "random real scene");

@@ -38,24 +38,34 @@
 ## 当前实现
 
 - `app/fighter/fighter.c`：整数确定性规则，移动、跳跃、一种普通攻击、后方向防御、相打统一结算、简单 AI、KO 后自动开局。四个攻击键目前使用同一动作；尚无必杀、投技、Hitstop、取消、倒地规则和选人。
-- `app/fighter/render.c`：FIGHTP03 解析，加载时把每个（帧, 调色板）组合展开成常驻 RGB565 span。矩形按行填充，人物按 span 复制（翻转时倒序复制），alpha 和 add 各有独立循环，内层没有模式分支和除法。战斗状态与绘制指令分开，后续 GPU 后端可替换合成部分；当前只实现软件路径。
+- `app/fighter/render.c`：FIGHTP04 解析，加载时把每个（帧, 调色板）组合展开成常驻 RGB565 span。矩形按行填充，人物按 span 复制（翻转时倒序复制），alpha 和 add 各有独立循环，内层没有模式分支和除法。战斗状态与绘制指令分开，后续 GPU 后端可替换合成部分；当前只实现软件路径。
 - `app/fighter/libretro.c`：60 Hz、48 kHz、每次 run 800 个立体声采样帧，RGB565 优先、XRGB8888 回退；两逻辑输入端口和禁用端口，版本化小端存档，资源摘要/模式验证。桌面通过 `fight_players=two` 可用双端口，本机前端只提供 port 0。
 - `.fight` 内容在前端列表直接加载，使用独立菜单与存档名，复用音频、显示、电源、休眠和开机续玩。画面不加 GBA 特效。
 - 当前设备按每个 vblank 推进一个 tick，加载日志记录实际刷新率和速度比。已知屏幕约 60.02 Hz，对 60 Hz 内容约快 0.03%；POC 接受这一偏差，音频用现有动态重采样跟随显示。尚未实现严格按墙钟的 60 Hz 调度。
 
-资源格式是 FIGHTP03（FIGHTP02 加判定框和招式数据），布局写在 `tools/fighter/pack.py` 开头。帧按实际内容裁边、尺寸可变、各带脚底锚点，按行存不透明 span 的调色板索引；每个角色一个调色板和 8 个动作（idle、walk_forward、walk_back、jump、attack、guard、hurt、ko），动作是 (帧, tick 数) 序列，另有特效帧表。规则只给出“动作和已经过的 tick”，`fight_scene` 按包里的动画挑帧，渲染层不知道锚点。旧格式直接拒绝，不迁移。
+资源格式是 FIGHTP04，布局写在 `tools/fighter/pack.py` 开头，清单 schema 写在 `assets/fighter/README.md`。帧按实际内容裁边、尺寸可变、各带脚底锚点，按行存不透明 span 的调色板索引，调色板和帧都带图集编号。规则只给出“动作和已经过的 tick”，`fight_scene` 按包里的动画挑帧，渲染层不知道锚点。旧格式直接拒绝，不迁移。
 
-镜像里的两个包都来自 `assets/fighter/KOF02_Terry.png`（Sprite Database，提取者 Heatpark，SHA256 记录在 `assets/fighter/README.md`），原像素 1:1。P1 原色，P2 用图集底部蓝色配色映射的 15 种身体色。每包 55 帧、26 色、约 218 KiB；常驻 RGB565 每个角色约 241 KiB，特效约 87 KiB，span 约 77 KiB。`struct assets` 是固定上限的静态 BSS，约 2.7 MiB。选帧和锚点见 `terry.json`：idle 七帧脚部像素一致；walk、jump、KO 的锚点是按躯干估的，KO 倒飞时人物居中而不是沿原作轨迹后退，要更像原作需逐帧手调。特效是 Power Geyser 火柱 7 帧，用于压力场景。第二个角色还没导入（见后续执行顺序）。音频仍是测试蜂鸣。
+一个包由 `assets/fighter/roster.json` 列出的多个清单组成，每个清单对应一张图集，也能单独打包测试。整个阵容的调色板索引帧常驻，开打时只把对战双方的（角色, 调色板）展开成 RGB565，加载时证明任意两人加特效都放得下。上限 32 个角色、4096 帧、每个角色 8 个必杀技和 4 种飞行道具，静态 BSS 约 23 MB（只有用到的页面占内存）。现在 7 个角色时每包约 2.8 MB，常驻内存（帧索引约 2 MiB、span 约 0.9 MiB）写进加载日志。整包打包约 40 秒（纯 Python 解 PNG）。
 
-判定和招式（P1 第 1 到 3 步）：受击框按帧给（姿势的属性，可复用另一帧，`[]` 为无敌），打击框按招式的步给，连续带打击框的步是一段，一段只命中一次。框以锚点为原点，x 朝前、y 朝下，朝左时镜像为 `x' = -(x+w)`。招式字段有 damage、chip、hitstun、blockstun、hitstop、pushback、block_pushback、guard（high/low/overhead）和 cancel（目前只校验存储，规则未用）；startup/active/recovery 和 reach 由加载器从步推导，`pack.py data` 打印帧数据表。时序规则写在 `fighter.c` 头注释：命中后双方冻结 hitstop 帧，推开按剩余量每帧推 1/4，被墙挡住的部分转给攻方。防御要求不在招式和受击硬直中、站在地上、按后；low 只能蹲防，overhead 只能站防。
+阵容：KOF 2002 的 Terry、Chin、Chris、Mature、May Lee、Shermie、Vice，图集都是 Heatpark 提取、来自 Sprite Database，来源和 SHA256 在 `assets/fighter/README.md`。原像素 1:1，不缩放，站高从 Chin 约 88 px 到 Mature 约 112 px。每人都有同一套动作（站、走、跳、蹲、站防蹲防、站蹲受击、KO）和站蹲八个普通技，镜像对局时 P2 用图集里的另一套配色。只有 Terry 有必杀技。除 Terry 外的帧数据都是参照 Terry 估的，不是从原作测的；各清单的 `notes` 记了必杀技所在的图集行。音频仍是测试蜂鸣。
 
-Terry 有站蹲各四个普通技（伤害 30/70/35/80 与 25/65/30/75），以及 crouch、crouch_guard、crouch_hurt 动作，帧和数据在 `terry.json`。按键与 RetroPad 一致：Y=LP，X=HP，B=LK，A=HK，按住下出蹲版，后防御，下后蹲防；L 判定框叠加，R 切压力场景，START 暂停。按键只认按下沿，hitstop 中的按键会丢，输入缓冲留到第 4 步。AI 每 29 帧选一个普通技走进射程出招，约三分之二的来招会防（其中部分防错高度）。
+判定和招式（P1 第 1 到 3 步）：受击框按帧给（姿势的属性，可复用另一帧，`[]` 为无敌），打击框按招式的步给，连续带打击框的步是一段，一段只命中一次。框以锚点为原点，x 朝前、y 朝下，朝左时镜像为 `x' = -(x+w)`。招式字段有 damage、chip、hitstun、blockstun、hitstop、pushback、block_pushback、guard（high/low/overhead）和 cancel；startup/active/recovery 和 reach 由加载器从步推导，`pack.py data` 打印帧数据表。时序规则写在 `fighter.c` 头注释：命中后双方冻结 hitstop 帧，推开按剩余量每帧推 1/4，被墙挡住的部分转给攻方。防御要求不在招式和受击硬直中、站在地上、按后；low 只能蹲防，overhead 只能站防。
+
+按键与 RetroPad 一致：Y=LP，X=HP，B=LK，A=HK，按住下出蹲版，后防御，下后蹲防；L 判定框叠加，R 切压力场景，START 暂停。
+
+输入（P1 第 4 步）：每人状态里存最近 32 帧方向，按朝向换成小键盘记法往回扫。236/214 窗口 15 帧，623 窗口 20 帧，蓄力要按住 30 帧、松开 10 帧内输入反方向；按键缓冲 4 个未冻结帧（hitstop 不计时），起跳前有 3 帧 prejump。按下时必杀技优先于普通技；自己的飞行道具还在场时跳过道具类必杀技。取消：普通技实际命中或被防，cancel 带 special 或 chain，且还没过 active 帧，取消后的招式在 hitstop 结束后第一帧开始。
+
+Terry 的必杀技：Power Wave（236+P，第 17 帧发射地面波，伤害 70，削血 14），Burn Knuckle（214+P，13/12/15，伤害 90，带前冲位移），Rising Tackle（下蓄上+P，6/18/33，伤害 100，起手无敌）。飞行道具状态里有 4 个槽，每人同时只能有 1 个；两个道具相碰同时消失，超过寿命或出屏 64 px 消失，命中时只冻结防守方。混合模式的道具走特效预算，优先于压力场景特效。
+
+AI 每 29 帧选一个招式走进射程出招，空闲时约 1/64 概率出必杀，约三分之二的来招会防（部分防错高度）。
+
+游戏模式是简单的单人闯关：开局选人（方向键移光标、攻击键确认），然后依次随机打还没打败的电脑对手，一场一局（`ROUNDS_TO_WIN` 常量），HUD 显示关卡如 3/6。输了显示结果约 3 秒回选人，赢了直接下一关，全部打完显示通关画面再回选人，结果和通关画面 20 帧后可按键跳过。只有一个角色时才会镜像对局。Auto 包跳过选人，P1 按轮次轮换角色，压力场景照旧循环。桌面 `fight_players=two` 时 port 1 操作闯关的对手。
 
 特效上限在 `fight_scene` 里：混合精灵每帧共用 76800 个不透明像素（约 12 个火柱），放不下的丢弃，只影响绘制不影响规则。每个计时窗口输出 `fight: scene N effects drawn/requested ...`。预算按首轮真机数据估计，下次上机再调。
 
-已知待看：站 HK/LK 按支撑的后脚对齐，出招时身体比 idle 后移约 30 px，HK 的 reach 和 LP 差不多；蹲 HK 那帧腿在中段，不太像贴地扫腿。这些需要对照原作手感调锚点或换帧。
+已知待看（另见各清单 `notes` 和导入时记录的疑点：Chris 的动作归属是按位置推断的，Vice 和 Mature 的前进后退可能对调，May Lee 的站轻脚打头部高度）：站 HK/LK 按支撑的后脚对齐，出招时身体比 idle 后移约 30 px，HK 的 reach 和 LP 差不多；蹲 HK 那帧腿在中段，不太像贴地扫腿。这些需要对照原作手感调锚点或换帧。
 
-核心状态是 208 字节：`FGSTATE3`、内容摘要、automatic 模式和 48 个明确编码的小端字段（每人 15 个，含招式、经过帧、冻结、推开余量）；设备前端加外层校验后文件为 248 字节。旧状态被拒绝，`fight_decode` 还会按资源里的招式校验经过帧和段号。改变规则/序列化字段时要明确升级或拒绝旧状态，不要误恢复。渲染缓存不存入状态；坏存档不得部分修改现有状态。
+核心状态是 464 字节：`FGSTATE4`，在每人的招式、经过帧、冻结、推开余量之外，还有闯关进度（模式、计时、已打败集合、关卡、选人和配色）、输入历史、缓冲、蓄力、AI 计划和飞行道具槽；设备前端加外层校验后文件为 504 字节。旧状态被拒绝，`fight_decode` 还会按资源里的招式校验经过帧和段号。改变规则/序列化字段时要明确升级或拒绝旧状态，不要误恢复。渲染缓存不存入状态；坏存档不得部分修改现有状态。
 
 ## 主机构建与回归
 
@@ -92,7 +102,7 @@ ASAN_OPTIONS=detect_leaks=0 FIGHTER_LONG_TEST=1 build/fighter/test \
 
 尽量等原作素材样例也准备好后，再安排一次统一上机；以下合成测试可在同一次开机里完成。烧卡会覆盖数据分区，按现有流程备份 `saves/`。镜像在 `roms/` 放入 `Fighter-POC.fight` 和 `Fighter-Auto.fight`；已有可运行系统也可以更新前端与这两个内容，无需为素材单独重新上电。
 
-1. 打开 `Fighter-POC`：方向移动/跳跃，A/B/X/Y 攻击，后方向防御，L 判定框，R 手动换压力，START 暂停；SELECT+START 系统菜单。检查画面比例、朝向、按键和声音，试一次菜单重启、短按电源休眠/唤醒、退出再进恢复。
+1. 打开 `Fighter-POC`：选人后闯关。方向移动/跳跃，Y/X/B/A 为轻拳/重拳/轻脚/重脚，后方向防御，Terry 试 236/214/下蓄上 + 拳，L 判定框，R 手动换压力，START 暂停；SELECT+START 系统菜单。检查画面比例、朝向、按键和声音，试一次菜单重启、短按电源休眠/唤醒、退出再进恢复。
 2. 打开 `Fighter-Auto`，在系统菜单将 CPU 设为 Max 后恢复。AI 自动对打，每 600 个模拟 tick 切场景：正常两人，额外 8、24、48 个 Power Geyser 火柱特效（alpha 160 与加法混合，平均约 6400 个不透明像素，与旧剪影工作量相近）。四场景每轮 2400 tick，满速时约 40 秒；当前重载会延长到约 70 秒。运行至少 10 分钟；慢帧和暂停会延长实际用时。
 3. 同一次开机可切回 Adaptive 再跑几轮，观察是否卡顿；日志会记录实际频率。当前不会自动遍历 CPU 档位。结束后退出并正常关机，取回完整 `log/boot-NNNN/`。
 
@@ -138,10 +148,10 @@ python3 tools/fighter/report.py /path/to/log/boot-NNNN/
    1. （已完成）每帧判定数据（打击框、受击框）写进清单和包格式，替换规则里写死的矩形；L 键显示判定框。
    2. （已完成）Hitstop、受击硬直和防御硬直。
    3. （已完成，站蹲各四个）轻重拳脚四个普通技，用已有的原作帧。
-   4. 指令输入缓冲和一两个必杀技（如 Power Wave），特效复用火柱等原作帧。
+   4. （已完成）指令输入缓冲、取消、Terry 的三个必杀技和飞行道具。
    5. 投技、倒地和起身。
-   之后是完整对局、可重放规则和选人。
-5. **角色：能找到的都做进去。** 盘点结果在本机 `build/fighter/source/INVENTORY.md`（不提交）：Sprite Database 可直接导入的约 30 个（KOF 2002 约 11、KOF 2003 约 15、月华剑士 4），侍魂只有 4 张不完整的 SS4 小图，没有霸王丸；龙虎、饿狼 2/3、Real Bout、KOF 94–97 也没有，Spriters Resource 对脚本请求返回 403。优先导入 KOF02 的 Chris、Vice、Mature、Shermie、May Lee、Chin，KOF03 的 Iori、Joe 或 Mai，持刀角色用月华剑士的 Shinnosuke 和 Hibiki。等第 4 步前几项把清单格式（帧、锚点、判定、招式）定下来，再批量导入，避免每个角色的清单返工。不同作品保持原像素 1:1。选人界面随角色导入一起做。
+   选人和简单闯关已完成。之后是其他角色的必杀技、多局制和计时、可重放规则。
+5. **角色：能找到的都做进去。** 盘点结果在本机 `build/fighter/source/INVENTORY.md`（不提交）：Sprite Database 可直接导入的约 30 个（KOF 2002 约 11、KOF 2003 约 15、月华剑士 4），侍魂只有 4 张不完整的 SS4 小图，没有霸王丸；龙虎、饿狼 2/3、Real Bout、KOF 94–97 也没有，Spriters Resource 对脚本请求返回 403。优先导入 KOF02 的 Chris、Vice、Mature、Shermie、May Lee、Chin，KOF03 的 Iori、Joe 或 Mai，持刀角色用月华剑士的 Shinnosuke 和 Hibiki。已导入 KOF02 的 Chin、Chris、Mature、May Lee、Shermie、Vice（只有普通动作和八个普通技）。还在找更好的来源：Chin 的图集没有防御帧，现在借用了重拳起手和盘坐帧；侍魂霸王丸也还没有。不同作品保持原像素 1:1。
 6. **有能实际打的内容后集中一次上机**：必须 `make image`、`make frontend-test` 零 warning 后再提交。同一次开机测 Max/Adaptive、真实对局负载、新 blit 计时、持续十分钟、恢复/休眠与主观手感和延迟。初始正常对战总工作目标 p99<12ms。
 
 ## 开发注意事项

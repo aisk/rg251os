@@ -1,14 +1,18 @@
-/* FIGHTP03 pack decoder and clipped RGB565 software draw-command backend.
- * The decoder checks every count, offset and index against the file length
- * and the resident limits in fighter.h (including box bounds and counts and
- * move data ranges), expands each player's character steps with its palette,
- * derives hit groups, startup/active/recovery and reach per move, and
- * expands each (frame, palette) pair once into RGB565 runs: drawing a
- * character is span copies (mirroring reverses the span), rectangles are
- * row fills, and constant alpha/additive
- * blending have their own loops without per-pixel mode branches or
- * divisions. All destination reads stay in the cached canvas; the host
- * presents it. tools/fighter/pack.py documents the file layout. */
+/* FIGHTP04 pack decoder, per-match sprite cast and clipped RGB565 software
+ * draw-command backend. The decoder checks every count, offset and index
+ * against the file length and the resident limits in fighter.h (palettes
+ * and frames per sheet, names, box bounds and counts, move, special,
+ * projectile and step motion data), keeps the whole roster's rule data and
+ * palette-index frames resident, derives hit groups, startup/active/
+ * recovery and reach per move, and expands the effects once. fight_cast
+ * expands the two fighters of the current match (character, palette) into
+ * RGB565 runs when they change, so only two characters' pixels are ever
+ * resident; the loader proves both always fit. Drawing a sprite is span
+ * copies (mirroring reverses the span), rectangles are row fills, and
+ * constant alpha/additive blending have their own loops without per-pixel
+ * mode branches or divisions. All destination reads stay in the cached
+ * canvas; the host presents it. tools/fighter/pack.py documents the file
+ * layout. */
 #include "fighter.h"
 #include <string.h>
 
@@ -36,30 +40,15 @@ static unsigned u8(struct reader *r)
 	return r->p[r->at++];
 }
 static int s16(struct reader *r) { return (int)(int16_t)u16(r); }
+static int s8(struct reader *r) { return (int)(int8_t)u8(r); }
 static uint32_t u32(struct reader *r)
 {
 	uint32_t lo = u16(r);
 	return lo | (uint32_t)u16(r) << 16;
 }
-static int skip(struct reader *r, size_t n)
+static int frame(struct reader *r, struct assets *a, struct frame *f)
 {
-	if (r->size - r->at < n)
-		return r->ok = 0;
-	r->at += n;
-	return 1;
-}
-struct source {
-	int w, h, ax, ay;
-	uint32_t first_row, count;
-	size_t indices;
-	unsigned max_index;
-};
-struct palette {
-	unsigned n;
-	uint16_t color[256];
-};
-static int frame(struct reader *r, struct assets *a, struct source *f)
-{
+	f->sheet = (uint16_t)u16(r);
 	f->w = (int)u16(r);
 	f->h = (int)u16(r);
 	f->ax = s16(r);
@@ -97,96 +86,203 @@ static int frame(struct reader *r, struct assets *a, struct source *f)
 	}
 	a->spans += spans;
 	f->count = pixels;
-	f->indices = r->at;
-	if (!skip(r, pixels))
+	f->index = a->indices;
+	if (pixels > MAX_INDICES - a->indices || r->size - r->at < pixels)
 		return 0;
+	memcpy(a->index + a->indices, r->p + r->at, pixels);
+	r->at += pixels;
+	a->indices += pixels;
 	f->max_index = 0;
 	for (uint32_t i = 0; i < pixels; i++)
-		if (r->p[f->indices + i] > f->max_index)
-			f->max_index = r->p[f->indices + i];
+		if (a->index[f->index + i] > f->max_index)
+			f->max_index = a->index[f->index + i];
 	return 1;
 }
-/* Expand a frame with a palette once; returns the image index or -1. */
-static int image(struct assets *a, const uint8_t *p, const struct source *frames,
-		 const struct palette *pal, unsigned f, unsigned c, uint32_t *charge)
+/* Can frame f be drawn with palette c? */
+static int paints(const struct assets *a, unsigned f, unsigned c)
 {
-	for (unsigned i = 0; i < a->images; i++)
-		if (a->image[i].frame == f && a->image[i].palette == c)
-			return (int)i;
-	const struct source *s = &frames[f];
-	if (a->images >= MAX_IMAGES || s->max_index >= pal[c].n ||
-	    s->count > MAX_PIXELS - a->pixels)
+	return a->frame[f].sheet == a->palette_sheet[c] &&
+	       a->frame[f].max_index < a->palette_size[c];
+}
+/* Expand frame f with palette c into a new image; the loader has already
+ * proven the limits, so this cannot overflow for a cast character. */
+static int image(struct assets *a, unsigned f, unsigned c)
+{
+	const struct frame *s = &a->frame[f];
+	if (a->images >= MAX_IMAGES || s->count > MAX_PIXELS - a->pixels)
 		return -1;
 	struct image *im = &a->image[a->images];
 	*im = (struct image){s->w,	   s->h,      s->ax,	       s->ay,
 			     s->first_row, a->pixels, s->count, (uint16_t)f,
 			     (uint16_t)c};
 	for (uint32_t i = 0; i < s->count; i++)
-		a->pixel[a->pixels + i] = pal[c].color[p[s->indices + i]];
+		a->pixel[a->pixels + i] = a->palette[c][a->index[s->index + i]];
 	a->pixels += s->count;
-	*charge += s->count;
 	return (int)a->images++;
 }
-/* A character as stored in the pack, before each player expands it with a
- * palette. Steps and boxes are character-local; box_base is where the
- * character's boxes start in a->box. */
-struct raw_step {
-	uint16_t frame, ticks, box;
-	uint8_t hurt, hit;
-};
-struct raw_move {
-	unsigned first, count;
-	uint16_t damage, chip, hitstun, blockstun, hitstop, pushback, block_pushback;
-	uint8_t guard, cancel;
-};
-struct raw_character {
-	unsigned steps, box_base, first[ACTIONS], count[ACTIONS];
-	struct raw_move move[MOVES];
-	struct raw_step step[MAX_STEPS];
-};
-static int character(struct reader *r, struct assets *a, struct raw_character *c,
-		     unsigned nframes)
+static int hit_fields(struct reader *r, struct hit *h)
 {
-	unsigned steps = u16(r), boxes = u16(r), moves = u16(r), seen = 0;
-	if (!r->ok || !steps || steps > MAX_STEPS || boxes > MAX_BOXES - a->boxes ||
-	    moves != MOVES)
+	unsigned v[8];
+	for (int j = 0; j < 7; j++)
+		v[j] = u16(r);
+	v[7] = 0;
+	*h = (struct hit){(uint16_t)v[0], (uint16_t)v[1], (uint16_t)v[2], (uint16_t)v[3],
+			  (uint16_t)v[4], (uint16_t)v[5], (uint16_t)v[6], 0};
+	return r->ok && v[0] <= MAX_DAMAGE && v[1] <= v[0] && v[2] && v[2] <= MAX_STUN &&
+	       v[3] && v[3] <= MAX_STUN && v[4] <= MAX_HITSTOP && v[5] <= MAX_PUSH &&
+	       v[6] <= MAX_PUSH;
+}
+static int anim(struct anim *an, unsigned first, unsigned count, unsigned steps,
+		unsigned base)
+{
+	if (!count || first + count > steps)
 		return 0;
-	c->steps = steps;
-	for (int k = 0; k < ACTIONS; k++) {
-		c->first[k] = u16(r);
-		c->count[k] = u16(r);
-		if (!c->count[k] || c->first[k] + c->count[k] > steps)
+	*an = (struct anim){(uint16_t)(base + first), (uint16_t)count, 0};
+	return 1;
+}
+static unsigned total(const struct assets *a, struct anim *an)
+{
+	unsigned t = 0;
+	for (unsigned i = 0; i < an->count; i++)
+		t += a->step[an->first + i].ticks;
+	return t;
+}
+/* Hit groups, startup/active/recovery and reach of a move; 0 if its steps
+ * already carry different groups from another move, its motion leaves the
+ * ground band or does not end on the ground, or it is too long. */
+static int derive(struct assets *a, struct move *m)
+{
+	unsigned t = 0, start = 0, end = 0, any = 0, groups = 0;
+	int height = 0;
+	m->reach = -MAX_SIDE;
+	m->spawn = 0;
+	for (unsigned i = 0; i < m->anim.count; i++) {
+		struct step *s = &a->step[m->anim.first + i];
+		unsigned group = 0;
+		if (s->hit) {
+			if (!i || !a->step[m->anim.first + i - 1].hit)
+				groups++;
+			group = groups;
+			if (!any)
+				start = t;
+			any = 1;
+			end = t + s->ticks;
+			for (unsigned k = 0; k < s->hit; k++) {
+				const struct box *b = &a->box[s->box + s->hurt + k];
+				if (b->x + b->w > m->reach)
+					m->reach = (int16_t)(b->x + b->w);
+			}
+		}
+		if (s->group && s->group != group)
+			return 0;
+		s->group = (uint8_t)group;
+		if (s->spawn && !m->spawn)
+			m->spawn = s->spawn;
+		height += s->vy * (int)s->ticks;
+		if (height > 0 || height < -MAX_HEIGHT)
+			return 0;
+		t += s->ticks;
+	}
+	if (height || t > MAX_MOVE_TICKS)
+		return 0;
+	m->anim.total = (uint16_t)t;
+	m->groups = (uint8_t)groups;
+	m->startup = (uint8_t)(any ? start : 0);
+	m->active = (uint8_t)(any ? end - start : 0);
+	m->recovery = (uint8_t)(any ? t - end : t);
+	return 1;
+}
+static int name_char(unsigned c)
+{
+	return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ' ' || c == '-';
+}
+static int character(struct reader *r, struct assets *a, struct character *c)
+{
+	static uint32_t mark[MAX_FRAMES], stamp;
+	unsigned len = u8(r);
+	if (!r->ok || !len || len > MAX_NAME)
+		return 0;
+	memset(c, 0, sizeof(*c));
+	for (unsigned i = 0; i < len; i++) {
+		c->name[i] = (char)u8(r);
+		if (!name_char((unsigned char)c->name[i]))
 			return 0;
 	}
-	/* Every trigger exactly once; stun at least one tick; all within limits. */
-	for (unsigned k = 0; k < moves; k++) {
-		unsigned v[12];
-		for (int j = 0; j < 12; j++)
-			v[j] = u16(r);
-		if (!r->ok || v[0] >= MOVES || (seen & 1u << v[0]) || !v[2] ||
-		    v[1] + v[2] > steps || v[3] > MAX_DAMAGE || v[4] > v[3] || !v[5] ||
-		    v[5] > MAX_STUN || !v[6] || v[6] > MAX_STUN || v[7] > MAX_HITSTOP ||
-		    v[8] > MAX_PUSH || v[9] > MAX_PUSH || v[10] >= GUARD_TYPES ||
-		    (v[11] & ~(unsigned)CANCEL_MASK))
+	c->palette[0] = (uint16_t)u16(r);
+	c->palette[1] = (uint16_t)u16(r);
+	unsigned steps = u16(r), boxes = u16(r), moves = u16(r), projectiles = u16(r);
+	if (!r->ok || c->palette[0] >= a->palettes || c->palette[1] >= a->palettes ||
+	    !steps || steps > MAX_CHARACTER_STEPS || steps > MAX_STEPS - a->steps ||
+	    boxes > MAX_BOXES - a->boxes || moves < MOVES || moves > MAX_MOVES ||
+	    projectiles > MAX_PROJECTILE_TYPES)
+		return 0;
+	unsigned base = a->steps;
+	c->first_step = base;
+	c->steps = steps;
+	c->moves = moves;
+	c->projectiles = projectiles;
+	for (int k = 0; k < ACTIONS; k++) {
+		unsigned first = u16(r), count = u16(r);
+		if (!anim(&c->action[k], first, count, steps, base))
 			return 0;
-		seen |= 1u << v[0];
-		c->move[v[0]] = (struct raw_move){
-		    v[1],	     v[2],	       (uint16_t)v[3], (uint16_t)v[4],
-		    (uint16_t)v[5], (uint16_t)v[6], (uint16_t)v[7], (uint16_t)v[8],
-		    (uint16_t)v[9], (uint8_t)v[10], (uint8_t)v[11]};
+	}
+	/* The eight normals in trigger order, then the specials. */
+	for (unsigned k = 0; k < moves; k++) {
+		struct move *m = &c->move[k];
+		unsigned kind = u16(r), trigger = u16(r), buttons = u16(r), first = u16(r),
+			 count = u16(r);
+		if (!hit_fields(r, &m->hit))
+			return 0;
+		unsigned guard = u16(r), cancel = u16(r);
+		if (!r->ok || kind != (k >= MOVES) ||
+		    (kind ? trigger >= MOTIONS || !buttons || buttons > 15
+			  : trigger != k || buttons) ||
+		    guard >= GUARD_TYPES || (cancel & ~(unsigned)CANCEL_MASK) ||
+		    !anim(&m->anim, first, count, steps, base))
+			return 0;
+		m->hit.guard = (uint8_t)guard;
+		m->cancel = (uint8_t)cancel;
+		m->special = (uint8_t)kind;
+		m->motion = (uint8_t)(kind ? trigger : 0);
+		m->buttons = (uint8_t)buttons;
+	}
+	for (unsigned k = 0; k < projectiles; k++) {
+		struct projectile *p = &c->projectile[k];
+		unsigned first = u16(r), count = u16(r);
+		int speed = s16(r), lifetime = s16(r), x = s16(r), y = s16(r);
+		if (!hit_fields(r, &p->hit))
+			return 0;
+		unsigned guard = u16(r), blend = u16(r), alpha = u16(r);
+		if (!r->ok || !anim(&p->anim, first, count, steps, base) || speed < 1 ||
+		    speed > MAX_VELOCITY || lifetime < 1 || lifetime > MAX_LIFETIME ||
+		    x < -MAX_SIDE || x > MAX_SIDE || y < -MAX_SIDE || y > MAX_SIDE ||
+		    guard >= GUARD_TYPES || blend >= BLENDS || !alpha || alpha > 255)
+			return 0;
+		p->speed = (int16_t)speed;
+		p->lifetime = (uint16_t)lifetime;
+		p->x = (int16_t)x;
+		p->y = (int16_t)y;
+		p->hit.guard = (uint8_t)guard;
+		p->blend = (uint8_t)blend;
+		p->alpha = (uint8_t)alpha;
 	}
 	for (unsigned i = 0; i < steps; i++) {
-		struct raw_step *s = &c->step[i];
-		s->frame = (uint16_t)u16(r);
-		s->ticks = (uint16_t)u16(r);
-		s->box = (uint16_t)u16(r);
-		s->hurt = (uint8_t)u8(r);
-		s->hit = (uint8_t)u8(r);
-		if (!r->ok || s->frame >= nframes || !s->ticks || s->hurt > MAX_STEP_BOXES ||
-		    s->hit > MAX_STEP_BOXES || (unsigned)s->box + s->hurt + s->hit > boxes)
+		struct step *s = &a->step[base + i];
+		unsigned f = u16(r), ticks = u16(r), box = u16(r), hurt = u8(r), hit = u8(r);
+		int vx = s8(r), vy = s8(r);
+		unsigned spawn = u8(r);
+		if (!r->ok || f >= a->frames || !ticks || hurt > MAX_STEP_BOXES ||
+		    hit > MAX_STEP_BOXES || box + hurt + hit > boxes || vx < -MAX_VELOCITY ||
+		    vx > MAX_VELOCITY || vy < -MAX_VELOCITY || vy > MAX_VELOCITY ||
+		    spawn > projectiles)
 			return 0;
+		*s = (struct step){(uint16_t)f,		   (uint16_t)ticks,
+				   (uint16_t)(a->boxes + box), (uint8_t)hurt,
+				   (uint8_t)hit,	   0,
+				   (uint8_t)spawn,	   (int8_t)vx,
+				   (int8_t)vy};
 	}
-	c->box_base = a->boxes;
+	a->steps += steps;
 	for (unsigned i = 0; i < boxes; i++) {
 		int x = s16(r), y = s16(r), w = (int)u16(r), h = (int)u16(r);
 		if (!r->ok || x < -MAX_SIDE || x > MAX_SIDE || y < -MAX_SIDE || y > MAX_SIDE ||
@@ -195,79 +291,54 @@ static int character(struct reader *r, struct assets *a, struct raw_character *c
 		a->box[a->boxes++] =
 		    (struct box){(int16_t)x, (int16_t)y, (int16_t)w, (int16_t)h};
 	}
-	/* Actions never carry hitboxes; a move lasts at most MAX_MOVE_TICKS. */
-	for (int k = 0; k < ACTIONS; k++)
-		for (unsigned i = 0; i < c->count[k]; i++)
-			if (c->step[c->first[k] + i].hit)
+	/* Actions never hit, move or spawn; projectile steps have no body, no
+	 * motion and always a hitbox. */
+	for (int k = 0; k < ACTIONS; k++) {
+		struct anim *an = &c->action[k];
+		for (unsigned i = 0; i < an->count; i++) {
+			const struct step *s = &a->step[an->first + i];
+			if (s->hit || s->vx || s->vy || s->spawn)
 				return 0;
-	for (int k = 0; k < MOVES; k++) {
-		unsigned total = 0;
-		for (unsigned i = 0; i < c->move[k].count; i++)
-			total += c->step[c->move[k].first + i].ticks;
-		if (total > MAX_MOVE_TICKS)
-			return 0;
-	}
-	return 1;
-}
-/* Expand character steps first..first+count with a palette into a->step;
- * runs of hitbox steps get consecutive group numbers. */
-static int sequence(struct assets *a, const uint8_t *p, const struct source *frames,
-		    const struct palette *pal, const struct raw_character *c,
-		    unsigned palette, unsigned first, unsigned count, struct anim *an,
-		    uint32_t *charge)
-{
-	unsigned groups = 0;
-	if (count > MAX_STEPS - a->steps)
-		return 0;
-	*an = (struct anim){(uint16_t)a->steps, (uint16_t)count, 0};
-	for (unsigned i = 0; i < count; i++) {
-		const struct raw_step *s = &c->step[first + i];
-		int im = image(a, p, frames, pal, s->frame, palette, charge);
-		if (im < 0 || an->total + s->ticks > 65535)
-			return 0;
-		if (s->hit && (!i || !c->step[first + i - 1].hit))
-			groups++;
-		a->step[a->steps++] = (struct step){
-		    (uint16_t)im,	  s->ticks, (uint16_t)(c->box_base + s->box),
-		    s->hurt, s->hit, (uint8_t)(s->hit ? groups : 0)};
-		an->total = (uint16_t)(an->total + s->ticks);
-	}
-	return 1;
-}
-/* Frame data the rules and logs use, derived from the expanded steps. */
-static void derive(const struct assets *a, struct move *m)
-{
-	unsigned t = 0, start = 0, end = 0, any = 0;
-	m->reach = -MAX_SIDE;
-	m->groups = 0;
-	for (unsigned i = 0; i < m->anim.count; i++) {
-		const struct step *s = &a->step[m->anim.first + i];
-		if (s->hit) {
-			if (!any)
-				start = t;
-			any = 1;
-			end = t + s->ticks;
-			if (s->group > m->groups)
-				m->groups = s->group;
-			for (unsigned k = 0; k < s->hit; k++) {
-				const struct box *b = &a->box[s->box + s->hurt + k];
-				if (b->x + b->w > m->reach)
-					m->reach = (int16_t)(b->x + b->w);
-			}
 		}
-		t += s->ticks;
+		unsigned t = total(a, an);
+		if (t > 65535)
+			return 0;
+		an->total = (uint16_t)t;
 	}
-	m->startup = (uint8_t)(any ? start : 0);
-	m->active = (uint8_t)(any ? end - start : 0);
-	m->recovery = (uint8_t)(any ? t - end : t);
+	for (unsigned k = 0; k < projectiles; k++) {
+		struct anim *an = &c->projectile[k].anim;
+		for (unsigned i = 0; i < an->count; i++) {
+			const struct step *s = &a->step[an->first + i];
+			if (s->hurt || !s->hit || s->vx || s->vy || s->spawn)
+				return 0;
+		}
+		unsigned t = total(a, an);
+		if (t > 65535)
+			return 0;
+		an->total = (uint16_t)t;
+	}
+	for (unsigned k = 0; k < moves; k++)
+		if (!derive(a, &c->move[k]))
+			return 0;
+	/* Every frame the character shows paints with both its palettes; count
+	 * what a cast of it costs. */
+	stamp++;
+	for (unsigned i = 0; i < steps; i++) {
+		unsigned f = a->step[base + i].frame;
+		if (!paints(a, f, c->palette[0]) || !paints(a, f, c->palette[1]))
+			return 0;
+		if (mark[f] != stamp) {
+			mark[f] = stamp;
+			c->pixels += a->frame[f].count;
+			c->images++;
+		}
+	}
+	return 1;
 }
 int fight_assets(struct assets *a, const void *data, size_t size, int *automatic)
 {
-	static struct palette pal[MAX_PALETTES];
-	static struct source frames[MAX_FRAMES];
-	static struct raw_character chars[MAX_CHARACTERS];
 	struct reader r = {data, 0, size, 1};
-	if (!data || size < 36 || memcmp(data, "FIGHTP03", 8))
+	if (!data || size < 36 || memcmp(data, "FIGHTP04", 8))
 		return 0;
 	r.at = 8;
 	uint32_t length = u32(&r), hash = u32(&r), flags = u32(&r);
@@ -282,66 +353,75 @@ int fight_assets(struct assets *a, const void *data, size_t size, int *automatic
 		check = (check ^ r.p[i]) * 16777619u;
 	if (check != hash)
 		return 0;
-	memset(a, 0, offsetof(struct assets, row));
+	memset(a, 0, offsetof(struct assets, palette_sheet));
 	a->hash = hash;
+	a->palettes = palettes;
 	for (unsigned i = 0; i < palettes; i++) {
-		pal[i].n = u16(&r);
-		if (!r.ok || !pal[i].n || pal[i].n > 256)
+		a->palette_sheet[i] = (uint16_t)u16(&r);
+		a->palette_size[i] = (uint16_t)u16(&r);
+		if (!r.ok || !a->palette_size[i] || a->palette_size[i] > 256)
 			return 0;
-		for (unsigned k = 0; k < pal[i].n; k++)
-			pal[i].color[k] = (uint16_t)u16(&r);
+		for (unsigned k = 0; k < a->palette_size[i]; k++)
+			a->palette[i][k] = (uint16_t)u16(&r);
 	}
+	a->frames = nframes;
 	for (unsigned i = 0; i < nframes; i++)
-		if (!frame(&r, a, &frames[i]))
+		if (!frame(&r, a, &a->frame[i]))
 			return 0;
+	a->characters = ncharacters;
 	for (unsigned i = 0; i < ncharacters; i++)
-		if (!character(&r, a, &chars[i], nframes))
+		if (!character(&r, a, &a->chr[i]))
 			return 0;
-	unsigned player[2], palette[2];
-	for (int i = 0; i < 2; i++) {
-		player[i] = u16(&r);
-		palette[i] = u16(&r);
-		if (player[i] >= ncharacters || palette[i] >= palettes)
-			return 0;
-	}
 	for (unsigned i = 0; i < effects; i++) {
 		unsigned f = u16(&r), c = u16(&r);
-		if (f >= nframes || c >= palettes)
+		if (!r.ok || f >= nframes || c >= palettes || !paints(a, f, c))
 			return 0;
-		uint32_t charge = 0;
-		int im = image(a, r.p, frames, pal, f, c, &charge);
+		int im = image(a, f, c);
 		if (im < 0)
 			return 0;
 		a->effect[a->effects++] = (uint16_t)im;
 	}
 	if (!r.ok || r.at != size)
 		return 0;
-	for (int i = 0; i < 2; i++) {
-		const struct raw_character *c = &chars[player[i]];
-		struct character *out = &a->chr[i];
-		for (int k = 0; k < ACTIONS; k++)
-			if (!sequence(a, r.p, frames, pal, c, palette[i], c->first[k],
-				      c->count[k], &out->action[k], &out->pixels))
-				return 0;
-		for (int k = 0; k < MOVES; k++) {
-			const struct raw_move *s = &c->move[k];
-			struct move *m = &out->move[k];
-			if (!sequence(a, r.p, frames, pal, c, palette[i], s->first, s->count,
-				      &m->anim, &out->pixels))
-				return 0;
-			m->damage = s->damage;
-			m->chip = s->chip;
-			m->hitstun = s->hitstun;
-			m->blockstun = s->blockstun;
-			m->hitstop = s->hitstop;
-			m->pushback = s->pushback;
-			m->block_pushback = s->block_pushback;
-			m->guard = s->guard;
-			m->cancel = s->cancel;
-			derive(a, m);
+	/* Any two cast characters (a mirror match casts one twice) must fit. */
+	uint32_t pixels = 0;
+	unsigned images = 0;
+	for (unsigned i = 0; i < ncharacters; i++)
+		for (unsigned j = i; j < ncharacters; j++) {
+			uint32_t p = a->chr[i].pixels + a->chr[j].pixels;
+			unsigned n = a->chr[i].images + a->chr[j].images;
+			pixels = p > pixels ? p : pixels;
+			images = n > images ? n : images;
 		}
-	}
+	if (pixels > MAX_PIXELS - a->pixels || images > MAX_IMAGES - a->images)
+		return 0;
+	a->effect_images = a->images;
+	a->effect_pixels = a->pixels;
+	a->cast[0][0] = a->cast[1][0] = -1;
 	*automatic = (int)flags;
+	return 1;
+}
+int fight_cast(struct assets *a, const struct fight_state *s)
+{
+	if (a->cast[0][0] == (int)s->chr[0] && a->cast[0][1] == (int)s->pal[0] &&
+	    a->cast[1][0] == (int)s->chr[1] && a->cast[1][1] == (int)s->pal[1])
+		return 0;
+	a->images = a->effect_images;
+	a->pixels = a->effect_pixels;
+	for (int i = 0; i < 2; i++) {
+		const struct character *c = &a->chr[s->chr[i] < a->characters ? s->chr[i] : 0];
+		unsigned palette = c->palette[s->pal[i] ? 1 : 0];
+		uint32_t start = a->pixels;
+		memset(a->look[i], 0xff, sizeof(a->look[i]));
+		for (unsigned k = 0; k < c->steps; k++) {
+			unsigned f = a->step[c->first_step + k].frame;
+			if (a->look[i][f] < 0)
+				a->look[i][f] = (int16_t)image(a, f, palette);
+		}
+		a->cast[i][0] = (int)(c - a->chr);
+		a->cast[i][1] = s->pal[i] ? 1 : 0;
+		a->cast_pixels[i] = a->pixels - start;
+	}
 	return 1;
 }
 

@@ -1,7 +1,8 @@
 # Portable fighter (P0): static renamed libretro core for the handheld,
 # native shared libretro core and callback harness for desktop verification.
-# Content packs are built from the committed sprite sheet and manifest in
-# assets/fighter; POC is player vs CPU, Auto runs the four timing scenes.
+# Content packs are built from the roster (assets/fighter/roster.json) and
+# the sprite sheets and manifests it lists; POC is the arcade ladder vs CPU,
+# Auto runs AI vs AI through the roster and the four timing scenes.
 FIGHTER_DIR := $(TOP)/app/fighter
 FIGHTER_BUILD := $(BUILD)/fighter
 FIGHTER_INCLUDE := $(EXTERNAL)/mgba/src/platform/libretro
@@ -21,11 +22,12 @@ $(FIGHTER_BUILD)/%.o: $(FIGHTER_DIR)/%.c $(FIGHTER_DIR)/fighter.h $(TOP)/mk/figh
 $(FIGHTER_LIB): $(FIGHTER_OBJS) $(TOP)/mk/core-archive.sh
 	$(TOP)/mk/core-archive.sh fighter $@ $(FIGHTER_OBJS)
 
-FIGHTER_ASSETS := $(TOP)/assets/fighter/terry.json $(TOP)/assets/fighter/KOF02_Terry.png
+FIGHTER_ROSTER := $(TOP)/assets/fighter/roster.json
+FIGHTER_ASSETS := $(FIGHTER_ROSTER) $(wildcard $(TOP)/assets/fighter/*.json $(TOP)/assets/fighter/*.png)
 $(FIGHTER_BUILD)/Fighter-POC.fight: $(TOP)/tools/fighter/pack.py $(FIGHTER_ASSETS)
-	python3 $< build $(TOP)/assets/fighter/terry.json $@
+	python3 $< build $(FIGHTER_ROSTER) $@
 $(FIGHTER_BUILD)/Fighter-Auto.fight: $(TOP)/tools/fighter/pack.py $(FIGHTER_ASSETS)
-	python3 $< build $(TOP)/assets/fighter/terry.json $@ --auto
+	python3 $< build $(FIGHTER_ROSTER) $@ --auto
 
 $(FIGHTER_BUILD)/fighter_libretro.so: $(addprefix $(FIGHTER_DIR)/,$(FIGHTER_SRCS)) $(FIGHTER_DIR)/fighter.h $(TOP)/mk/fighter.mk
 	mkdir -p $(@D)

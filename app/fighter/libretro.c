@@ -1,15 +1,22 @@
-/* Standard libretro fighter core: FIGHTP03 content, input, deterministic
- * FGSTATE3 saves, audio and software frames. Timing below measures work only;
- * the frontend owns pacing. Reports each scene (0 = two fighters, 1-3 = +8,
- * +24, +48 requested alpha/additive effects, capped by the per-frame effect
- * pixel budget) every 600 runs, also with debug off: logic/render/audio
- * times and how many effects were drawn of those requested.
+/* Standard libretro fighter core: FIGHTP04 content, input, deterministic
+ * FGSTATE4 saves, audio and software frames. Timing below measures work only;
+ * the frontend owns pacing. Logs the roster, every move's frame data and
+ * the resident memory at load, and each new cast (the two fighters whose
+ * RGB565 frames are expanded). Reports each scene (0 = two fighters, 1-3 =
+ * +8, +24, +48 requested alpha/additive effects, capped by the per-frame
+ * effect pixel budget) every 600 runs, also with debug off: logic/render/
+ * audio times, how many effects were drawn of those requested, and the
+ * ladder and special/clash counters.
  *
  * Buttons (RetroPad ids; the RG351P shell labels match, SNES layout):
  * Y (left) light punch, X (top) heavy punch, B (bottom) light kick,
- * A (right) heavy kick; hold DOWN for the crouching version. Back guards
- * (down-back guards low), UP jumps, L toggles the hurt/hit box overlay,
- * R cycles the stress scene, START pauses; A or B skips the KO screen. */
+ * A (right) heavy kick; hold DOWN for the crouching version. Specials are
+ * motions plus a punch (Terry: 236 Power Wave, 214 Burn Knuckle, hold down
+ * then up Rising Tackle). Back guards (down-back guards low), UP jumps, L
+ * toggles the hurt/hit box overlay, R cycles the stress scene, START
+ * pauses; A or B skips the KO screen. In the select screen the d-pad moves
+ * and any attack button picks. The desktop option fight_players=two lets
+ * port 1 drive the ladder's opponent; the device only has port 0. */
 #include "libretro.h"
 #include "fighter.h"
 #include <stdbool.h>
@@ -37,6 +44,18 @@ static uint64_t samples[3][600];
 static unsigned sample_count, scene_mode;
 static uint64_t effects_requested, effects_drawn;
 static unsigned effects_peak;
+/* Expand the state's two fighters if they changed, and log it. */
+static void cast(void)
+{
+	if (fight_cast(&assets, &state) && logger)
+		logger(RETRO_LOG_INFO,
+		       "fight: cast %s palette %u vs %s palette %u, resident RGB565 KiB "
+		       "p1 %u p2 %u effects %u, %u images\n",
+		       assets.chr[state.chr[0]].name, state.pal[0],
+		       assets.chr[state.chr[1]].name, state.pal[1],
+		       assets.cast_pixels[0] * 2 / 1024, assets.cast_pixels[1] * 2 / 1024,
+		       assets.effect_pixels * 2 / 1024, assets.images);
+}
 static uint64_t tick_us(void)
 {
 	struct timespec t;
@@ -80,9 +99,12 @@ static void report(void)
 		       (unsigned long long)(effects_requested - effects_drawn),
 		       effects_peak, EFFECT_PIXEL_BUDGET, sample_count);
 		logger(RETRO_LOG_INFO,
-		       "fight: tick %u round %u hits %u guards %u; frontend perf "
+		       "fight: tick %u round %u hits %u guards %u specials %u clashes %u "
+		       "mode %u run %u stage %u beaten %08x %s vs %s; frontend perf "
 		       "measures rotate/present/audio output\n",
-		       state.tick, state.round, state.hits, state.guards);
+		       state.tick, state.round, state.hits, state.guards, state.specials,
+		       state.clashes, state.mode, state.run, state.stage, state.beaten,
+		       assets.chr[state.chr[0]].name, assets.chr[state.chr[1]].name);
 	}
 	sample_count = 0;
 	effects_requested = effects_drawn = 0;
@@ -118,7 +140,7 @@ void retro_get_system_info(struct retro_system_info *i)
 {
 	memset(i, 0, sizeof(*i));
 	i->library_name = "Fighter P0";
-	i->library_version = "0.3";
+	i->library_version = "0.4";
 	i->valid_extensions = "fight";
 	i->block_extract = true;
 }
@@ -142,8 +164,9 @@ bool retro_load_game(const struct retro_game_info *g)
 	if (!g || !fight_assets(&assets, g->data, g->size, &automatic)) {
 		if (logger)
 			logger(RETRO_LOG_ERROR,
-			       "fight: invalid FIGHTP03 package (magic, length, hash, "
-			       "limits, frame, box or move data)\n");
+			       "fight: invalid FIGHTP04 package (magic, length, hash, "
+			       "limits, frame, palette, character, move, projectile or "
+			       "step data)\n");
 		return false;
 	}
 	enum retro_pixel_format f = RETRO_PIXEL_FORMAT_RGB565;
@@ -163,31 +186,56 @@ bool retro_load_game(const struct retro_game_info *g)
 	loaded = 1;
 	benchmark_runs = 0;
 	if (logger) {
-		unsigned effect = assets.pixels - assets.chr[0].pixels - assets.chr[1].pixels;
 		logger(RETRO_LOG_INFO,
-		       "fight: FIGHTP03 package %08x, %u images, %u spans, resident "
-		       "RGB565 KiB p1 %u p2 %u effects %u (%u effects), 480x320 "
-		       "60Hz 48kHz, software %s, %s; L boxes R stress START pause\n",
-		       assets.hash, assets.images, assets.spans,
-		       assets.chr[0].pixels * 2 / 1024, assets.chr[1].pixels * 2 / 1024,
-		       effect * 2 / 1024, assets.effects,
-		       format32 ? "XRGB8888" : "RGB565",
-		       automatic ? "automatic 4-scene cycle" : "player vs CPU");
+		       "fight: FIGHTP04 package %08x, %u characters, %u frames, %u "
+		       "palettes, %u steps, %u boxes, 480x320 60Hz 48kHz, software %s, %s; "
+		       "L boxes R stress START pause\n",
+		       assets.hash, assets.characters, assets.frames, assets.palettes,
+		       assets.steps, assets.boxes, format32 ? "XRGB8888" : "RGB565",
+		       automatic ? "automatic ladder, 4-scene cycle" : "arcade ladder vs CPU");
+		/* Resident bytes in use (the static limits are larger). */
+		unsigned rules = (unsigned)(assets.steps * sizeof(struct step) +
+					    assets.boxes * sizeof(struct box) +
+					    assets.characters * sizeof(struct character));
+		logger(RETRO_LOG_INFO,
+		       "fight: resident KiB frame indices %u spans %u rows %u rules %u "
+		       "effects RGB565 %u (%u effects); static limit %u KiB\n",
+		       assets.indices / 1024,
+		       (unsigned)(assets.spans * sizeof(struct span) / 1024),
+		       (unsigned)(assets.rows * 4 / 1024), rules / 1024,
+		       assets.effect_pixels * 2 / 1024, assets.effects,
+		       (unsigned)(sizeof(assets) / 1024));
 		static const char *const names[MOVES] = {
 		    "stand LP", "stand HP", "stand LK", "stand HK",
 		    "crouch LP", "crouch HP", "crouch LK", "crouch HK"};
-		for (int p = 0; p < 2; p++)
-			for (int k = 0; k < MOVES; k++) {
-				const struct move *m = &assets.chr[p].move[k];
+		static const char *const motions[MOTIONS] = {"236", "214", "623", "[4]6",
+							     "[2]8"};
+		for (unsigned c = 0; c < assets.characters; c++) {
+			const struct character *ch = &assets.chr[c];
+			logger(RETRO_LOG_INFO,
+			       "fight: character %u %s, %u moves, %u projectiles, cast "
+			       "RGB565 %u KiB in %u images\n",
+			       c, ch->name, ch->moves, ch->projectiles, ch->pixels * 2 / 1024,
+			       ch->images);
+			for (unsigned k = 0; k < ch->moves; k++) {
+				const struct move *m = &ch->move[k];
+				char special[32];
+				if (m->special)
+					snprintf(special, sizeof(special), "special %s+%x",
+						 motions[m->motion], m->buttons);
 				logger(RETRO_LOG_INFO,
-				       "fight: P%d %s startup/active/recovery %u/%u/%u "
-				       "damage %u hit/block/stop %u/%u/%u push %u/%u "
-				       "guard %u reach %d\n",
-				       p + 1, names[k], m->startup, m->active, m->recovery,
-				       m->damage, m->hitstun, m->blockstun, m->hitstop,
-				       m->pushback, m->block_pushback, m->guard, m->reach);
+				       "fight: %s %s startup/active/recovery %u/%u/%u "
+				       "damage %u chip %u hit/block/stop %u/%u/%u push %u/%u "
+				       "guard %u reach %d cancel %u spawn %u\n",
+				       ch->name, m->special ? special : names[k], m->startup,
+				       m->active, m->recovery, m->hit.damage, m->hit.chip,
+				       m->hit.hitstun, m->hit.blockstun, m->hit.hitstop,
+				       m->hit.pushback, m->hit.block_pushback, m->hit.guard,
+				       m->reach, m->cancel, m->spawn);
 			}
+		}
 	}
+	cast();
 	return true;
 }
 void retro_unload_game(void)
@@ -199,6 +247,7 @@ void retro_reset(void)
 {
 	report();
 	fight_reset(&state, state.automatic);
+	cast();
 	benchmark_runs = 0;
 }
 void retro_run(void)
@@ -220,6 +269,7 @@ void retro_run(void)
 	uint32_t old_tick = state.tick;
 	uint64_t t0 = tick_us();
 	fight_step(&state, &assets, keys[0], keys[1], two_players);
+	cast();
 	uint64_t t1 = tick_us();
 	if (state.automatic && state.tick != old_tick && ++benchmark_runs == 36000 &&
 	    logger)
@@ -286,7 +336,7 @@ bool retro_serialize(void *data, size_t size)
 	uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	fight_encode(&state, w);
-	memcpy(p, "FGSTATE3", 8);
+	memcpy(p, "FGSTATE4", 8);
 	put32(p + 8, assets.hash);
 	put32(p + 12, state.automatic);
 	for (int i = 0; i < STATE_WORDS; i++)
@@ -298,7 +348,7 @@ bool retro_unserialize(const void *data, size_t size)
 	const uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	if (!loaded || !p || size != retro_serialize_size() ||
-	    memcmp(p, "FGSTATE3", 8) || get32(p + 8) != assets.hash ||
+	    memcmp(p, "FGSTATE4", 8) || get32(p + 8) != assets.hash ||
 	    get32(p + 12) != state.automatic)
 		return false;
 	for (int i = 0; i < STATE_WORDS; i++)
@@ -310,6 +360,7 @@ bool retro_unserialize(const void *data, size_t size)
 		return false;
 	report();
 	state = restored;
+	cast();
 	return true;
 }
 void retro_set_controller_port_device(unsigned port, unsigned device)
