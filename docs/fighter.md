@@ -1,6 +1,6 @@
 # 格斗引擎：POC 实现、验证和后续计划
 
-2026-11-03。设备优先的 480×320、1 对 1、标准 libretro 软件渲染原型。当前交付用于验证核心和宿主集成；已完成首轮合成负载真机测试，普通场景可满速，高压力场景超时；P0 的持续稳定性与真实素材验收、原作素材导入以及 P1 的完整格斗规则仍待完成。设计取舍见[方案调研](fighting-engine-research.md)，数值、属性和多作品体系的设计见[数值设计](fighter-stats.md)，方案包含未来设计，实际完成范围以本文和代码为准。
+2026-11-03。设备优先的 480×320、1 对 1、标准 libretro 软件渲染原型。当前交付用于验证核心和宿主集成；已完成首轮合成负载真机测试，普通场景可满速，高压力场景超时；P0 的持续稳定性与真实素材验收、原作素材导入以及 P1 的完整格斗规则仍待完成。设计取舍见[方案调研](fighting-engine-research.md)，数值、属性和多作品体系的设计见[数值设计](fighter-stats.md)，背景、打击效果和声音的设计见[表现层设计](fighter-presentation.md)，方案包含未来设计，实际完成范围以本文和代码为准。
 
 ## 目标和约束
 
@@ -38,16 +38,16 @@
 ## 当前实现
 
 - `app/fighter/fighter.c`：整数确定性规则，移动、跳跃、一种普通攻击、后方向防御、相打统一结算、简单 AI、KO 后自动开局。四个攻击键目前使用同一动作；尚无必杀、投技、Hitstop、取消、倒地规则和选人。
-- `app/fighter/render.c`：FIGHTP04 解析，加载时把每个（帧, 调色板）组合展开成常驻 RGB565 span。矩形按行填充，人物按 span 复制（翻转时倒序复制），alpha 和 add 各有独立循环，内层没有模式分支和除法。战斗状态与绘制指令分开，后续 GPU 后端可替换合成部分；当前只实现软件路径。
+- `app/fighter/render.c`：FIGHTP05 解析，加载时把每个（帧, 调色板）组合展开成常驻 RGB565 span。矩形按行填充，人物按 span 复制（翻转时倒序复制），alpha 和 add 各有独立循环，内层没有模式分支和除法。战斗状态与绘制指令分开，后续 GPU 后端可替换合成部分；当前只实现软件路径。
 - `app/fighter/libretro.c`：60 Hz、48 kHz、每次 run 800 个立体声采样帧，RGB565 优先、XRGB8888 回退；两逻辑输入端口和禁用端口，版本化小端存档，资源摘要/模式验证。桌面通过 `fight_players=two` 可用双端口，本机前端只提供 port 0。
 - `.fight` 内容在前端列表直接加载，使用独立菜单与存档名，复用音频、显示、电源、休眠和开机续玩。画面不加 GBA 特效。
 - 当前设备按每个 vblank 推进一个 tick，加载日志记录实际刷新率和速度比。已知屏幕约 60.02 Hz，对 60 Hz 内容约快 0.03%；POC 接受这一偏差，音频用现有动态重采样跟随显示。尚未实现严格按墙钟的 60 Hz 调度。
 
-资源格式是 FIGHTP04，布局写在 `tools/fighter/pack.py` 开头，清单 schema 写在 `assets/fighter/README.md`。帧按实际内容裁边、尺寸可变、各带脚底锚点，按行存不透明 span 的调色板索引，调色板和帧都带图集编号。规则只给出“动作和已经过的 tick”，`fight_scene` 按包里的动画挑帧，渲染层不知道锚点。旧格式直接拒绝，不迁移。
+资源格式是 FIGHTP05，布局写在 `tools/fighter/pack.py` 开头，清单 schema 写在 `assets/fighter/README.md`。帧按实际内容裁边、尺寸可变、各带脚底锚点，按行存不透明 span 的调色板索引，调色板和帧都带图集编号。规则只给出“动作和已经过的 tick”，`fight_scene` 按包里的动画挑帧，渲染层不知道锚点。旧格式直接拒绝，不迁移。
 
 一个包由 `assets/fighter/roster.json` 列出的多个清单组成，每个清单对应一张图集，也能单独打包测试。整个阵容的调色板索引帧常驻，开打时只把对战双方的（角色, 调色板）展开成 RGB565，加载时证明任意两人加特效都放得下。上限 32 个角色、4096 帧、每个角色 8 个必杀技和 4 种飞行道具，静态 BSS 约 23 MB（只有用到的页面占内存）。现在 7 个角色时每包约 2.8 MB，常驻内存（帧索引约 2 MiB、span 约 0.9 MiB）写进加载日志。整包打包约 40 秒（纯 Python 解 PNG）。
 
-阵容：KOF 2002 的 Terry、Chin、Chris、Mature、May Lee、Shermie、Vice（Heatpark 提取，来自 Sprite Database），加上侍魂 V Special 的霸王丸（the shirt ninja 和 Firejoker54 提取，Spriters Resource 现站拒绝脚本请求，取自 Wayback Machine 存档）。来源和 SHA256 在 `assets/fighter/README.md`。霸王丸站高约 110 px，只用持刀形态，有八个普通技（拳键为斩、脚键为踢）和弧月斩（623+斩）、旋风裂斩（236+斩，龙卷飞行道具），数值暂按 KOF 尺度估计，重斩更慢更痛；P2 配色会把刀刃高光一起变蓝。8 人的整包约 3.7 MB，霸王丸镜像对局展开约 1.5M 像素，接近 `MAX_PIXELS` 2M 的上限，以后加大体型角色要调。原像素 1:1，不缩放，站高从 Chin 约 88 px 到 Mature 约 112 px。每人都有同一套动作（站、走、跳、蹲、站防蹲防、站蹲受击、KO）和站蹲八个普通技，镜像对局时 P2 用图集里的另一套配色。只有 Terry 和霸王丸有必杀技。Chin 的防御帧已换成图集里的真防御帧（之前的受击帧其实是防御帧，也一起换成了真受击帧），锚点按 Zelgadis 的 MUGEN 包轴点换算；Chin 的站姿和蹲姿锚点相差约 22 px，站蹲切换会横移，记在 `chin.json` 的 notes。除 Terry 外的帧数据都是参照 Terry 估的，不是从原作测的；各清单的 `notes` 记了必杀技所在的图集行。音频仍是测试蜂鸣。
+阵容 11 人：KOF 2002 的 Terry、Chin、Chris、Mature、May Lee、Shermie、Vice，KOF 2003 的八神庵、不知火舞，月华剑士的镜真之介（以上都是 Heatpark 提取，来自 Sprite Database），侍魂 V Special 的霸王丸（the shirt ninja 和 Firejoker54 提取，Spriters Resource 现站拒绝脚本请求，取自 Wayback Machine 存档）。来源和 SHA256 在 `assets/fighter/README.md`。原像素 1:1，站高从舞约 91 px 到真之介约 117 px。每人都有同一套基本动作和站蹲八个普通技（剑士的拳键为斩），除 Shermie 只有两招外每人有 2 到 4 个必杀技，多数带飞行道具或位移。原作指令里我们不支持的（41236、追加输入、指令投）换成最接近的 236/214/623/蓄力，或者暂不导入，记在各清单 notes。真之介的图集是一代 Boss 版，没有蹲姿和踢技，这几项是借帧凑的。所有招式数值都是估计（`src` 标为 estimate）。霸王丸镜像对局展开约 144 万像素，是最大的一对，`MAX_PIXELS` 是 2M。11 人整包约 6.2 MB。
 
 判定和招式（P1 第 1 到 3 步）：受击框按帧给（姿势的属性，可复用另一帧，`[]` 为无敌），打击框按招式的步给，连续带打击框的步是一段，一段只命中一次。框以锚点为原点，x 朝前、y 朝下，朝左时镜像为 `x' = -(x+w)`。招式字段有 damage、chip、hitstun、blockstun、hitstop、pushback、block_pushback、guard（high/low/overhead）和 cancel；startup/active/recovery 和 reach 由加载器从步推导，`pack.py data` 打印帧数据表。时序规则写在 `fighter.c` 头注释：命中后双方冻结 hitstop 帧，推开按剩余量每帧推 1/4，被墙挡住的部分转给攻方。防御要求不在招式和受击硬直中、站在地上、按后；low 只能蹲防，overhead 只能站防。
 
@@ -67,7 +67,7 @@ AI 每 29 帧选一个招式走进射程出招，空闲时约 1/64 概率出必�
 
 绘制顺序：出招的一方在上层（见上面 boot-0016 的反馈）。
 
-核心状态是 464 字节：`FGSTATE4`，在每人的招式、经过帧、冻结、推开余量之外，还有闯关进度（模式、计时、已打败集合、关卡、选人和配色）、输入历史、缓冲、蓄力、AI 计划和飞行道具槽；设备前端加外层校验后文件为 504 字节。旧状态被拒绝，`fight_decode` 还会按资源里的招式校验经过帧和段号。改变规则/序列化字段时要明确升级或拒绝旧状态，不要误恢复。渲染缓存不存入状态；坏存档不得部分修改现有状态。
+核心状态是 464 字节：`FGSTATE5`（水平坐标是 1/4 像素），在每人的招式、经过帧、冻结、推开余量之外，还有闯关进度（模式、计时、已打败集合、关卡、选人和配色）、输入历史、缓冲、蓄力、AI 计划和飞行道具槽；设备前端加外层校验后文件为 504 字节。旧状态被拒绝，`fight_decode` 还会按资源里的招式校验经过帧和段号。改变规则/序列化字段时要明确升级或拒绝旧状态，不要误恢复。渲染缓存不存入状态；坏存档不得部分修改现有状态。
 
 ## 主机构建与回归
 
@@ -165,8 +165,9 @@ python3 tools/fighter/report.py /path/to/log/boot-NNNN/
    5. 投技、倒地和起身。
    选人和简单闯关已完成。之后是其他角色的必杀技、多局制和计时、可重放规则。
 5. **角色：能找到的都做进去。** 盘点结果在本机 `build/fighter/source/INVENTORY.md`（不提交）：Sprite Database 可直接导入的约 30 个（KOF 2002 约 11、KOF 2003 约 15、月华剑士 4），侍魂只有 4 张不完整的 SS4 小图，没有霸王丸；龙虎、饿狼 2/3、Real Bout、KOF 94–97 也没有，Spriters Resource 对脚本请求返回 403。优先导入 KOF02 的 Chris、Vice、Mature、Shermie、May Lee、Chin，KOF03 的 Iori、Joe 或 Mai，持刀角色用月华剑士的 Shinnosuke 和 Hibiki。已导入 KOF02 的 Chin、Chris、Mature、May Lee、Shermie、Vice（只有普通动作和八个普通技）。霸王丸已导入，Chin 的防御帧已修正。更多来源的调查在本机 `build/fighter/source/SOURCES2.md`：MUGEN 人物包适合提供锚点、帧序和判定框的初值（只采纳与图集逐像素一致的帧），Wayback 存档的 Spriters Resource 还有 KOF 94 到 99、龙虎、饿狼、月华等条目可逐个尝试。不同作品保持原像素 1:1。
-6. **数值体系（2026-11-03 设计）**：按[数值设计](fighter-stats.md)的分阶段实施推进，第一步是每角色属性、数值来源字段和以 KOF 2002 为参考尺度的系统档案。现有数值都是估计，不平衡优先、娱乐性优先。
-7. **有能实际打的内容后集中一次上机**：必须 `make image`、`make frontend-test` 零 warning 后再提交。同一次开机测 Max/Adaptive、真实对局负载、新 blit 计时、持续十分钟、恢复/休眠与主观手感和延迟。初始正常对战总工作目标 p99<12ms。
+6. **数值体系**：[数值设计](fighter-stats.md)的第一步已完成。`assets/fighter/systems.json` 定义 `kof2002`（参考尺度，默认）和 `samsho5sp`（伤害按 800 千分比缩放，跳跃 -42/2 而不是设计稿的 -56/2，后者会飞出屏幕），霸王丸通过其中的 `characters` 映射归入侍魂体系。体力、防御倍率、体重、走速、跳跃、prejump、推挤距离、防御显示距离和输入窗口都从 C 常量搬进了数据，由体系默认值加角色覆盖合成；招式有 `class`（light/heavy/special 等），没写的硬直和 hitstop 取体系表；`src` 和顶层 `sources` 记录来源，只在 `pack.py data` 里统计，不进包。`tools/fighter/convert-stats.py` 已经把全部清单补上 system、class 和 src（数值不变，可重复运行）；`--adopt-class` 会让普通技改用体系表的硬直（KOF 2002 轻 11/9、重 19/17，来自 Dream Cancel），会改变帧数据，还没用。KOF 角色走速从 2/2 px 变为 1.75/1.5 px。下一步是护栏和命中效果（与投技、倒地一起）。
+7. **表现层**：按[表现层设计](fighter-presentation.md)的顺序推进：镜头和墙（状态升级，最好与投技/倒地一起）、分层舞台（先 KOF02 Korea 和侍魂 5 Mizuki）、打击火花/震动/白闪、ADPCM 音效与混音器、MP2 音乐伴随文件。
+8. **有能实际打的内容后集中一次上机**：必须 `make image`、`make frontend-test` 零 warning 后再提交。同一次开机测 Max/Adaptive、真实对局负载、新 blit 计时、持续十分钟、恢复/休眠与主观手感和延迟。初始正常对战总工作目标 p99<12ms。
 
 ## 开发注意事项
 

@@ -20,7 +20,7 @@ cp "$f" "$data/log/first.txt"
 grep -q 'starting .*Fighter-POC.fight with fighter' "$f"
 grep -q 'fight: pacing one tick per vblank' "$f"
 grep -q 'frame 480x320 pitch 480' "$f"
-grep -q 'fight: FIGHTP04 package .* characters' "$f"
+grep -q 'fight: FIGHTP05 package .* characters' "$f"
 grep -q 'fight: resident KiB frame indices' "$f"
 grep -q 'fight: cast TERRY palette 0 vs TERRY palette 1, resident RGB565 KiB' "$f"
 grep -q 'state: wrote 504 bytes to Fighter-POC.fight.fighter.state' "$f"
@@ -56,7 +56,7 @@ if run "$data/roms/fighters/Bad.fight" 1; then
     echo 'fighter frontend test: malformed content was accepted' >&2
     exit 1
 fi
-grep -q 'fight: invalid FIGHTP04 package' "$f"
+grep -q 'fight: invalid FIGHTP05 package' "$f"
 grep -q 'headless: .*Bad.fight did not start' "$f"
 test ! -e "$data/saves/Bad.fight.fighter.state"
 echo 'fighter frontend test: load, cast, state, sleep, restart, boot resume, list, four scenes, ladder log and bad content passed'

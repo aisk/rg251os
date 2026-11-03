@@ -1,8 +1,11 @@
 # Portable fighter (P0): static renamed libretro core for the handheld,
 # native shared libretro core and callback harness for desktop verification.
-# Content packs are built from the roster (assets/fighter/roster.json) and
-# the sprite sheets and manifests it lists; POC is the arcade ladder vs CPU,
-# Auto runs AI vs AI through the roster and the four timing scenes.
+# Content packs are built from the roster (assets/fighter/roster.json), the
+# system profiles (assets/fighter/systems.json) and the sprite sheets and
+# manifests it lists; POC is the arcade ladder vs CPU, Auto runs AI vs AI
+# through the roster and the four timing scenes. fighter-test also checks
+# pack.py's stats/system validation and the manifest conversion
+# (tools/fighter/pack-test.py).
 FIGHTER_DIR := $(TOP)/app/fighter
 FIGHTER_BUILD := $(BUILD)/fighter
 FIGHTER_INCLUDE := $(EXTERNAL)/mgba/src/platform/libretro
@@ -47,5 +50,6 @@ $(FIGHTER_BUILD)/test-shared: $(FIGHTER_TEST_DEPS) $(FIGHTER_BUILD)/fighter_libr
 .PHONY: fighter fighter-test
 fighter: $(FIGHTER_LIB) $(FIGHTER_BUILD)/fighter_libretro.so $(FIGHTER_CONTENT)
 fighter-test: $(FIGHTER_BUILD)/test $(FIGHTER_BUILD)/test-shared $(FIGHTER_BUILD)/fighter_libretro.so $(FIGHTER_CONTENT)
+	python3 $(TOP)/tools/fighter/pack-test.py
 	ASAN_OPTIONS=detect_leaks=0 $(FIGHTER_BUILD)/test $(FIGHTER_BUILD)/Fighter-POC.fight $(FIGHTER_BUILD)/Fighter-Auto.fight $(FIGHTER_BUILD)/preview.ppm
 	$(FIGHTER_BUILD)/test-shared $(FIGHTER_BUILD)/Fighter-POC.fight $(FIGHTER_BUILD)/Fighter-Auto.fight $(FIGHTER_BUILD)/preview-shared.ppm

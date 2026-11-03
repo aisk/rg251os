@@ -1,7 +1,8 @@
-/* Standard libretro fighter core: FIGHTP04 content, input, deterministic
- * FGSTATE4 saves, audio and software frames. Timing below measures work only;
- * the frontend owns pacing. Logs the roster, every move's frame data and
- * the resident memory at load, and each new cast (the two fighters whose
+/* Standard libretro fighter core: FIGHTP05 content, input, deterministic
+ * FGSTATE5 saves, audio and software frames. Timing below measures work only;
+ * the frontend owns pacing. Logs the system profiles, the roster with each
+ * character's system and resolved stats, every move's frame data and class
+ * and the resident memory at load, and each new cast (the two fighters whose
  * RGB565 frames are expanded). Reports each scene (0 = two fighters, 1-3 =
  * +8, +24, +48 requested alpha/additive effects, capped by the per-frame
  * effect pixel budget) every 600 runs, also with debug off: logic/render/
@@ -164,9 +165,9 @@ bool retro_load_game(const struct retro_game_info *g)
 	if (!g || !fight_assets(&assets, g->data, g->size, &automatic)) {
 		if (logger)
 			logger(RETRO_LOG_ERROR,
-			       "fight: invalid FIGHTP04 package (magic, length, hash, "
-			       "limits, frame, palette, character, move, projectile or "
-			       "step data)\n");
+			       "fight: invalid FIGHTP05 package (magic, length, hash, "
+			       "limits, frame, palette, system, stats, character, move, "
+			       "projectile or step data)\n");
 		return false;
 	}
 	enum retro_pixel_format f = RETRO_PIXEL_FORMAT_RGB565;
@@ -187,7 +188,7 @@ bool retro_load_game(const struct retro_game_info *g)
 	benchmark_runs = 0;
 	if (logger) {
 		logger(RETRO_LOG_INFO,
-		       "fight: FIGHTP04 package %08x, %u characters, %u frames, %u "
+		       "fight: FIGHTP05 package %08x, %u characters, %u frames, %u "
 		       "palettes, %u steps, %u boxes, 480x320 60Hz 48kHz, software %s, %s; "
 		       "L boxes R stress START pause\n",
 		       assets.hash, assets.characters, assets.frames, assets.palettes,
@@ -210,13 +211,35 @@ bool retro_load_game(const struct retro_game_info *g)
 		    "crouch LP", "crouch HP", "crouch LK", "crouch HK"};
 		static const char *const motions[MOTIONS] = {"236", "214", "623", "[4]6",
 							     "[2]8"};
+		static const char *const classes[CLASSES] = {
+		    "none", "light", "heavy", "command", "special", "super", "throw"};
+		static const char *const heights[HEIGHTS] = {"low", "mid", "high"};
+		for (unsigned k = 0; k < assets.systems; k++) {
+			const struct system *sy = &assets.sys[k];
+			const struct stats *st = &sy->stats;
+			logger(RETRO_LOG_INFO,
+			       "fight: system %u %s damage scale %u push %d guard range %d "
+			       "input buffer/236/623/charge/grace/release %u/%u/%u/%u/%u/%u\n",
+			       k, sy->name, sy->damage_scale, st->push, st->guard_range,
+			       st->buffer, st->quarter, st->dragon, st->charge, st->grace,
+			       st->release);
+		}
 		for (unsigned c = 0; c < assets.characters; c++) {
 			const struct character *ch = &assets.chr[c];
+			const struct stats *st = &ch->stats;
 			logger(RETRO_LOG_INFO,
 			       "fight: character %u %s, %u moves, %u projectiles, cast "
 			       "RGB565 %u KiB in %u images\n",
 			       c, ch->name, ch->moves, ch->projectiles, ch->pixels * 2 / 1024,
 			       ch->images);
+			logger(RETRO_LOG_INFO,
+			       "fight: %s system %s life %d defense %d weight %d height %s "
+			       "walk %d/%d jump vy %d gravity %d drift %d/%d prejump %d "
+			       "peak %d\n",
+			       ch->name, assets.sys[ch->system].name, st->life, st->defense,
+			       st->weight, heights[st->height], st->walk, st->walk_back,
+			       st->jump.vy, st->jump.gravity, st->jump.vx, st->jump.vx_back,
+			       st->jump.prejump, st->jump.peak);
 			for (unsigned k = 0; k < ch->moves; k++) {
 				const struct move *m = &ch->move[k];
 				char special[32];
@@ -226,12 +249,12 @@ bool retro_load_game(const struct retro_game_info *g)
 				logger(RETRO_LOG_INFO,
 				       "fight: %s %s startup/active/recovery %u/%u/%u "
 				       "damage %u chip %u hit/block/stop %u/%u/%u push %u/%u "
-				       "guard %u reach %d cancel %u spawn %u\n",
+				       "guard %u reach %d cancel %u spawn %u class %s\n",
 				       ch->name, m->special ? special : names[k], m->startup,
 				       m->active, m->recovery, m->hit.damage, m->hit.chip,
 				       m->hit.hitstun, m->hit.blockstun, m->hit.hitstop,
 				       m->hit.pushback, m->hit.block_pushback, m->hit.guard,
-				       m->reach, m->cancel, m->spawn);
+				       m->reach, m->cancel, m->spawn, classes[m->hit.cls]);
 			}
 		}
 	}
@@ -336,7 +359,7 @@ bool retro_serialize(void *data, size_t size)
 	uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	fight_encode(&state, w);
-	memcpy(p, "FGSTATE4", 8);
+	memcpy(p, "FGSTATE5", 8);
 	put32(p + 8, assets.hash);
 	put32(p + 12, state.automatic);
 	for (int i = 0; i < STATE_WORDS; i++)
@@ -348,7 +371,7 @@ bool retro_unserialize(const void *data, size_t size)
 	const uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	if (!loaded || !p || size != retro_serialize_size() ||
-	    memcmp(p, "FGSTATE4", 8) || get32(p + 8) != assets.hash ||
+	    memcmp(p, "FGSTATE5", 8) || get32(p + 8) != assets.hash ||
 	    get32(p + 12) != state.automatic)
 		return false;
 	for (int i = 0; i < STATE_WORDS; i++)

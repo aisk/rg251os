@@ -1,9 +1,11 @@
-/* Portable fighter state, FIGHTP04 content (a roster of characters with
- * frames, per-step boxes and motion, normals, specials and projectiles),
- * bounded draw commands and the RGB565 software renderer interface.
- * Rules (fighter.c) read the pack's steps, boxes and moves and only emit
- * draw commands; render.c owns the pack decoder, the per-match sprite cast
- * and the pixel loops. */
+/* Portable fighter state, FIGHTP05 content (system profiles and a roster of
+ * characters with stats, frames, per-step boxes and motion, normals,
+ * specials and projectiles), bounded draw commands and the RGB565 software
+ * renderer interface. Rules (fighter.c) read the pack's steps, boxes, moves
+ * and each character's resolved stats and only emit draw commands; render.c
+ * owns the pack decoder (which fills stats and class defaults from the
+ * character's system and applies its damage scale), the per-match sprite
+ * cast and the pixel loops. */
 #ifndef FIGHTER_H
 #define FIGHTER_H
 #include <stddef.h>
@@ -34,6 +36,7 @@
 #define MAX_EFFECTS 64
 #define MAX_SIDE 1024
 #define MAX_NAME 12
+#define MAX_SYSTEMS 8
 /* Per-character, per-step and per-move limits, mirrored in pack.py. */
 #define MAX_SPECIALS 8
 #define MAX_MOVES (8 + MAX_SPECIALS)
@@ -41,10 +44,30 @@
 #define MAX_CHARACTER_STEPS 1024
 #define MAX_STEP_BOXES 15
 #define MAX_MOVE_TICKS 255
-#define MAX_DAMAGE 1000
+/* Damage as written (thousandths of the reference life 1000), before the
+ * system's damage scale. */
+#define MAX_DAMAGE 1500
 #define MAX_STUN 120
 #define MAX_HITSTOP 30
 #define MAX_PUSH 120
+/* Stat bounds: life, per-mille factors (defense, weight, damage scale),
+ * walk speed in quarter pixels per tick, jump velocity and gravity in
+ * quarter pixels, prejump ticks. A defender's weight scales the pushback it
+ * receives, so a slide can reach MAX_SLIDE pixels. */
+#define MAX_LIFE 4000
+#define MIN_DEFENSE 100
+#define MIN_WEIGHT 250
+#define MIN_SCALE 100
+#define MAX_PERMILLE 4000
+#define MAX_WALK 64
+#define MAX_JUMP_VY 255
+#define MAX_GRAVITY 32
+#define MAX_PREJUMP 15
+#define MAX_SLIDE (MAX_PUSH * 4)
+#define MAX_BUFFER 15
+#define MAX_CHARGE 200
+#define MAX_GRACE 60
+#define MAX_PUSH_DISTANCE 200
 #define MAX_VELOCITY 16
 #define MAX_HEIGHT 300
 #define MAX_LIFETIME 600
@@ -54,19 +77,8 @@
  * most this many opaque pixels per frame (about 12 Power Geyser flames);
  * later ones in the frame are dropped. */
 #define EFFECT_PIXEL_BUDGET 76800u
-/* Input handling, in ticks (see fighter.c): a press is buffered for
- * BUFFER_TICKS unfrozen ticks; motions must fit their windows in the
- * HISTORY-tick direction history; a charge needs CHARGE_TICKS and the
- * release direction within CHARGE_GRACE ticks of letting go. */
+/* Direction history in ticks; the input windows (struct stats) fit in it. */
 #define HISTORY 32
-#define BUFFER_TICKS 4
-#define WINDOW_QUARTER 15
-#define WINDOW_DRAGON 20
-#define CHARGE_TICKS 30
-#define CHARGE_GRACE 10
-#define CHARGE_RELEASE 4
-/* Ticks between pressing up and leaving the ground. */
-#define JUMP_SQUAT 3
 /* Rounds a fighter must win to take a match (1 = single round). */
 #define ROUNDS_TO_WIN 1
 enum action {
@@ -87,17 +99,29 @@ enum guard_type { GUARD_HIGH, GUARD_LOW, GUARD_OVERHEAD, GUARD_TYPES };
 /* chain: a connected normal can be cancelled into a normal; special: into
  * a special. super is stored for later. */
 enum cancel { CANCEL_CHAIN = 1, CANCEL_SPECIAL = 2, CANCEL_SUPER = 4, CANCEL_MASK = 7 };
+/* Move class: picks the system's default hitstun, blockstun and hitstop
+ * (CLASS_NONE: the move gives its own). */
+enum move_class {
+	CLASS_NONE, CLASS_LIGHT, CLASS_HEAVY, CLASS_COMMAND, CLASS_SPECIAL, CLASS_SUPER,
+	CLASS_THROW, CLASSES
+};
+/* Bits of a packed move's defaults: the field comes from its class. */
+enum hit_default { DEFAULT_HITSTUN = 1, DEFAULT_BLOCKSTUN = 2, DEFAULT_HITSTOP = 4 };
+/* Standing hurt height group, for the AI and tools only. */
+enum height_class { HEIGHT_LOW, HEIGHT_MID, HEIGHT_HIGH, HEIGHTS };
 enum blend { OPAQUE, ALPHA, ADD, BLENDS };
 /* Game flow: the arcade ladder (select, fights, loss result, clear). */
 enum mode { MODE_SELECT, MODE_FIGHT, MODE_RESULT, MODE_CLEAR, MODES };
-/* One fighter. move is the move index + 1 (0 = none); elapsed counts
+/* One fighter. x is in quarter pixels (x / 4 is the anchor column), y in
+ * pixels, vy in quarter pixels per tick; hp counts down from the
+ * character's life. move is the move index + 1 (0 = none); elapsed counts
  * unfrozen ticks in the current move, stun or guard stance; hit is the last
  * hit group of the move that connected; stun counts down hitstun/blockstun
  * and freeze the hitstop; slide is the remaining pushback in pixels, signed
  * by direction, passed on to the opponent at a wall when corner is set.
  * block: 1 in blockstun, 2 in the proximity guard stance. keys holds the
- * previous tick's buttons for press edges. squat counts the jump start-up.
- * buffer is a pressed move index + 1 waiting up to BUFFER_TICKS unfrozen
+ * previous tick's buttons for press edges. squat counts the prejump.
+ * buffer is a pressed move index + 1 waiting up to stats.buffer unfrozen
  * ticks (age). charge packs back held/grace and down held/grace ticks, one
  * byte each; history holds the last HISTORY raw directions (4 bits each,
  * newest in the low bits of history[0]). plan/plan_tick drive the AI's
@@ -159,10 +183,12 @@ struct step {
 struct anim {
 	uint16_t first, count, total;
 };
-/* The hit fields shared by moves and projectiles. */
+/* The hit fields shared by moves and projectiles; damage and chip are
+ * already scaled by the owner's system (life points before the defender's
+ * defense). */
 struct hit {
 	uint16_t damage, chip, hitstun, blockstun, hitstop, pushback, block_pushback;
-	uint8_t guard;
+	uint8_t guard, cls;
 };
 /* Startup, active, recovery and reach are derived from the steps at load.
  * Specials have a motion and button bits; spawn is the projectile + 1 the
@@ -181,8 +207,42 @@ struct projectile {
 	uint16_t lifetime;
 	uint8_t blend, alpha;
 };
+/* A jump: takeoff vy (negative, quarter px/tick), gravity added each
+ * airborne tick, air drift forward/back (quarter px/tick) and prejump ticks.
+ * Derived at load: peak, the jump's height in pixels (at most MAX_HEIGHT),
+ * and fall, the largest vy an airborne fighter can have (falling from
+ * MAX_HEIGHT, as after a hit during a tall move). */
+struct jump {
+	int16_t vy, gravity, vx, vx_back, prejump, peak, fall;
+};
+/* A character's resolved stats (system defaults with its overrides). life
+ * in points (reference 1000); defense and weight per mille; walk speeds in
+ * quarter pixels per tick; height is an enum height_class. From the system
+ * only: push, the body distance in pixels (closer than push - 1 is pushed
+ * out to push), guard_range in pixels, and the input windows buffer,
+ * quarter, dragon, charge, grace and release in ticks (see fighter.c). */
+struct stats {
+	int16_t life, defense, walk, walk_back, weight, push, guard_range;
+	uint8_t height, buffer, quarter, dragon, charge, grace, release;
+	struct jump jump;
+};
+/* Default hitstun/blockstun/hitstop of a move class; has bit 0 stun, bit 1
+ * hitstop. */
+struct class_row {
+	uint8_t hitstun, blockstun, hitstop, has;
+};
+/* A system profile: the stat defaults, the damage scale applied to its
+ * characters' moves at load and the class table. */
+struct system {
+	char name[MAX_NAME + 1];
+	uint16_t damage_scale;
+	struct stats stats;
+	struct class_row cls[CLASSES];
+};
 struct character {
 	char name[MAX_NAME + 1];
+	unsigned system;
+	struct stats stats;
 	uint16_t palette[2];
 	unsigned moves, projectiles;
 	struct anim action[ACTIONS];
@@ -196,10 +256,11 @@ struct character {
  * for side i (-1 = none); look[i][frame] is that side's image or -1. */
 struct assets {
 	uint32_t hash;
-	unsigned characters, palettes, frames, rows, spans, indices, steps, boxes,
+	unsigned systems, characters, palettes, frames, rows, spans, indices, steps, boxes,
 	    effects, images, pixels, effect_images, effect_pixels;
 	int cast[2][2];
 	uint32_t cast_pixels[2];
+	struct system sys[MAX_SYSTEMS];
 	struct character chr[MAX_CHARACTERS];
 	uint16_t palette_sheet[MAX_PALETTES], palette_size[MAX_PALETTES];
 	uint16_t palette[MAX_PALETTES][256];
@@ -233,12 +294,14 @@ struct area {
 };
 /* Back to the select screen (Auto: straight into a rotated ladder run). */
 void fight_reset(struct fight_state *s, int automatic);
-/* Start a round between characters c0 and c1 (mirror: P2 alternate). */
-void fight_start(struct fight_state *s, unsigned c0, unsigned c1);
+/* Start a round between characters c0 and c1 (mirror: P2 alternate), each
+ * with its own life. */
+void fight_start(struct fight_state *s, const struct assets *a, unsigned c0, unsigned c1);
 void fight_step(struct fight_state *s, const struct assets *a, uint32_t input,
 		uint32_t second, int human);
-/* Does fighter p's input history and charge complete motion m now? */
-int fight_motion(const struct fighter *p, int motion);
+/* Does fighter p's input history and charge complete motion m now, with
+ * the input windows of its stats? */
+int fight_motion(const struct fighter *p, const struct stats *st, int motion);
 /* Index into a->step of what fighter i shows (and collides with) now. */
 unsigned fight_pose(const struct fight_state *s, const struct assets *a, int i);
 struct area fight_box(const struct box *b, int x, int y, int face);

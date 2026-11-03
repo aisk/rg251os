@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a FIGHTP04 content pack from ripped sprite sheets and their manifests.
+"""Build a FIGHTP05 content pack from ripped sprite sheets and their manifests.
 
 Each manifest (assets/fighter/<name>.json) describes one sheet and is the
 source of truth for it: every frame is a hand-checked sheet rectangle plus a
@@ -13,6 +13,8 @@ manifest, which then acts as a roster of its own characters:
   manifests   list of manifest paths relative to the roster; their characters
               appear in the select screen in this order
   effects     the manifest whose "effects" list the stress scenes draw
+Either way systems.json next to the roster (or manifest) supplies the system
+profiles; every profile goes into the pack (at most 8).
 Subcommands:
 
   build MANIFEST|ROSTER OUTPUT [--auto]  write the pack (Auto: AI vs AI,
@@ -21,7 +23,9 @@ Subcommands:
   preview MANIFEST OUTPUT.ppm      every action, move and projectile of the
                                    first character on its anchor, with
                                    hurtboxes (green) and hitboxes (red)
-  data MANIFEST|ROSTER             frame data table of every move
+  data MANIFEST|ROSTER             each character's system and stats, the
+                                   frame data table of every move and where
+                                   its numbers come from (src)
 
 Manifest schema (assets/fighter/terry.json is the reference; unknown
 top-level keys such as "notes" are ignored):
@@ -32,10 +36,25 @@ top-level keys such as "notes" are ignored):
               the feet are negative); the core mirrors them with facing.
               Every frame a character's actions and moves use needs an entry
               ([] = invulnerable); projectile frames need none.
+  sources     optional: id -> {"url", "title", "fetched", "game"} (url
+              required, the rest strings); "src" values may name these ids.
+              Tools only, never packed.
   characters  name -> {"actions": {action: [steps]}, "moves": {move: {...}},
-              "projectiles": {name: {...}}}. The name, upper-cased with "_"
-              as a space, is shown in the select screen and HUD (A-Z, 0-9,
-              space and "-", at most 12 characters).
+              "projectiles": {name: {...}}, "system": S, "stats": {...}}.
+              The name, upper-cased with "_" as a space, is shown in the
+              select screen and HUD (A-Z, 0-9, space and "-", at most 12
+              characters). "system" names a profile in systems.json; without
+              it the character uses the one systems.json "characters" assigns
+              to its name, else kof2002 (giving both differently is an error).
+              "stats" (optional) overrides the system's defaults: life
+              (reference 1000), defense and weight (per mille: 1200 takes 20%
+              more damage; weight divides the pushback received), walk and
+              walk_back (quarter pixels per tick), jump {vy, gravity, vx,
+              vx_back, prejump} (any subset; vy and gravity in quarter pixels
+              per tick, vx/vx_back the air drift, vx_back follows vx unless
+              given), prejump (same as jump.prejump), height (low, mid or high,
+              AI and tools only) and src. hop, super_jump, hyper_hop, stun,
+              guard and meters are accepted for later steps and not packed.
               A step is [frame, ticks] or [frame, ticks, {...}] with optional
               "hit" (hitboxes, moves and projectiles only), "hurt" (replaces
               the frame's hurtboxes), "move" ([forward, down] pixels per tick
@@ -55,12 +74,23 @@ top-level keys such as "notes" are ignored):
               special, super: chain and special are enforced, super is stored
               for later). Moves with hitboxes also need damage, chip, hitstun,
               blockstun, hitstop (ticks), pushback and block_pushback
-              (pixels); moves without them may omit those.
+              (pixels); moves without them may omit those. damage and chip
+              are thousandths of the reference life 1000 as the original game
+              has them; the core multiplies them by the system's damage_scale
+              / 1000 at load (rounded, at least 1 when nonzero). Optional
+              "class" (light, heavy, command, special, super, throw) lets
+              hitstun/blockstun (stun_table) and hitstop (hitstop_table) come
+              from the system when the move omits them; written values always
+              win. Optional "src" maps a field name (or "steps", "*" for the
+              rest) to where its value comes from: a "sources" id, estimate,
+              sheet (from the sheet's frame counts), measured, design or
+              mugen:<pack>; a field without one counts as estimate.
               Projectiles: "steps" (looping animation, each step with "hit"
               boxes), "speed" (pixels per tick forward), "lifetime" (ticks),
               "offset" ([forward, down] from the owner's anchor at launch),
               "blend" (opaque, alpha or add), "alpha" and the same hit fields
-              as moves. Blended projectiles share the effect pixel budget.
+              as moves (class and src too). Blended projectiles share the
+              effect pixel budget.
   players     two {"character", "palette"} slots: the palette of slot 1 is a
               character's normal palette, slot 2 its mirror-match alternate
               (characters not listed use the first and second palette)
@@ -74,25 +104,51 @@ hitbox step, recovery = the rest. A hit on the first active tick gives the
 attacker an advantage of hitstun - (active + recovery), blockstun likewise;
 hitstop freezes both fighters equally and does not change it.
 
+systems.json: {"systems": {name: profile}, "characters": {character:
+system}, "notes": ...}. Profile names are a-z, 0-9 and "_" (at most 12). A
+profile needs life, damage_scale (per mille, applied to its characters'
+damage and chip), walk, walk_back, jump {vy, gravity, vx, prejump, optional
+vx_back}, stun_table {class: [hitstun, blockstun]}, hitstop_table {class:
+ticks} (classes may be left out; a move of such a class must give the
+values itself), input {buffer, quarter (236/214 window), dragon (623),
+charge, grace, optional release (default 4)}, push_distance (bodies closer
+than this - 1 pixels are pushed apart to it) and guard_range (pixels).
+Optional: defense, weight (1000), height (mid), src, notes. hop, super_jump,
+hyper_hop, chip, meters, mechanics, scaling, stun and guard are accepted for
+later steps and not packed.
+
 Pack layout, all little endian (the C loader in app/fighter/render.c checks it):
-  header     "FIGHTP04", u32 size, u32 FNV-1a of bytes 16..size, u32 flags
-             (bit 0 automatic), u32 palettes, frames, characters, effects
+  header     "FIGHTP05", u32 size, u32 FNV-1a of bytes 16..size, u32 flags
+             (bit 0 automatic), u32 palettes, frames, characters, effects,
+             systems
   palette    u16 sheet, u16 n (1..256), n x u16 RGB565
   frame      u16 sheet, u16 w, h; i16 anchor x, y; u32 spans; h x u16 spans
              per row; spans x (u16 x, u16 len); then sum(len) u8 indices
+  system     u8 name length, name bytes; u16 damage scale; 11 stats x u16
+             (life, defense, walk, walk_back, i16 jump vy, gravity, vx,
+             vx_back, prejump, weight, height 0 low 1 mid 2 high); u16 push
+             distance, guard range, buffer, quarter, dragon, charge, grace,
+             release; 6 classes (light, heavy, command, special, super,
+             throw) x (u16 hitstun, blockstun, hitstop, has: bit 0 the stun
+             pair, bit 1 hitstop; absent values 0)
   character  u8 name length, name bytes; u16 normal palette, alternate
-             palette; u16 steps, boxes, moves, projectiles; 10 actions x
-             (u16 first step, u16 steps); moves x 14 u16 (kind 0 normal or 1
-             special, trigger or motion, buttons, first step, steps, damage,
-             chip, hitstun, blockstun, hitstop, pushback, block_pushback,
-             guard, cancel bits): the eight normals, then the specials in
-             priority order; projectiles x 16 u16 (first step, steps, speed,
-             lifetime, i16 offset x, i16 offset y, damage, chip, hitstun,
-             blockstun, hitstop, pushback, block_pushback, guard, blend,
-             alpha); steps x (u16 frame, u16 ticks, u16 first box, u8 hurt
-             boxes, u8 hit boxes, i8 forward, i8 down, u8 spawn = projectile
-             + 1 or 0); boxes x (i16 x, i16 y, u16 w, u16 h). Frame indices
-             are global; step and box indices are local to the character.
+             palette; u16 system, u16 override mask (bit per stat), 11 stats
+             x u16 as above (0 where the mask bit is clear); u16 steps, boxes,
+             moves, projectiles; 10 actions x (u16 first step, u16 steps);
+             moves x 16 u16 (kind 0 normal or 1 special, trigger or motion,
+             buttons, first step, steps, damage, chip, hitstun, blockstun,
+             hitstop, pushback, block_pushback, guard, cancel bits, class 0
+             none or 1 + class, defaults: bit 0 hitstun, 1 blockstun, 2
+             hitstop from the class, packed as 0): the eight normals, then the
+             specials in priority order; projectiles x 18 u16 (first step,
+             steps, speed, lifetime, i16 offset x, i16 offset y, damage, chip,
+             hitstun, blockstun, hitstop, pushback, block_pushback, guard,
+             blend, alpha, class, defaults); steps x (u16 frame, u16 ticks,
+             u16 first box, u8 hurt boxes, u8 hit boxes, i8 forward, i8 down,
+             u8 spawn = projectile + 1 or 0); boxes x (i16 x, i16 y, u16 w,
+             u16 h). Frame indices are global; step and box indices are local
+             to the character. Damage is packed as written; src and sources
+             are not packed.
   effects    u16 frame, u16 palette
 """
 import argparse
@@ -103,7 +159,7 @@ import struct
 import sys
 import zlib
 
-MAGIC = b'FIGHTP04'
+MAGIC = b'FIGHTP05'
 # Order matters: these are the C enums in app/fighter/fighter.h.
 ACTIONS = ['idle', 'walk_forward', 'walk_back', 'jump', 'guard', 'hurt', 'ko',
            'crouch', 'crouch_guard', 'crouch_hurt']
@@ -121,7 +177,7 @@ NAME_CHARS = set('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -')
 MAX_SIDE = 1024
 MAX_STEP_BOXES = 15
 MAX_MOVE_TICKS = 255
-MAX_DAMAGE = 1000
+MAX_DAMAGE = 1500
 MAX_STUN = 120
 MAX_HITSTOP = 30
 MAX_PUSH = 120
@@ -132,6 +188,40 @@ MAX_HEIGHT = 300
 MAX_LIFETIME = 600
 MAX_NAME = 12
 MAX_CHARACTERS = 32
+MAX_SYSTEMS = 8
+MAX_LIFE = 4000
+MIN_DEFENSE = 100
+MIN_WEIGHT = 250
+MIN_SCALE = 100
+MAX_PERMILLE = 4000
+MAX_WALK = 64
+MAX_JUMP_VY = 255
+MAX_GRAVITY = 32
+MAX_PREJUMP = 15
+MAX_BUFFER = 15
+MAX_CHARGE = 200
+MAX_GRACE = 60
+MAX_PUSH_DISTANCE = 200
+HISTORY = 32
+SCREEN_WIDTH = 480
+DEFAULT_SYSTEM = 'kof2002'
+CLASSES = ['light', 'heavy', 'command', 'special', 'super', 'throw']
+HEIGHTS = ['low', 'mid', 'high']
+# Packed stat order (the character override mask has one bit per entry).
+STATS = ['life', 'defense', 'walk', 'walk_back', 'jump_vy', 'gravity', 'vx', 'vx_back',
+         'prejump', 'weight', 'height']
+JUMP_KEYS = {'vy': 'jump_vy', 'gravity': 'gravity', 'vx': 'vx', 'vx_back': 'vx_back',
+             'prejump': 'prejump'}
+INPUT_KEYS = ['buffer', 'quarter', 'dragon', 'charge', 'grace', 'release']
+# Accepted now, used by later steps of docs/fighter-stats.md, never packed.
+LATER_SYSTEM_KEYS = {'hop', 'super_jump', 'hyper_hop', 'chip', 'meters', 'mechanics',
+                     'scaling', 'stun', 'guard'}
+LATER_STAT_KEYS = {'hop', 'super_jump', 'hyper_hop', 'stun', 'guard', 'meters'}
+# src values besides "sources" ids and mugen:<pack>.
+SOURCE_KINDS = ['estimate', 'sheet', 'measured', 'design']
+# `data` warns when more than this share (percent) of a character's move
+# fields are estimates.
+ESTIMATE_WARNING = 50
 
 
 def read_png(path):
@@ -294,21 +384,254 @@ def check_int(v, low, high, what):
     return v
 
 
-def hit_fields(d, what, required):
-    """damage .. block_pushback; defaults (0, stun 1) only when not required."""
-    out = []
-    for k in HIT_FIELDS:
-        if k not in d:
-            if required:
-                raise ValueError(f'{what}: needs {k}')
-            out.append(1 if k in ('hitstun', 'blockstun') else 0)
-            continue
-        top = {'damage': MAX_DAMAGE, 'chip': d.get('damage', 0), 'hitstun': MAX_STUN,
-               'blockstun': MAX_STUN, 'hitstop': MAX_HITSTOP, 'pushback': MAX_PUSH,
-               'block_pushback': MAX_PUSH}[k]
-        out.append(check_int(d[k], 1 if k in ('hitstun', 'blockstun') else 0, top,
-                             f'{what}: {k}'))
+def scale(v, permille):
+    """v * permille / 1000 rounded half up, at least 1 when v is nonzero (as
+    the core does)."""
+    r = (v * permille + 500) // 1000
+    return 1 if v and not r else r
+
+
+class Hit:
+    """The hit fields of a move or projectile. packed: the 7 values as
+    written (0 where the class supplies them); cls: 0 or 1 + class index;
+    defaults: bits of hitstun/blockstun/hitstop taken from the class;
+    resolved: what the core ends up with (class values filled, damage and
+    chip scaled by the system)."""
+
+    def __init__(self, d, what, required, system):
+        cls = d.get('class')
+        if cls is not None and cls not in CLASSES:
+            raise ValueError(f'{what}: class must be one of {CLASSES}')
+        self.cls = CLASSES.index(cls) + 1 if cls else 0
+        row = system['classes'].get(cls, {})
+        self.packed, self.resolved, self.defaults = [], [], 0
+        for k in HIT_FIELDS:
+            bit = {'hitstun': 1, 'blockstun': 2, 'hitstop': 4}.get(k, 0)
+            if k not in d and k in row:
+                self.defaults |= bit
+                self.packed.append(0)
+                self.resolved.append(row[k])
+                continue
+            if k not in d:
+                if required:
+                    raise ValueError(f'{what}: needs {k}' + (
+                        f' (class {cls} has no default in {system["name"]})' if bit and cls
+                        else ''))
+                v = 1 if k in ('hitstun', 'blockstun') else 0
+            else:
+                top = {'damage': MAX_DAMAGE, 'chip': d.get('damage', 0), 'hitstun': MAX_STUN,
+                       'blockstun': MAX_STUN, 'hitstop': MAX_HITSTOP, 'pushback': MAX_PUSH,
+                       'block_pushback': MAX_PUSH}[k]
+                v = check_int(d[k], 1 if k in ('hitstun', 'blockstun') else 0, top,
+                              f'{what}: {k}')
+            self.packed.append(v)
+            self.resolved.append(v)
+        for i in range(2):
+            self.resolved[i] = scale(self.resolved[i], system['damage_scale'])
+
+    def tail(self):
+        return [self.cls, self.defaults]
+
+
+def check_src(src, what, keys, sources):
+    """A src map: field name (or "*") -> a sources id, a SOURCE_KINDS word or
+    mugen:<pack>."""
+    if not isinstance(src, dict):
+        raise ValueError(f'{what}: src is {{field: source}}')
+    for k, v in src.items():
+        if k != '*' and k not in keys:
+            raise ValueError(f'{what}: src names unknown field {k}')
+        if not isinstance(v, str) or not (v in sources or v in SOURCE_KINDS or (
+                v.startswith('mugen:') and len(v) > 6)):
+            raise ValueError(f'{what}: src {k} must be a sources id, one of {SOURCE_KINDS} '
+                             f'or mugen:<pack>, not {v!r}')
+    return src
+
+
+def source_kind(v, sources):
+    return 'source' if v in sources else 'mugen' if v.startswith('mugen:') else v
+
+
+def check_sources(m, what):
+    sources = m.get('sources', {})
+    if not isinstance(sources, dict):
+        raise ValueError(f'{what}: sources is {{id: {{url, ...}}}}')
+    for k, v in sources.items():
+        if (k in SOURCE_KINDS or k.startswith('mugen:') or not isinstance(v, dict) or
+                not isinstance(v.get('url'), str) or
+                set(v) - {'url', 'title', 'fetched', 'game'} or
+                not all(isinstance(x, str) for x in v.values())):
+            raise ValueError(f'{what}: source {k} needs a url and only string title, '
+                             f'fetched and game')
+    return sources
+
+
+def check_jump(j, what, partial):
+    """A jump row; partial rows (character overrides) may give any subset."""
+    if not isinstance(j, dict) or set(j) - set(JUMP_KEYS):
+        raise ValueError(f'{what}: jump is {{{", ".join(JUMP_KEYS)}}}')
+    need = set() if partial else {'vy', 'gravity', 'vx', 'prejump'}
+    if need - set(j):
+        raise ValueError(f'{what}: jump needs {sorted(need)}')
+    bounds = {'vy': (-MAX_JUMP_VY, -1), 'gravity': (1, MAX_GRAVITY), 'vx': (0, MAX_WALK),
+              'vx_back': (0, MAX_WALK), 'prejump': (1, MAX_PREJUMP)}
+    out = {}
+    for k, v in j.items():
+        out[JUMP_KEYS[k]] = check_int(v, *bounds[k], f'{what}: jump {k}')
+    if 'vx' in out and 'vx_back' not in out:
+        out['vx_back'] = out['vx']
     return out
+
+
+def jump_arc(vy, gravity):
+    """(peak pixels, airborne ticks) of a jump, as the core moves it."""
+    y, peak, ticks = 0, 0, 0
+    while True:
+        y += int(vy / 4)
+        vy += gravity
+        ticks += 1
+        if y >= 0:
+            return -peak, ticks
+        peak = min(peak, y)
+
+
+def stat_values(d, what, partial):
+    """Stats from a profile or a character's "stats" as {STATS name: value}."""
+    out = {}
+    bounds = {'life': (1, MAX_LIFE), 'defense': (MIN_DEFENSE, MAX_PERMILLE),
+              'weight': (MIN_WEIGHT, MAX_PERMILLE), 'walk': (0, MAX_WALK),
+              'walk_back': (0, MAX_WALK)}
+    for k, (low, high) in bounds.items():
+        if k in d:
+            out[k] = check_int(d[k], low, high, f'{what}: {k}')
+    if 'height' in d:
+        if d['height'] not in HEIGHTS:
+            raise ValueError(f'{what}: height must be one of {HEIGHTS}')
+        out['height'] = HEIGHTS.index(d['height'])
+    if 'jump' in d:
+        out.update(check_jump(d['jump'], what, partial))
+    if 'prejump' in d:
+        v = check_int(d['prejump'], 1, MAX_PREJUMP, f'{what}: prejump')
+        if out.get('prejump', v) != v:
+            raise ValueError(f'{what}: prejump and jump.prejump differ')
+        out['prejump'] = v
+    for k in ('hop', 'super_jump', 'hyper_hop'):
+        if k in d:
+            check_jump(d[k], f'{what} {k}', partial)
+    for k in ('stun', 'guard'):
+        if k in d:
+            check_int(d[k], 0, 10000, f'{what}: {k}')
+    if 'meters' in d and (not isinstance(d['meters'], list) or len(d['meters']) > 2 or
+                          not all(isinstance(x, dict) and isinstance(x.get('name'), str)
+                                  for x in d['meters'])):
+        raise ValueError(f'{what}: meters is a list of at most two {{"name", ...}}')
+    return out
+
+
+def check_stats(st, what):
+    """The resolved stats must also satisfy the core's jump bound."""
+    peak, _ = jump_arc(st['jump_vy'], st['gravity'])
+    if peak > MAX_HEIGHT:
+        raise ValueError(f'{what}: the jump rises {peak} px, at most {MAX_HEIGHT}')
+    return st
+
+
+class Systems:
+    """systems.json: the profiles in file order (all packed) and the
+    character -> system assignments."""
+
+    def __init__(self, path):
+        path = pathlib.Path(path)
+        if not path.exists():
+            raise ValueError(f'{path}: no systems.json next to the roster or manifest')
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict) or set(data) - {'systems', 'characters', 'notes'} or \
+                not isinstance(data.get('systems'), dict) or not data['systems']:
+            raise ValueError(f'{path}: needs "systems" (non-empty) and optional "characters", '
+                             f'"notes"')
+        if len(data['systems']) > MAX_SYSTEMS:
+            raise ValueError(f'{path}: at most {MAX_SYSTEMS} systems')
+        self.names = list(data['systems'])
+        self.profile = {n: self._profile(n, p, path) for n, p in data['systems'].items()}
+        self.assign = data.get('characters', {})
+        if not isinstance(self.assign, dict) or not all(
+                v in self.profile for v in self.assign.values()):
+            raise ValueError(f'{path}: "characters" maps names to systems it defines')
+        if DEFAULT_SYSTEM not in self.profile:
+            raise ValueError(f'{path}: the default system {DEFAULT_SYSTEM} is missing')
+
+    @staticmethod
+    def _profile(name, p, path):
+        what = f'{path.name} {name}'
+        if not (1 <= len(name) <= MAX_NAME and set(name) <= set('abcdefghijklmnopqrstuvwxyz0123456789_')):
+            raise ValueError(f'{what}: names are 1..{MAX_NAME} of a-z, 0-9 and _')
+        need = {'life', 'damage_scale', 'walk', 'walk_back', 'jump', 'stun_table',
+                'hitstop_table', 'input', 'push_distance', 'guard_range'}
+        known = need | {'defense', 'weight', 'height', 'src', 'notes'} | LATER_SYSTEM_KEYS
+        if not isinstance(p, dict) or need - set(p) or set(p) - known:
+            raise ValueError(f'{what}: needs {sorted(need)}, may have '
+                             f'{sorted(known - need)}')
+        st = {'defense': 1000, 'weight': 1000, 'height': HEIGHTS.index('mid')}
+        st.update(stat_values(p, what, False))
+        check_stats(st, what)
+        if p.get('hop') is not None:
+            check_jump(p['hop'], f'{what} hop', False)
+        inp = p['input']
+        if not isinstance(inp, dict) or set(inp) - set(INPUT_KEYS) or \
+                set(INPUT_KEYS[:5]) - set(inp):
+            raise ValueError(f'{what}: input is {{{", ".join(INPUT_KEYS)}}} (release optional)')
+        bounds = {'buffer': (1, MAX_BUFFER), 'quarter': (3, HISTORY), 'dragon': (3, HISTORY),
+                  'charge': (1, MAX_CHARGE), 'grace': (0, MAX_GRACE), 'release': (1, HISTORY)}
+        inputs = [check_int(inp.get(k, 4), *bounds[k], f'{what}: input {k}') for k in INPUT_KEYS]
+        classes = {}
+        for table, keys in (('stun_table', ('hitstun', 'blockstun')),
+                            ('hitstop_table', ('hitstop',))):
+            t = p[table]
+            if not isinstance(t, dict) or set(t) - set(CLASSES):
+                raise ValueError(f'{what}: {table} keys must be among {CLASSES}')
+            for cls, v in t.items():
+                v = v if isinstance(v, list) else [v]
+                if len(v) != len(keys):
+                    raise ValueError(f'{what}: {table} {cls} needs {len(keys)} values')
+                for k, x in zip(keys, v):
+                    low, high = (1, MAX_STUN) if k != 'hitstop' else (0, MAX_HITSTOP)
+                    classes.setdefault(cls, {})[k] = check_int(x, low, high,
+                                                               f'{what}: {table} {cls}')
+        if 'src' in p:
+            check_src(p['src'], what, set(p) - {'src', 'notes'}, {})
+        return {'name': name,
+                'damage_scale': check_int(p['damage_scale'], MIN_SCALE, MAX_PERMILLE,
+                                          f'{what}: damage_scale'),
+                'stats': st, 'inputs': inputs,
+                'push': check_int(p['push_distance'], 2, MAX_PUSH_DISTANCE,
+                                  f'{what}: push_distance'),
+                'guard_range': check_int(p['guard_range'], 0, SCREEN_WIDTH,
+                                         f'{what}: guard_range'),
+                'classes': classes}
+
+    def of(self, character, written):
+        """The system a character uses: its own "system", else the assigned
+        one, else the default; the two may not disagree."""
+        mapped = self.assign.get(character)
+        if written is not None and written not in self.profile:
+            raise ValueError(f'{character}: unknown system {written}')
+        if written and mapped and written != mapped:
+            raise ValueError(f'{character}: system {written} but systems.json assigns {mapped}')
+        return self.profile[written or mapped or DEFAULT_SYSTEM]
+
+    def pack(self):
+        out = b''
+        for n in self.names:
+            p = self.profile[n]
+            out += struct.pack('<B', len(n)) + n.encode() + struct.pack('<H', p['damage_scale'])
+            out += b''.join(struct.pack('<H', p['stats'][k] & 0xffff) for k in STATS)
+            out += struct.pack('<8H', p['push'], p['guard_range'], *p['inputs'])
+            for cls in CLASSES:
+                row = p['classes'].get(cls, {})
+                has = ('hitstun' in row) | ('hitstop' in row) << 1
+                out += struct.pack('<4H', row.get('hitstun', 0), row.get('blockstun', 0),
+                                   row.get('hitstop', 0), has)
+        return out
 
 
 def button_mask(b, what):
@@ -328,20 +651,52 @@ def display_name(name):
     return text
 
 
-class Character:
-    """One character's steps, boxes, moves and projectiles from a manifest;
-    frame indices are global (base + position in the manifest's frames)."""
+MOVE_SRC_KEYS = set(HIT_FIELDS) | {'steps', 'class', 'guard', 'cancel', 'trigger', 'speed',
+                                   'lifetime', 'offset', 'blend', 'alpha'}
+STAT_SRC_KEYS = {'life', 'defense', 'walk', 'walk_back', 'jump', 'prejump', 'weight', 'height'}
 
-    def __init__(self, m, name, frame_names, base=0):
+
+class Character:
+    """One character's system, stats, steps, boxes, moves and projectiles
+    from a manifest; frame indices are global (base + position in the
+    manifest's frames)."""
+
+    def __init__(self, m, name, frame_names, systems, base=0):
         ch = m['characters'][name]
         self.name = name
         self.display = display_name(name)
         self.steps, self.boxes, self.actions = [], [], []
         self.moves, self.move_names, self.projectiles, self.projectile_names = [], [], [], []
+        self.hits, self.projectile_hits = [], []
         hurt = m['hurtboxes']
         index = {f: base + i for i, f in enumerate(frame_names)}
-        if set(ch) - {'actions', 'moves', 'projectiles'}:
-            raise ValueError(f'{name}: unknown keys {sorted(set(ch) - {"actions", "moves", "projectiles"})}')
+        known = {'actions', 'moves', 'projectiles', 'system', 'stats'}
+        if set(ch) - known:
+            raise ValueError(f'{name}: unknown keys {sorted(set(ch) - known)}')
+        sources = check_sources(m, name)
+        self.system = systems.of(name, ch.get('system'))
+        self.system_index = systems.names.index(self.system['name'])
+        given = ch.get('stats', {})
+        if not isinstance(given, dict) or set(given) - STAT_SRC_KEYS - LATER_STAT_KEYS - {'src'}:
+            raise ValueError(f'{name}: stats may have {sorted(STAT_SRC_KEYS | LATER_STAT_KEYS)} '
+                             f'and src')
+        self.overrides = stat_values(given, f'{name} stats', True)
+        self.stats = check_stats({**self.system['stats'], **self.overrides}, f'{name} stats')
+        if 'src' in given:
+            check_src(given['src'], f'{name} stats', STAT_SRC_KEYS, sources)
+        # Where each move field's value comes from: kind -> count.
+        self.sources = {}
+
+        def count_sources(d, what, hit):
+            src = check_src(d.get('src', {}), what, MOVE_SRC_KEYS, sources)
+            for k in HIT_FIELDS + ['steps']:
+                if k in d:
+                    kind = source_kind(src.get(k, src.get('*', 'estimate')), sources)
+                elif hit.defaults & {'hitstun': 1, 'blockstun': 2, 'hitstop': 4}.get(k, 0):
+                    kind = 'system'
+                else:
+                    continue
+                self.sources[kind] = self.sources.get(kind, 0) + 1
 
         def frame_hurt(f):
             seen = set()
@@ -404,10 +759,15 @@ class Character:
         self.projectile_names = list(projectiles)
         for pname, pr in projectiles.items():
             what = f'{name} projectile {pname}'
-            known = {'steps', 'speed', 'lifetime', 'offset', 'guard', 'blend', 'alpha'} | set(HIT_FIELDS)
-            if set(pr) != known:
-                raise ValueError(f'{what}: fields must be exactly {sorted(known)}')
+            need = {'steps', 'speed', 'lifetime', 'offset', 'guard', 'blend', 'alpha'}
+            known = need | set(HIT_FIELDS) | {'class', 'src'}
+            if not isinstance(pr, dict) or need - set(pr) or set(pr) - known:
+                raise ValueError(f'{what}: fields must be {sorted(need)} plus the hit fields '
+                                 f'(class and src optional)')
             first, count = sequence(pr['steps'], what, 'projectile')
+            hit = Hit(pr, what, True, self.system)
+            count_sources(pr, what, hit)
+            self.projectile_hits.append(hit)
             off = pr['offset']
             if not isinstance(off, list) or len(off) != 2:
                 raise ValueError(f'{what}: offset is [forward, down]')
@@ -417,9 +777,9 @@ class Character:
                 raise ValueError(f'{what}: guard must be one of {GUARDS}, blend of {BLENDS}')
             self.projectiles.append((first, count, check_int(pr['speed'], 1, MAX_VELOCITY, f'{what}: speed'),
                                      check_int(pr['lifetime'], 1, MAX_LIFETIME, f'{what}: lifetime'),
-                                     off[0], off[1], *hit_fields(pr, what, True),
+                                     off[0], off[1], *hit.packed,
                                      GUARDS.index(pr['guard']), BLENDS.index(pr['blend']),
-                                     check_int(pr['alpha'], 1, 255, f'{what}: alpha')))
+                                     check_int(pr['alpha'], 1, 255, f'{what}: alpha'), *hit.tail()))
         moves = ch['moves']
         if not set(MOVES) <= set(moves):
             raise ValueError(f'{name}: needs the moves {MOVES}')
@@ -430,7 +790,8 @@ class Character:
             mv = moves[move]
             what = f'{name} {move}'
             special = move not in MOVES
-            known = {'steps', 'guard', 'cancel'} | set(HIT_FIELDS) | ({'trigger'} if special else set())
+            known = {'steps', 'guard', 'cancel', 'class', 'src'} | set(HIT_FIELDS) | \
+                ({'trigger'} if special else set())
             if set(mv) - known or not {'steps', 'guard', 'cancel'} <= set(mv) or \
                     (special and 'trigger' not in mv):
                 raise ValueError(f'{what}: fields must be {sorted(known)} (hit fields optional '
@@ -447,7 +808,9 @@ class Character:
                     raise ValueError(f'{what}: vertical motion leaves 0..-{MAX_HEIGHT}')
             if height:
                 raise ValueError(f'{what}: vertical motion must end on the ground')
-            fields = hit_fields(mv, what, any(s[4] for s in steps))
+            hit = Hit(mv, what, any(s[4] for s in steps), self.system)
+            count_sources(mv, what, hit)
+            self.hits.append(hit)
             if mv['guard'] not in GUARDS or not isinstance(mv['cancel'], list) or \
                     not set(mv['cancel']) <= set(CANCELS):
                 raise ValueError(f'{what}: guard must be one of {GUARDS}, cancel of {CANCELS}')
@@ -460,7 +823,8 @@ class Character:
                 head = (1, MOTIONS.index(tr['motion']), button_mask(tr['buttons'], what))
             else:
                 head = (0, MOVES.index(move), 0)
-            self.moves.append((*head, first, count, *fields, GUARDS.index(mv['guard']), cancel))
+            self.moves.append((*head, first, count, *hit.packed, GUARDS.index(mv['guard']), cancel,
+                               *hit.tail()))
             self.move_names.append(move)
 
     def frames(self):
@@ -469,14 +833,17 @@ class Character:
     def pack(self, palettes):
         name = self.display.encode()
         out = struct.pack('<B', len(name)) + name + struct.pack('<2H', *palettes)
+        mask = sum(1 << i for i, k in enumerate(STATS) if k in self.overrides)
+        out += struct.pack('<2H', self.system_index, mask)
+        out += b''.join(struct.pack('<H', self.overrides.get(k, 0) & 0xffff) for k in STATS)
         out += struct.pack('<4H', len(self.steps), len(self.boxes), len(self.moves),
                            len(self.projectiles))
         for first, count in self.actions:
             out += struct.pack('<HH', first, count)
         for mv in self.moves:
-            out += struct.pack('<14H', *mv)
+            out += struct.pack('<16H', *mv)
         for pr in self.projectiles:
-            out += struct.pack('<4H2h10H', *pr)
+            out += struct.pack('<4H2h12H', *pr)
         for s in self.steps:
             out += struct.pack('<3H2B2bB', *s)
         for b in self.boxes:
@@ -517,6 +884,11 @@ def palettes_of(m, name):
     return picks
 
 
+def load_systems(path):
+    """The systems.json next to a roster or manifest."""
+    return Systems(pathlib.Path(path).parent / 'systems.json')
+
+
 def load_roster(path):
     """[(Sheet, manifest path)], effects manifest index, from a roster or manifest."""
     path = pathlib.Path(path)
@@ -533,7 +905,7 @@ def load_roster(path):
     return [Sheet(path)], 0
 
 
-def build(sheets, effects_from, automatic):
+def build(sheets, effects_from, automatic, systems):
     out = bytearray()
     palette_count, frame_base, chars, char_palettes, all_frames = 0, 0, [], [], []
     stats, ncolors = {}, 0
@@ -577,7 +949,7 @@ def build(sheets, effects_from, automatic):
                               b''.join(struct.pack('<HH', *s) for s in spans) + data)
             stats[(sid, n)] = (w, h, sum(c is not None for row in pix for c in row))
         for cname in m['characters']:
-            c = Character(m, cname, names, frame_base)
+            c = Character(m, cname, names, systems, frame_base)
             if c.display in names_seen:
                 raise ValueError(f'{cname}: another character has the name {c.display}')
             names_seen.add(c.display)
@@ -588,6 +960,7 @@ def build(sheets, effects_from, automatic):
     if len(chars) > MAX_CHARACTERS:
         raise ValueError(f'{len(chars)} characters, at most {MAX_CHARACTERS}')
     out += b''.join(all_frames)
+    out += systems.pack()
     for c, pal in zip(chars, char_palettes):
         out += c.pack(pal)
     em = sheets[effects_from].m
@@ -595,8 +968,8 @@ def build(sheets, effects_from, automatic):
     ebase = sum(len(s.m['frames']) for s in sheets[:effects_from])
     for f, p in em['effects']:
         out += struct.pack('<HH', ebase + enames.index(f), palette_base[effects_from] + epals.index(p))
-    body = struct.pack('<5I', int(automatic), palette_count, frame_base, len(chars),
-                       len(em['effects'])) + out
+    body = struct.pack('<6I', int(automatic), palette_count, frame_base, len(chars),
+                       len(em['effects']), len(systems.names)) + out
     checksum = 2166136261
     for b in body:
         checksum = ((checksum ^ b) * 16777619) & 0xffffffff
@@ -604,30 +977,54 @@ def build(sheets, effects_from, automatic):
     return MAGIC + struct.pack('<II', size, checksum) + body, checksum, ncolors, stats, chars
 
 
-def frame_data(sheets):
+def describe_stats(c):
+    st, sy = c.stats, c.system
+    peak, ticks = jump_arc(st['jump_vy'], st['gravity'])
+    own = ', '.join(sorted(c.overrides)) or 'none'
+    return (f'system {sy["name"]} (damage scale {sy["damage_scale"]}), life {st["life"]} '
+            f'defense {st["defense"]} weight {st["weight"]} height {HEIGHTS[st["height"]]}, '
+            f'walk {st["walk"]}/{st["walk_back"]} (1/4 px), jump vy {st["jump_vy"]} gravity '
+            f'{st["gravity"]} drift {st["vx"]}/{st["vx_back"]} prejump {st["prejump"]} '
+            f'(peak {peak} px, {ticks} ticks airborne); own stats: {own}')
+
+
+def frame_data(sheets, systems):
+    """Stats, frame data (damage after the damage scale, class defaults
+    filled) and the source summary of every character."""
     for sheet in sheets:
         m = sheet.m
         names = list(m['frames'])
         for cname in m['characters']:
-            c = Character(m, cname, names)
+            c = Character(m, cname, names, systems)
+            print(f'{cname}: {describe_stats(c)}')
             print(f'{cname}: move startup/active/recovery total hits, damage/chip, '
-                  f'hitstun/blockstun/hitstop, adv hit/block, guard, trigger')
+                  f'hitstun/blockstun/hitstop, adv hit/block, guard, class, trigger')
             for k, move in enumerate(c.move_names):
                 s, a, r, t, hits = c.frame_data(k)
-                mv = c.moves[k]
+                mv, h = c.moves[k], c.hits[k].resolved
+                cls = CLASSES[c.hits[k].cls - 1] if c.hits[k].cls else '-'
                 trig = f'{MOTIONS[mv[1]]}+' + '/'.join(b for i, b in enumerate(BUTTONS)
                                                        if mv[2] >> i & 1) if mv[0] else 'normal'
-                print(f'  {move:12} {s:2}/{a:2}/{r:2} {t:3} {hits}  {mv[5]:4}/{mv[6]:3}  '
-                      f'{mv[7]:3}/{mv[8]:3}/{mv[9]:2}  {mv[7] - a - r:+3}/{mv[8] - a - r:+3}  '
-                      f'{GUARDS[mv[12]]:8} {trig}')
+                print(f'  {move:12} {s:2}/{a:2}/{r:2} {t:3} {hits}  {h[0]:4}/{h[1]:3}  '
+                      f'{h[2]:3}/{h[3]:3}/{h[4]:2}  {h[2] - a - r:+3}/{h[3] - a - r:+3}  '
+                      f'{GUARDS[mv[12]]:8} {cls:8} {trig}')
                 spawn = next(((i, st) for i, st in enumerate(c.steps[mv[3]:mv[3] + mv[4]])
                               if st[7]), None)
                 if spawn:
                     tick = sum(st[1] for st in c.steps[mv[3]:mv[3] + spawn[0]])
                     pr = c.projectiles[spawn[1][7] - 1]
+                    ph = c.projectile_hits[spawn[1][7] - 1].resolved
                     print(f'  {"":12} launches {c.projectile_names[spawn[1][7] - 1]} at elapsed '
-                          f'{tick}: speed {pr[2]} lifetime {pr[3]} damage/chip {pr[6]}/{pr[7]} '
-                          f'hitstun/blockstun/hitstop {pr[8]}/{pr[9]}/{pr[10]} {BLENDS[pr[14]]}')
+                          f'{tick}: speed {pr[2]} lifetime {pr[3]} damage/chip {ph[0]}/{ph[1]} '
+                          f'hitstun/blockstun/hitstop {ph[2]}/{ph[3]}/{ph[4]} {BLENDS[pr[14]]}')
+            total = sum(c.sources.values())
+            kinds = ', '.join(f'{k} {n}' for k, n in sorted(c.sources.items(),
+                                                            key=lambda x: (-x[1], x[0])))
+            print(f'{cname}: sources of {total} move fields: {kinds}')
+            estimate = c.sources.get('estimate', 0)
+            if total and estimate * 100 > ESTIMATE_WARNING * total:
+                print(f'{cname}: note: {estimate * 100 // total}% of the move fields are '
+                      f'estimates (more than {ESTIMATE_WARNING}%)')
 
 
 def detect(sheet):
@@ -643,7 +1040,7 @@ def preview(sheet, path):
     and anchor column grid, hurtboxes outlined green and hitboxes red."""
     m = sheet.m
     names = list(m['frames'])
-    c = Character(m, list(m['characters'])[0], names)
+    c = Character(m, list(m['characters'])[0], names, load_systems(sheet.manifest_path))
     strips = [c.steps[f:f + n] for f, n in c.actions]
     strips += [c.steps[mv[3]:mv[3] + mv[4]] for mv in c.moves]
     strips += [c.steps[pr[0]:pr[0] + pr[1]] for pr in c.projectiles]
@@ -708,10 +1105,11 @@ def main():
     elif args.cmd == 'preview':
         preview(Sheet(args.manifest), args.output)
     elif args.cmd == 'data':
-        frame_data(load_roster(args.roster)[0])
+        frame_data(load_roster(args.roster)[0], load_systems(args.roster))
     else:
         sheets, effects_from = load_roster(args.roster)
-        data, checksum, ncolors, stats, chars = build(sheets, effects_from, args.auto)
+        data, checksum, ncolors, stats, chars = build(sheets, effects_from, args.auto,
+                                                      load_systems(args.roster))
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_bytes(data)
         opaque = sum(s[2] for s in stats.values())

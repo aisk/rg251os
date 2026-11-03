@@ -1,10 +1,14 @@
-/* FIGHTP04 pack decoder, per-match sprite cast and clipped RGB565 software
+/* FIGHTP05 pack decoder, per-match sprite cast and clipped RGB565 software
  * draw-command backend. The decoder checks every count, offset and index
  * against the file length and the resident limits in fighter.h (palettes
- * and frames per sheet, names, box bounds and counts, move, special,
- * projectile and step motion data), keeps the whole roster's rule data and
- * palette-index frames resident, derives hit groups, startup/active/
- * recovery and reach per move, and expands the effects once. fight_cast
+ * and frames per sheet, system profiles, stats, names, box bounds and
+ * counts, move, special, projectile and step motion data), keeps the whole
+ * roster's rule data and palette-index frames resident, resolves each
+ * character's stats (its system's defaults plus its overrides, with the
+ * jump's peak and fall speed derived and bounded), fills hitstun/blockstun/
+ * hitstop a move takes from its class and scales damage and chip by the
+ * system's damage scale, derives hit groups, startup/active/recovery and
+ * reach per move, and expands the effects once. fight_cast
  * expands the two fighters of the current match (character, palette) into
  * RGB565 runs when they change, so only two characters' pixels are ever
  * resident; the loader proves both always fit. Drawing a sprite is span
@@ -120,17 +124,180 @@ static int image(struct assets *a, unsigned f, unsigned c)
 	a->pixels += s->count;
 	return (int)a->images++;
 }
-static int hit_fields(struct reader *r, struct hit *h)
+/* ---- systems and stats ---- */
+/* Stats in pack order; a character's override mask has one bit per entry. */
+enum stat {
+	S_LIFE, S_DEFENSE, S_WALK, S_WALK_BACK, S_JUMP_VY, S_GRAVITY, S_VX, S_VX_BACK,
+	S_PREJUMP, S_WEIGHT, S_HEIGHT, STATS
+};
+static int16_t *stat_field(struct stats *st, int k)
 {
+	int16_t *f[STATS] = {&st->life,	     &st->defense,    &st->walk,	 &st->walk_back,
+			     &st->jump.vy,   &st->jump.gravity, &st->jump.vx, &st->jump.vx_back,
+			     &st->jump.prejump, &st->weight,     NULL};
+	return f[k];
+}
+/* Store packed value v of stat k; 0 if it cannot be one (stats_ok checks
+ * the ranges once all are set). */
+static int set_stat(struct stats *st, int k, unsigned v)
+{
+	if (k == S_HEIGHT) {
+		st->height = (uint8_t)v;
+		return v < HEIGHTS;
+	}
+	*stat_field(st, k) = (int16_t)v;
+	return k == S_JUMP_VY ? v >= 0x8000 : v < 0x8000;
+}
+/* Simulate the jump arc and a fall from MAX_HEIGHT (as after a hit during a
+ * tall move) the way fighter.c moves airborne fighters; fall is the largest
+ * vy either leaves in the state. */
+static void arc(struct jump *j)
+{
+	int y = 0, vy = j->vy, peak = 0, fall = 0;
+	for (;;) {
+		y += vy / 4;
+		vy += j->gravity;
+		if (y >= 0)
+			break;
+		peak = y < peak ? y : peak;
+		fall = vy > fall ? vy : fall;
+	}
+	for (y = -MAX_HEIGHT, vy = 0;;) {
+		y += vy / 4;
+		vy += j->gravity;
+		if (y >= 0)
+			break;
+		fall = vy > fall ? vy : fall;
+	}
+	j->peak = (int16_t)-peak;
+	j->fall = (int16_t)fall;
+}
+static int stats_ok(struct stats *st)
+{
+	if (st->life < 1 || st->life > MAX_LIFE || st->defense < MIN_DEFENSE ||
+	    st->defense > MAX_PERMILLE || st->walk < 0 || st->walk > MAX_WALK ||
+	    st->walk_back < 0 || st->walk_back > MAX_WALK || st->jump.vy < -MAX_JUMP_VY ||
+	    st->jump.vy > -1 || st->jump.gravity < 1 || st->jump.gravity > MAX_GRAVITY ||
+	    st->jump.vx < 0 || st->jump.vx > MAX_WALK || st->jump.vx_back < 0 ||
+	    st->jump.vx_back > MAX_WALK || st->jump.prejump < 1 ||
+	    st->jump.prejump > MAX_PREJUMP || st->weight < MIN_WEIGHT ||
+	    st->weight > MAX_PERMILLE || st->height >= HEIGHTS)
+		return 0;
+	arc(&st->jump);
+	return st->jump.peak <= MAX_HEIGHT;
+}
+static int system_name_char(unsigned c)
+{
+	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
+}
+static int read_system(struct reader *r, struct system *sy)
+{
+	unsigned len = u8(r);
+	if (!r->ok || !len || len > MAX_NAME)
+		return 0;
+	memset(sy, 0, sizeof(*sy));
+	for (unsigned i = 0; i < len; i++) {
+		sy->name[i] = (char)u8(r);
+		if (!system_name_char((unsigned char)sy->name[i]))
+			return 0;
+	}
+	unsigned scale = u16(r);
+	if (scale < MIN_SCALE || scale > MAX_PERMILLE)
+		return 0;
+	sy->damage_scale = (uint16_t)scale;
+	for (int k = 0; k < STATS; k++) {
+		if (!set_stat(&sy->stats, k, u16(r)))
+			return 0;
+	}
+	struct stats *st = &sy->stats;
 	unsigned v[8];
+	for (int k = 0; k < 8; k++)
+		v[k] = u16(r);
+	if (!r->ok || !stats_ok(st) || v[0] < 2 || v[0] > MAX_PUSH_DISTANCE || v[1] > FW ||
+	    !v[2] || v[2] > MAX_BUFFER || v[3] < 3 || v[3] > HISTORY || v[4] < 3 ||
+	    v[4] > HISTORY || !v[5] || v[5] > MAX_CHARGE || v[6] > MAX_GRACE || !v[7] ||
+	    v[7] > HISTORY)
+		return 0;
+	st->push = (int16_t)v[0];
+	st->guard_range = (int16_t)v[1];
+	st->buffer = (uint8_t)v[2];
+	st->quarter = (uint8_t)v[3];
+	st->dragon = (uint8_t)v[4];
+	st->charge = (uint8_t)v[5];
+	st->grace = (uint8_t)v[6];
+	st->release = (uint8_t)v[7];
+	/* Class rows from light: hitstun, blockstun, hitstop, which are set. */
+	for (int c = CLASS_LIGHT; c < CLASSES; c++) {
+		unsigned hitstun = u16(r), blockstun = u16(r), hitstop = u16(r), has = u16(r);
+		if (!r->ok || has > 3 ||
+		    ((has & 1) ? !hitstun || hitstun > MAX_STUN || !blockstun ||
+				     blockstun > MAX_STUN
+			       : hitstun || blockstun) ||
+		    ((has & 2) ? hitstop > MAX_HITSTOP : hitstop != 0))
+			return 0;
+		sy->cls[c] = (struct class_row){(uint8_t)hitstun, (uint8_t)blockstun,
+						(uint8_t)hitstop, (uint8_t)has};
+	}
+	return 1;
+}
+/* A character's stats: its system's, then each override in the mask. */
+static int read_stats(struct reader *r, const struct assets *a, struct character *c)
+{
+	unsigned system = u16(r), mask = u16(r);
+	if (!r->ok || system >= a->systems || mask >> STATS)
+		return 0;
+	c->system = system;
+	c->stats = a->sys[system].stats;
+	for (int k = 0; k < STATS; k++) {
+		unsigned v = u16(r);
+		if (!((mask >> k) & 1)) {
+			if (v)
+				return 0;
+			continue;
+		}
+		if (!set_stat(&c->stats, k, v))
+			return 0;
+	}
+	return r->ok && stats_ok(&c->stats);
+}
+/* damage .. block_pushback, then (after the caller's fields) class and
+ * defaults: a default bit takes that field from the class row, whose value
+ * in the pack must be 0. Damage and chip are scaled by the system. */
+static int hit_fields(struct reader *r, unsigned v[7])
+{
 	for (int j = 0; j < 7; j++)
 		v[j] = u16(r);
-	v[7] = 0;
+	return r->ok;
+}
+static int resolve_hit(struct hit *h, unsigned v[7], unsigned cls, unsigned defaults,
+		       const struct system *sy)
+{
+	if (cls >= CLASSES || defaults > 7 || (defaults && !cls))
+		return 0;
+	const struct class_row *row = &sy->cls[cls];
+	if ((defaults & (DEFAULT_HITSTUN | DEFAULT_BLOCKSTUN)) && !(row->has & 1))
+		return 0;
+	if ((defaults & DEFAULT_HITSTOP) && !(row->has & 2))
+		return 0;
+	static const unsigned bit[3] = {DEFAULT_HITSTUN, DEFAULT_BLOCKSTUN, DEFAULT_HITSTOP};
+	const unsigned value[3] = {row->hitstun, row->blockstun, row->hitstop};
+	for (int k = 0; k < 3; k++)
+		if (defaults & bit[k]) {
+			if (v[2 + k])
+				return 0;
+			v[2 + k] = value[k];
+		}
+	if (v[0] > MAX_DAMAGE || v[1] > v[0] || !v[2] || v[2] > MAX_STUN || !v[3] ||
+	    v[3] > MAX_STUN || v[4] > MAX_HITSTOP || v[5] > MAX_PUSH || v[6] > MAX_PUSH)
+		return 0;
+	/* Rounded half up; a nonzero value stays at least 1. */
+	for (int k = 0; k < 2; k++) {
+		unsigned scaled = (v[k] * sy->damage_scale + 500) / 1000;
+		v[k] = v[k] && !scaled ? 1 : scaled;
+	}
 	*h = (struct hit){(uint16_t)v[0], (uint16_t)v[1], (uint16_t)v[2], (uint16_t)v[3],
-			  (uint16_t)v[4], (uint16_t)v[5], (uint16_t)v[6], 0};
-	return r->ok && v[0] <= MAX_DAMAGE && v[1] <= v[0] && v[2] && v[2] <= MAX_STUN &&
-	       v[3] && v[3] <= MAX_STUN && v[4] <= MAX_HITSTOP && v[5] <= MAX_PUSH &&
-	       v[6] <= MAX_PUSH;
+			  (uint16_t)v[4], (uint16_t)v[5], (uint16_t)v[6], 0, (uint8_t)cls};
+	return 1;
 }
 static int anim(struct anim *an, unsigned first, unsigned count, unsigned steps,
 		unsigned base)
@@ -210,13 +377,16 @@ static int character(struct reader *r, struct assets *a, struct character *c)
 	}
 	c->palette[0] = (uint16_t)u16(r);
 	c->palette[1] = (uint16_t)u16(r);
+	if (!read_stats(r, a, c))
+		return 0;
+	const struct system *sy = &a->sys[c->system];
 	unsigned steps = u16(r), boxes = u16(r), moves = u16(r), projectiles = u16(r);
 	if (!r->ok || c->palette[0] >= a->palettes || c->palette[1] >= a->palettes ||
 	    !steps || steps > MAX_CHARACTER_STEPS || steps > MAX_STEPS - a->steps ||
 	    boxes > MAX_BOXES - a->boxes || moves < MOVES || moves > MAX_MOVES ||
 	    projectiles > MAX_PROJECTILE_TYPES)
 		return 0;
-	unsigned base = a->steps;
+	unsigned base = a->steps, v[7];
 	c->first_step = base;
 	c->steps = steps;
 	c->moves = moves;
@@ -231,10 +401,10 @@ static int character(struct reader *r, struct assets *a, struct character *c)
 		struct move *m = &c->move[k];
 		unsigned kind = u16(r), trigger = u16(r), buttons = u16(r), first = u16(r),
 			 count = u16(r);
-		if (!hit_fields(r, &m->hit))
+		if (!hit_fields(r, v))
 			return 0;
-		unsigned guard = u16(r), cancel = u16(r);
-		if (!r->ok || kind != (k >= MOVES) ||
+		unsigned guard = u16(r), cancel = u16(r), cls = u16(r), defaults = u16(r);
+		if (!r->ok || !resolve_hit(&m->hit, v, cls, defaults, sy) || kind != (k >= MOVES) ||
 		    (kind ? trigger >= MOTIONS || !buttons || buttons > 15
 			  : trigger != k || buttons) ||
 		    guard >= GUARD_TYPES || (cancel & ~(unsigned)CANCEL_MASK) ||
@@ -250,10 +420,12 @@ static int character(struct reader *r, struct assets *a, struct character *c)
 		struct projectile *p = &c->projectile[k];
 		unsigned first = u16(r), count = u16(r);
 		int speed = s16(r), lifetime = s16(r), x = s16(r), y = s16(r);
-		if (!hit_fields(r, &p->hit))
+		if (!hit_fields(r, v))
 			return 0;
-		unsigned guard = u16(r), blend = u16(r), alpha = u16(r);
-		if (!r->ok || !anim(&p->anim, first, count, steps, base) || speed < 1 ||
+		unsigned guard = u16(r), blend = u16(r), alpha = u16(r), cls = u16(r),
+			 defaults = u16(r);
+		if (!r->ok || !resolve_hit(&p->hit, v, cls, defaults, sy) ||
+		    !anim(&p->anim, first, count, steps, base) || speed < 1 ||
 		    speed > MAX_VELOCITY || lifetime < 1 || lifetime > MAX_LIFETIME ||
 		    x < -MAX_SIDE || x > MAX_SIDE || y < -MAX_SIDE || y > MAX_SIDE ||
 		    guard >= GUARD_TYPES || blend >= BLENDS || !alpha || alpha > 255)
@@ -338,15 +510,16 @@ static int character(struct reader *r, struct assets *a, struct character *c)
 int fight_assets(struct assets *a, const void *data, size_t size, int *automatic)
 {
 	struct reader r = {data, 0, size, 1};
-	if (!data || size < 36 || memcmp(data, "FIGHTP04", 8))
+	if (!data || size < 40 || memcmp(data, "FIGHTP05", 8))
 		return 0;
 	r.at = 8;
 	uint32_t length = u32(&r), hash = u32(&r), flags = u32(&r);
 	uint32_t palettes = u32(&r), nframes = u32(&r), ncharacters = u32(&r),
-		 effects = u32(&r);
+		 effects = u32(&r), systems = u32(&r);
 	if (length != size || flags > 1 || !palettes || palettes > MAX_PALETTES ||
 	    !nframes || nframes > MAX_FRAMES || !ncharacters ||
-	    ncharacters > MAX_CHARACTERS || effects > MAX_EFFECTS)
+	    ncharacters > MAX_CHARACTERS || effects > MAX_EFFECTS || !systems ||
+	    systems > MAX_SYSTEMS)
 		return 0;
 	uint32_t check = 2166136261u;
 	for (size_t i = 16; i < size; i++)
@@ -367,6 +540,10 @@ int fight_assets(struct assets *a, const void *data, size_t size, int *automatic
 	a->frames = nframes;
 	for (unsigned i = 0; i < nframes; i++)
 		if (!frame(&r, a, &a->frame[i]))
+			return 0;
+	a->systems = systems;
+	for (unsigned i = 0; i < systems; i++)
+		if (!read_system(&r, &a->sys[i]))
 			return 0;
 	a->characters = ncharacters;
 	for (unsigned i = 0; i < ncharacters; i++)

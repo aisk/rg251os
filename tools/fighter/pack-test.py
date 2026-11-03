@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""Checks of pack.py's systems.json, stats, class, src and sources handling
+and of convert-stats.py, run by `make fighter-test`. Works on in-memory
+copies of assets/fighter/systems.json and testdata/terry-unconverted.json,
+Terry's manifest as it was before convert-stats.py ran (no sheet decoding):
+the real files load, every malformed variant is refused with ValueError,
+stats resolve from the system plus overrides, class defaults and the damage
+scale give the expected numbers, and the conversion keeps every loaded
+value and is idempotent. It also checks that every roster manifest is
+already converted."""
+import copy
+import importlib.util
+import json
+import pathlib
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+HERE = pathlib.Path(__file__).resolve().parent
+ASSETS = HERE.parents[1] / 'assets' / 'fighter'
+sys.path.insert(0, str(HERE))
+import pack  # noqa: E402
+
+spec = importlib.util.spec_from_file_location('convert', HERE / 'convert-stats.py')
+convert = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(convert)
+
+SYSTEMS = json.loads((ASSETS / 'systems.json').read_text())
+UNCONVERTED = HERE / 'testdata' / 'terry-unconverted.json'
+TERRY = json.loads(UNCONVERTED.read_text())
+
+
+def systems(data):
+    with tempfile.TemporaryDirectory() as d:
+        path = pathlib.Path(d) / 'systems.json'
+        path.write_text(json.dumps(data))
+        return pack.Systems(path)
+
+
+def character(m, name='terry', data=SYSTEMS):
+    return pack.Character(m, name, list(m['frames']), systems(data))
+
+
+def refused(what, build):
+    try:
+        build()
+    except ValueError:
+        return
+    sys.exit(f'pack-test: {what} was accepted')
+
+
+def with_system(path, value):
+    data = copy.deepcopy(SYSTEMS)
+    node = data['systems']
+    for k in path[:-1]:
+        node = node[k]
+    if value is None:
+        del node[path[-1]]
+    else:
+        node[path[-1]] = value
+    return data
+
+
+def with_terry(edit):
+    m = copy.deepcopy(TERRY)
+    edit(m['characters']['terry'], m)
+    return m
+
+
+def main():
+    # The shipped profiles and their resolved stats.
+    real = systems(SYSTEMS)
+    assert real.names[:2] == ['kof2002', 'samsho5sp'] and real.assign == {'haohmaru': 'samsho5sp'}
+    kof, ss = real.profile['kof2002'], real.profile['samsho5sp']
+    assert kof['damage_scale'] == 1000 and ss['damage_scale'] == 800
+    assert kof['stats'] == {'life': 1000, 'defense': 1000, 'weight': 1000, 'height': 1,
+                            'walk': 7, 'walk_back': 6, 'jump_vy': -48, 'gravity': 3, 'vx': 8,
+                            'vx_back': 8, 'prejump': 3}
+    assert kof['classes']['light'] == {'hitstun': 11, 'blockstun': 9, 'hitstop': 6}
+    assert kof['classes']['command'] == {'hitstun': 19, 'blockstun': 17}
+    assert pack.jump_arc(-48, 3) == (96, 33) and pack.jump_arc(-42, 2) == (110, 43)
+    t = character(TERRY)
+    assert t.system['name'] == 'kof2002' and not t.overrides and t.stats == kof['stats']
+    # Terry under samsho5sp (by assignment): damage 30 * 0.8 = 24, chip of
+    # Burn Knuckle 18 -> 14.4 -> 14.
+    moved = copy.deepcopy(SYSTEMS)
+    moved['characters']['terry'] = 'samsho5sp'
+    t8 = character(TERRY, data=moved)
+    assert t8.hits[0].resolved[:2] == [24, 0] and t8.hits[len(pack.MOVES) + 1].resolved[1] == 14
+    assert t8.stats['walk'] == 6 and t8.stats['prejump'] == 4
+    # Overrides: walk, a partial jump (vx_back follows vx) and prejump.
+    m = with_terry(lambda c, _: c.update(stats={'walk': 9, 'jump': {'vx': 5}, 'prejump': 2,
+                                                'height': 'low', 'defense': 1100,
+                                                'src': {'walk': 'estimate'}}))
+    c = character(m)
+    assert c.overrides == {'walk': 9, 'vx': 5, 'vx_back': 5, 'prejump': 2, 'height': 0,
+                           'defense': 1100}
+    assert c.stats['walk_back'] == 6 and c.stats['jump_vy'] == -48
+    # Class defaults: stand LP without its stun values takes light 11/9/6.
+    m = with_terry(lambda c, _: [c['moves']['stand_lp'].pop(k) for k in
+                                 ('hitstun', 'blockstun', 'hitstop')] and
+                   c['moves']['stand_lp'].update({'class': 'light'}))
+    lp = character(m).hits[0]
+    assert lp.resolved[2:5] == [11, 9, 6] and lp.packed[2:5] == [0, 0, 0] and lp.defaults == 7
+    assert lp.cls == pack.CLASSES.index('light') + 1
+    # Written values win over the class.
+    m = with_terry(lambda c, _: c['moves']['stand_lp'].update({'class': 'light'}))
+    assert character(m).hits[0].resolved[2:5] == [12, 10, 6]
+    # Sources: ids, mugen packs and counting.
+    m = with_terry(lambda c, mm: (mm.update(sources={'dc02': {'url': 'https://example.org'}}),
+                                  c['moves']['stand_lp'].update(
+                                      src={'damage': 'dc02', 'steps': 'mugen:zelgadis',
+                                           '*': 'estimate'})))
+    c = character(m)
+    assert c.sources['source'] == 1 and c.sources['mugen'] == 1 and c.sources['estimate'] > 50
+
+    # Malformed systems.json.
+    bad_systems = [
+        ('no kof2002', lambda: {'systems': {'samsho5sp': SYSTEMS['systems']['samsho5sp']}}),
+        ('a bad name', lambda: {'systems': {'KOF': SYSTEMS['systems']['kof2002']}}),
+        ('life 0', lambda: with_system(['kof2002', 'life'], 0)),
+        ('no damage_scale', lambda: with_system(['kof2002', 'damage_scale'], None)),
+        ('damage_scale 50', lambda: with_system(['kof2002', 'damage_scale'], 50)),
+        ('walk 65', lambda: with_system(['kof2002', 'walk'], 65)),
+        ('a jump past MAX_HEIGHT', lambda: with_system(['kof2002', 'jump', 'vy'], -200)),
+        ('gravity 0', lambda: with_system(['kof2002', 'jump', 'gravity'], 0)),
+        ('a jump without prejump', lambda: with_system(['kof2002', 'jump', 'prejump'], None)),
+        ('an unknown key', lambda: with_system(['kof2002', 'speed'], 3)),
+        ('an unknown class', lambda: with_system(['kof2002', 'stun_table', 'grab'], [1, 1])),
+        ('a stun pair of one', lambda: with_system(['kof2002', 'stun_table', 'light'], [11])),
+        ('hitstop 31', lambda: with_system(['kof2002', 'hitstop_table', 'light'], 31)),
+        ('quarter window 33', lambda: with_system(['kof2002', 'input', 'quarter'], 33)),
+        ('no buffer', lambda: with_system(['kof2002', 'input', 'buffer'], None)),
+        ('push 1', lambda: with_system(['kof2002', 'push_distance'], 1)),
+        ('height tall', lambda: with_system(['kof2002', 'height'], 'tall')),
+        ('a bad hop', lambda: with_system(['kof2002', 'hop'], {'vy': 3})),
+        ('nine systems', lambda: {'systems': {f's{i}': SYSTEMS['systems']['kof2002']
+                                              for i in range(9)} | {
+                                                  'kof2002': SYSTEMS['systems']['kof2002']}}),
+        ('an assignment to an unknown system', lambda: {**SYSTEMS, 'characters': {'terry': 'x'}}),
+    ]
+    for what, data in bad_systems:
+        refused(f'systems.json with {what}', lambda d=data: systems(d()))
+    refused('no systems.json', lambda: pack.Systems(pathlib.Path('/nonexistent/systems.json')))
+
+    # Malformed stats, system choice, class, src and damage.
+    def stats(v):
+        return with_terry(lambda c, _: c.update(stats=v))
+
+    bad_terry = [
+        ('an unknown stat', stats({'speed': 3})),
+        ('walk 65', stats({'walk': 65})),
+        ('defense 99', stats({'defense': 99})),
+        ('weight 5000', stats({'weight': 5000})),
+        ('height tall', stats({'height': 'tall'})),
+        ('a jump key typo', stats({'jump': {'vz': 1}})),
+        ('prejump and jump.prejump differing', stats({'prejump': 2, 'jump': {'prejump': 3}})),
+        ('a jump past MAX_HEIGHT', stats({'jump': {'vy': -120, 'gravity': 1}})),
+        ('a bad stats src', stats({'src': {'walk': 'guess'}})),
+        ('an unknown system', with_terry(lambda c, _: c.update(system='sf2'))),
+        ('an unknown class', with_terry(lambda c, _: c['moves']['stand_lp'].update(
+            {'class': 'medium'}))),
+        ('a class without a hitstop default', with_terry(lambda c, _: (
+            c['moves']['stand_lp'].update({'class': 'command'}),
+            c['moves']['stand_lp'].pop('hitstop')))),
+        ('no class and no hitstun', with_terry(lambda c, _: c['moves']['stand_lp'].pop(
+            'hitstun'))),
+        ('damage 1501', with_terry(lambda c, _: c['moves']['stand_lp'].update(damage=1501))),
+        ('a src naming an unknown field', with_terry(lambda c, _: c['moves']['stand_lp'].update(
+            src={'colour': 'estimate'}))),
+        ('a src naming an unknown source', with_terry(lambda c, _: c['moves']['stand_lp'].update(
+            src={'damage': 'dc02'}))),
+        ('a projectile class typo', with_terry(lambda c, _: c['projectiles']['power_wave'].update(
+            {'class': 'specail'}))),
+        ('a source without url', with_terry(lambda c, mm: mm.update(sources={'x': {}}))),
+    ]
+    for what, m in bad_terry:
+        refused(f'terry with {what}', lambda mm=m: character(mm))
+    # A character's own system may not contradict the assignment.
+    refused('haohmaru as kof2002 against the assignment', lambda: real.of('haohmaru', 'kof2002'))
+    assert real.of('haohmaru', None)['name'] == 'samsho5sp'
+    assert real.of('haohmaru', 'samsho5sp')['name'] == 'samsho5sp'
+
+    # Conversion: same loaded values, idempotent, formatting kept.
+    text = UNCONVERTED.read_text()
+    lines = []
+    new = convert.convert(text, TERRY, real, False, lines.append)
+    after = json.loads(new)
+    assert convert.loaded(TERRY, real) == convert.loaded(after, real)
+    assert convert.convert(new, after, real, False, lambda _: None) == new
+    lp = after['characters']['terry']['moves']['stand_lp']
+    assert lp['class'] == 'light' and 'hitstop' not in lp and lp['hitstun'] == 12 and \
+        lp['src'] == {'*': 'estimate'} and after['characters']['terry']['system'] == 'kof2002'
+    assert len(new.splitlines()) == len(text.splitlines()) + 1
+    # --adopt-class drops the normals' stun values in favour of the class.
+    adopted = json.loads(convert.convert(text, TERRY, real, True, lambda _: None))
+    lp = adopted['characters']['terry']['moves']['stand_lp']
+    assert not {'hitstun', 'blockstun', 'hitstop'} & set(lp)
+    assert character(adopted).hits[0].resolved[2:5] == [11, 9, 6]
+    # The real manifests have been converted: converting again changes nothing.
+    for name in json.loads((ASSETS / 'roster.json').read_text())['manifests']:
+        name = name if isinstance(name, str) else name['manifest']
+        path = ASSETS / name
+        text = path.read_text()
+        assert convert.convert(text, json.loads(text), real, False, lambda _: None) == text, name
+    print('pack-test: systems.json, stats, class defaults, damage scale, src/sources '
+          'validation and conversion passed')
+
+
+if __name__ == '__main__':
+    main()

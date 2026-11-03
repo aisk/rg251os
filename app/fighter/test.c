@@ -5,8 +5,13 @@
  * input buffer and prejump, special and chain cancels, Power Wave flight,
  * hits, guard and clash, Burn Knuckle motion, Rising Tackle height, the
  * arcade ladder (select, opponents, loss, clear, Auto rotation, replay),
- * state round-trip and rejection, and the AI's use of every move, with
- * expected numbers taken from assets/fighter/terry.json. It also writes
+ * state round-trip and rejection, the AI's use of every move, and the
+ * stats: each character's system and resolved stats, walk speeds, jump arcs
+ * and prejump, life, defense, weight, push distance, guard range, input
+ * windows and the samsho5sp damage scale changing the fight by exact
+ * amounts. Expected numbers come from assets/fighter/terry.json,
+ * haohmaru.json and systems.json. Fighter x is in quarter pixels (QX). It
+ * also writes
  * preview PPMs of the select, Power Wave (boxes on), result and clear
  * screens. test-render.c adds the pack decoder, box and pixel-exact
  * renderer checks. ASan/UBSan run this without a window or device. */
@@ -104,14 +109,17 @@ static void save(void *buf, size_t n) { assert(retro_serialize(buf, n)); }
 static struct assets pack;
 static unsigned terry;
 enum { POWER_WAVE = MOVES, BURN_KNUCKLE, RISING_TACKLE };
-static void duel(struct fight_state *s, int x0, int x1)
+static unsigned haohmaru;
+/* Characters c0 and c1 at pixel columns x0 and x1. */
+static void match(struct fight_state *s, unsigned c0, unsigned c1, int x0, int x1)
 {
 	fight_reset(s, 0);
-	fight_start(s, terry, terry);
+	fight_start(s, &pack, c0, c1);
 	s->stage = 1;
-	s->p[0].x = x0;
-	s->p[1].x = x1;
+	s->p[0].x = QX(x0);
+	s->p[1].x = QX(x1);
 }
+static void duel(struct fight_state *s, int x0, int x1) { match(s, terry, terry, x0, x1); }
 static void step2(struct fight_state *s, uint32_t k0, uint32_t k1)
 {
 	fight_step(s, &pack, k0, k1, 1);
@@ -218,30 +226,33 @@ static void hit_timing(void)
 			assert(a->elapsed == 3);
 		if (n >= 4 && n < 22)
 			assert(in_action(&s, 1, HURT) && !d->block);
-		assert(d->x == (n <= 10 ? 260 : n <= 17 ? slide[n - 11] : 274));
-		assert(a->x == 200 && s.guards == 0 && s.hits == (n >= 4));
+		assert(d->x == QX(n <= 10 ? 260 : n <= 17 ? slide[n - 11] : 274));
+		assert(a->x == QX(200) && s.guards == 0 && s.hits == (n >= 4));
 	}
 }
-/* Blocked stand LP: stance from call 2, blockstun 10 ends on call 20 (+1),
- * block pushback 18 over calls 11..18. */
+/* Blocked stand LP: P1 walks back walk_back (6 quarter pixels) on call 1
+ * before the attack threatens it, stance from call 2, blockstun 10 ends on
+ * call 20 (+1), block pushback 18 px over calls 11..18 (offsets from 260). */
 static void block_timing(void)
 {
-	static const int slide[8] = {267, 271, 274, 276, 277, 278, 279, 280};
+	static const int slide[8] = {5, 9, 12, 14, 15, 16, 17, 18};
 	struct fight_state s;
 	duel(&s, 200, 260);
+	int back = pack.chr[terry].stats.walk_back;
+	assert(back == 6);
 	for (int n = 1; n <= 19; n++) {
 		run(&s, n, K(Y), 0, K(RIGHT));
 		const struct fighter *d = &s.p[1];
 		assert(d->hp == 1000 && s.guards == (n >= 4) && s.hits == (n >= 4));
 		assert(d->block == (n == 1 ? 0 : n < 4 ? 2 : 1));
 		assert(d->stun == (n < 4 ? 0 : n <= 10 ? 10 : 20 - n));
-		assert(d->x == (n == 1 || n <= 10 ? 262 : n <= 18 ? slide[n - 11] : 280));
+		assert(d->x == QX(260) + back + QX(n <= 10 ? 0 : n <= 18 ? slide[n - 11] : 18));
 		if (n >= 2)
 			assert(in_action(&s, 1, GUARD));
 		assert((s.p[0].move != 0) == (n < 19));
 	}
 	run(&s, 20, 0, 0, K(RIGHT));
-	assert(!s.p[1].stun && !s.p[1].block && s.p[1].x == 282);
+	assert(!s.p[1].stun && !s.p[1].block && s.p[1].x == QX(278) + 2 * back);
 }
 /* In the corner the defender cannot slide: the attacker moves back the
  * same 14 pixels on the same ticks. */
@@ -252,14 +263,15 @@ static void corner(void)
 	duel(&s, 370, WALL_RIGHT);
 	for (int n = 1; n <= 20; n++) {
 		run(&s, n, K(Y), 0, 0);
-		assert(s.p[1].x == WALL_RIGHT && s.p[1].hp == (n < 4 ? 1000 : 970));
-		assert(s.p[0].x == (n <= 10 ? 370 : n <= 17 ? slide[n - 11] : 356));
+		assert(s.p[1].x == QX(WALL_RIGHT) && s.p[1].hp == (n < 4 ? 1000 : 970));
+		assert(s.p[0].x == QX(n <= 10 ? 370 : n <= 17 ? slide[n - 11] : 356));
 	}
 	/* Mirrored: P1 attacks P0 pinned at the left wall. */
 	duel(&s, WALL_LEFT, WALL_LEFT + 60);
 	for (int n = 1; n <= 20; n++)
 		step2(&s, 0, n == 1 ? K(Y) : 0);
-	assert(s.p[0].x == WALL_LEFT && s.p[1].x == WALL_LEFT + 60 + 14 && s.p[0].hp == 970);
+	assert(s.p[0].x == QX(WALL_LEFT) && s.p[1].x == QX(WALL_LEFT + 60 + 14) &&
+	       s.p[0].hp == 970);
 }
 /* High, low and overhead against standing and crouching guard. */
 static void guard_types(void)
@@ -279,7 +291,7 @@ static void guard_types(void)
 	}
 	run(&s, 5, K(B), K(DOWN), K(DOWN) | K(RIGHT));
 	assert(s.guards == 1 && s.p[1].stun == 11 && s.p[1].block == 1 &&
-	       in_action(&s, 1, CROUCH_GUARD) && s.p[1].x == 260);
+	       in_action(&s, 1, CROUCH_GUARD) && s.p[1].x == QX(260));
 	/* Crouch LP (high, startup 2) is blocked crouching on call 3. */
 	duel(&s, 200, 250);
 	for (int n = 1; n <= 3; n++)
@@ -337,59 +349,84 @@ static void set_history(struct fighter *p, const char *dirs)
 static void commands(void)
 {
 	struct fighter p;
+	struct stats windows = pack.chr[terry].stats;
+	const struct stats *st = &windows;
+	assert(st->quarter == 15 && st->dragon == 20 && st->charge == 30 && st->grace == 10 &&
+	       st->release == 4);
 	memset(&p, 0, sizeof(p));
 	p.face = 1;
 	/* 236 with the 2 at most 14 ticks before the newest direction. */
 	set_history(&p, "236");
-	assert(fight_motion(&p, MOTION_236) && !fight_motion(&p, MOTION_214) &&
-	       !fight_motion(&p, MOTION_623));
+	assert(fight_motion(&p, st, MOTION_236) && !fight_motion(&p, st, MOTION_214) &&
+	       !fight_motion(&p, st, MOTION_623));
 	set_history(&p, "2555555555555" "36");
-	assert(fight_motion(&p, MOTION_236));
+	assert(fight_motion(&p, st, MOTION_236));
 	set_history(&p, "25555555555555" "36");
-	assert(!fight_motion(&p, MOTION_236));
+	assert(!fight_motion(&p, st, MOTION_236));
 	/* In-between directions are allowed; order is not optional. */
 	set_history(&p, "21236");
-	assert(fight_motion(&p, MOTION_236));
+	assert(fight_motion(&p, st, MOTION_236));
 	set_history(&p, "326");
-	assert(!fight_motion(&p, MOTION_236));
+	assert(!fight_motion(&p, st, MOTION_236));
 	/* Directions follow facing: 214 for a left-facing fighter is D, DR, R. */
 	set_history(&p, "214");
-	assert(fight_motion(&p, MOTION_214));
+	assert(fight_motion(&p, st, MOTION_214));
 	p.face = -1;
-	assert(fight_motion(&p, MOTION_236) && !fight_motion(&p, MOTION_214));
+	assert(fight_motion(&p, st, MOTION_236) && !fight_motion(&p, st, MOTION_214));
 	p.face = 1;
 	/* 623 within 20 ticks; it is not a 236. */
 	set_history(&p, "6222223");
-	assert(fight_motion(&p, MOTION_623) && !fight_motion(&p, MOTION_236));
+	assert(fight_motion(&p, st, MOTION_623) && !fight_motion(&p, st, MOTION_236));
 	set_history(&p, "6555555555555555555" "23");
-	assert(!fight_motion(&p, MOTION_623));
+	assert(!fight_motion(&p, st, MOTION_623));
 	set_history(&p, "655555555555555555" "23");
-	assert(fight_motion(&p, MOTION_623));
+	assert(fight_motion(&p, st, MOTION_623));
 	/* Charges: back held 30 (byte 0) or released within the grace (byte 1). */
 	set_history(&p, "6");
-	p.charge = CHARGE_TICKS - 1;
-	assert(!fight_motion(&p, CHARGE_46));
-	p.charge = CHARGE_TICKS;
-	assert(fight_motion(&p, CHARGE_46) && !fight_motion(&p, CHARGE_28));
+	p.charge = 29;
+	assert(!fight_motion(&p, st, CHARGE_46));
+	p.charge = 30;
+	assert(fight_motion(&p, st, CHARGE_46) && !fight_motion(&p, st, CHARGE_28));
 	p.charge = 1u << 8;
-	assert(fight_motion(&p, CHARGE_46));
+	assert(fight_motion(&p, st, CHARGE_46));
 	/* The release direction must be among the last 4 directions. */
 	set_history(&p, "65555");
-	assert(!fight_motion(&p, CHARGE_46));
+	assert(!fight_motion(&p, st, CHARGE_46));
 	set_history(&p, "6555");
-	assert(fight_motion(&p, CHARGE_46));
+	assert(fight_motion(&p, st, CHARGE_46));
 	set_history(&p, "9");
-	p.charge = (uint32_t)CHARGE_TICKS << 16;
-	assert(fight_motion(&p, CHARGE_28) && !fight_motion(&p, CHARGE_46));
+	p.charge = 30u << 16;
+	assert(fight_motion(&p, st, CHARGE_28) && !fight_motion(&p, st, CHARGE_46));
 	set_history(&p, "7");
-	assert(fight_motion(&p, CHARGE_28));
+	assert(fight_motion(&p, st, CHARGE_28));
+	/* The windows are the fighter's: with the 2 nine ticks before the 6 a
+	 * quarter window of 9 misses it and 10 sees it, a 40-tick charge needs
+	 * 40, a release window of 2 misses a forward 2 ticks back. */
+	set_history(&p, "25555555" "36");
+	windows.quarter = 9;
+	assert(!fight_motion(&p, st, MOTION_236));
+	windows.quarter = 10;
+	assert(fight_motion(&p, st, MOTION_236));
+	set_history(&p, "6");
+	p.charge = 30;
+	windows.charge = 40;
+	assert(!fight_motion(&p, st, CHARGE_46));
+	p.charge = 40;
+	assert(fight_motion(&p, st, CHARGE_46));
+	set_history(&p, "655");
+	windows.release = 2;
+	assert(!fight_motion(&p, st, CHARGE_46));
+	windows.release = 3;
+	assert(fight_motion(&p, st, CHARGE_46));
 }
-/* Presses in the last BUFFER_TICKS (4) recovery ticks come out on the
- * first free tick; earlier ones are dropped. A whiffed stand LP pressed on
- * call 1 ends on call 13. */
+/* Presses in the last buffer (4) recovery ticks come out on the first free
+ * tick; earlier ones are dropped. A whiffed stand LP pressed on call 1 ends
+ * on call 13. */
 static void buffer(void)
 {
 	struct fight_state s;
+	assert(pack.chr[terry].stats.buffer == 4 && pack.chr[terry].stats.jump.prejump == 3 &&
+	       pack.chr[terry].stats.jump.vy == -48 && pack.chr[terry].stats.jump.gravity == 3);
 	for (int press = 7; press <= 10; press++) {
 		duel(&s, 100, 400);
 		for (int n = 1; n <= 16; n++) {
@@ -482,7 +519,7 @@ static void projectile(void)
 			/* P1 holds back once the wave is within guard range. */
 			step2(&s, motion(MOTION_236, n, 5, 1, K(Y)), guard && n >= 40 ? K(RIGHT) : 0);
 			const struct shot *sh = shot_of(&s, 0);
-			assert(s.p[0].x == 100);
+			assert(s.p[0].x == QX(100));
 			if (n >= 5 && n < 46)
 				assert(s.p[0].move == POWER_WAVE + 1 && s.p[0].elapsed == n - 5);
 			if (n < 22)
@@ -498,7 +535,7 @@ static void projectile(void)
 			}
 		}
 		/* Pushback 20 / 24 slides P1 after the hitstop; P0 stays. */
-		assert(s.p[1].x > 300 && s.p[0].x == 100);
+		assert(s.p[1].x > QX(300) && s.p[0].x == QX(100));
 	}
 	/* One projectile at a time: a second 236+Y is a stand LP. */
 	duel(&s, 100, 400);
@@ -537,16 +574,16 @@ static void burn_knuckle(void)
 	for (int n = 1; n <= 45; n++) {
 		step2(&s, motion(MOTION_214, n, 5, 1, K(Y)), 0);
 		if (n >= 5 && n < 45)
-			assert(s.p[0].move == BURN_KNUCKLE + 1 && s.p[0].x == x[n - 5]);
+			assert(s.p[0].move == BURN_KNUCKLE + 1 && s.p[0].x == QX(x[n - 5]));
 	}
-	assert(!s.p[0].move && s.p[0].x == 185);
+	assert(!s.p[0].move && s.p[0].x == QX(185));
 	/* P1 at 200 facing left: hurtbox from 200 - 30 = 170; the fist box
 	 * [36, -84, 28, 24] at x + 36 .. x + 64 reaches it once x + 64 > 170. */
 	duel(&s, 100, 200);
 	for (int n = 1; n <= 18; n++)
 		step2(&s, motion(MOTION_214, n, 5, 1, K(Y)), 0);
 	assert(s.p[1].hp == 910 && s.p[1].stun == 22 && s.p[0].freeze == 10 &&
-	       s.p[0].elapsed == 13 && s.p[0].x == 114);
+	       s.p[0].elapsed == 13 && s.p[0].x == QX(114));
 }
 /* Rising Tackle: down held for calls 1..30 charges 30 ticks, up+Y on call
  * 31 starts it. Heights after elapsed 5, 8, 23, 26, 29, 35, 42 follow the
@@ -582,8 +619,8 @@ static void rising_tackle(void)
 static void win_round(struct fight_state *s, int winner)
 {
 	/* Stand LP into a 10 hp loser: KO on call 4, round over after 180. */
-	s->p[0].x = 200;
-	s->p[1].x = 260;
+	s->p[0].x = QX(200);
+	s->p[1].x = QX(260);
 	s->p[1 - winner].hp = 10;
 	for (int n = 1; n <= 184; n++)
 		step2(s, winner == 0 && n == 1 ? K(Y) : 0, winner == 1 && n == 1 ? K(Y) : 0);
@@ -714,16 +751,17 @@ static void state_words(void)
 		uint32_t value;
 	} cases[] = {
 	    {0, 1, W_MOVE, MOVES + 4},	   {0, 1, W_MOVE, 1},	       {0, 1, W_FREEZE, MAX_HITSTOP + 1},
-	    {0, 1, W_STUN, MAX_STUN + 1},  {0, 1, W_SLIDE, MAX_PUSH + 1}, {0, 1, W_SLIDE, (uint32_t)-MAX_PUSH - 1},
-	    {0, 1, W_KEYS, 0x10000},	   {0, 1, W_CROUCH, 2},	       {0, 1, W_BLOCK, 3},
+	    {0, 1, W_STUN, MAX_STUN + 1},  {0, 1, W_SLIDE, (uint32_t)-MAX_SLIDE - 1},
+	    {0, 1, W_SLIDE, MAX_SLIDE + 1},  {0, 1, W_KEYS, 0x10000},	   {0, 1, W_CROUCH, 2},	       {0, 1, W_BLOCK, 3},
 	    {0, 0, W_ELAPSED, 100},	   {0, 0, W_HIT, 2},	       {0, 0, W_STUN, 5},
 	    {0, 0, W_BLOCK, 1},	   {0, 1, W_HIT, 1},	       {0, 1, W_ELAPSED, 256},
-	    {0, 0, W_X, WALL_LEFT - 1},	   {0, 0, W_FACE, 0},	       {0, 1, W_HP, 1001},
+	    {0, 0, W_X, QX(WALL_LEFT) - 1}, {0, 0, W_FACE, 0},	       {0, 1, W_HP, 1001},
+	    {0, 1, W_X, QX(WALL_RIGHT) + 1},
 	    {0, 0, W_WALK, 2},		   {0, 1, W_VY, 61},	       {0, 0, W_Y, (uint32_t)-30},
-	    {0, 0, W_VY, 3},		   {0, 1, W_CORNER, 1},	       {0, 1, W_SQUAT, JUMP_SQUAT + 1},
-	    {0, 0, W_SQUAT, 1},	   {0, 0, W_BUFFER, MOVES + 4}, {0, 0, W_AGE, BUFFER_TICKS + 1},
+	    {0, 0, W_VY, 3},		   {0, 1, W_CORNER, 1},	       {0, 1, W_SQUAT, 3 + 1},
+	    {0, 0, W_SQUAT, 1},	   {0, 0, W_BUFFER, MOVES + 4}, {0, 0, W_AGE, 4 + 1},
 	    {0, 1, W_AGE, 1},		   {0, 1, W_PLAN, STAND_HK + 1}, {0, 1, W_PLAN, MOVES + 4},
-	    {0, 1, W_PLAN_TICK, 1},	   {0, 1, W_CHARGE, (CHARGE_GRACE + 1) << 8},
+	    {0, 1, W_PLAN_TICK, 1},	   {0, 1, W_CHARGE, (10 + 1) << 8},
 	    {0, 1, W_CHARGE, 1 | 1 << 8},
 	    /* Globals. */
 	    {1, 0, G_MODE, MODES},	   {1, 0, G_TIMER, 256},	       {1, 0, G_BEATEN, 1},
@@ -769,6 +807,186 @@ static void state_words(void)
 	bad[P + 26 + W_CROUCH] = 1;
 	bad[P + 26 + W_Y] = (uint32_t)-10;
 	assert(!fight_decode(&t, &pack, bad));
+}
+/* ---- stats and systems (systems.json, terry.json, haohmaru.json) ---- */
+/* State word of P0's vy, as laid out in state_words. */
+enum { P0_VY = 19 + 2 };
+/* Walk 10 ticks forward, then 10 back. */
+static void walk_test(unsigned c, int fwd, int back)
+{
+	struct fight_state s;
+	match(&s, c, terry, 100, 400);
+	for (int n = 0; n < 10; n++)
+		step2(&s, K(RIGHT), 0);
+	assert(s.p[0].x == QX(100) + 10 * fwd && s.p[0].walk == 1);
+	for (int n = 0; n < 10; n++)
+		step2(&s, K(LEFT), 0);
+	assert(s.p[0].x == QX(100) + 10 * fwd - 10 * back && s.p[0].walk == -1);
+}
+/* Up on call 1: takeoff on call 1 + prejump, the peak and the landing call. */
+static void jump_test(unsigned c, int prejump, int peak, int airborne)
+{
+	struct fight_state s;
+	match(&s, c, terry, 100, 400);
+	int top = 0, takeoff = 0, land = 0;
+	for (int n = 1; n <= 80; n++) {
+		step2(&s, n == 1 ? K(UP) : 0, 0);
+		if (!takeoff && s.p[0].vy)
+			takeoff = n;
+		if (takeoff && !land && !s.p[0].y && !s.p[0].vy)
+			land = n;
+		top = s.p[0].y < top ? s.p[0].y : top;
+	}
+	assert(takeoff == 1 + prejump && top == -peak && land == takeoff + airborne);
+}
+/* Calls until P0's first contact (at most 40), with P1 idle. */
+static int first_hit(struct fight_state *s, uint32_t button)
+{
+	for (int n = 1; n <= 40; n++) {
+		step2(s, n == 1 ? button : 0, 0);
+		if (s->hits)
+			return n;
+	}
+	return 0;
+}
+static void stat_tests(void)
+{
+	struct fight_state s, back;
+	uint32_t w[STATE_WORDS];
+	const struct character *t = &pack.chr[terry], *h = &pack.chr[haohmaru];
+	const struct system *kof = &pack.sys[t->system], *ss = &pack.sys[h->system];
+	/* Terry has no stats of his own: kof2002's defaults. Haohmaru is
+	 * assigned samsho5sp by systems.json. */
+	assert(!strcmp(kof->name, "kof2002") && kof->damage_scale == 1000 &&
+	       !strcmp(ss->name, "samsho5sp") && ss->damage_scale == 800);
+	assert(t->stats.life == 1000 && t->stats.defense == 1000 && t->stats.weight == 1000 &&
+	       t->stats.walk == 7 && t->stats.walk_back == 6 && t->stats.height == HEIGHT_MID &&
+	       t->stats.jump.vy == -48 && t->stats.jump.gravity == 3 && t->stats.jump.vx == 8 &&
+	       t->stats.jump.vx_back == 8 && t->stats.jump.peak == 96 && t->stats.push == 46 &&
+	       t->stats.guard_range == 160);
+	assert(h->stats.life == 1000 && h->stats.walk == 6 && h->stats.walk_back == 5 &&
+	       h->stats.jump.vy == -42 && h->stats.jump.gravity == 2 && h->stats.jump.vx == 7 &&
+	       h->stats.jump.prejump == 4 && h->stats.jump.peak == 110);
+	/* Class tables: kof2002 light 11/9 hitstop 6, samsho5sp heavy 22/20/12. */
+	assert(kof->cls[CLASS_LIGHT].hitstun == 11 && kof->cls[CLASS_LIGHT].blockstun == 9 &&
+	       kof->cls[CLASS_LIGHT].hitstop == 6 && kof->cls[CLASS_LIGHT].has == 3 &&
+	       kof->cls[CLASS_COMMAND].has == 1 && !kof->cls[CLASS_THROW].has &&
+	       ss->cls[CLASS_HEAVY].hitstun == 22 && ss->cls[CLASS_HEAVY].hitstop == 12);
+	/* samsho5sp scales damage at load: stand LP 35 in haohmaru.json -> 28. */
+	assert(h->move[STAND_LP].hit.damage == 28 && t->move[STAND_LP].hit.damage == 30);
+	/* Walk: Terry 10 x 7/4 px forward and 10 x 6/4 back, Haohmaru 6 and 5. */
+	walk_test(terry, 7, 6);
+	walk_test(haohmaru, 6, 5);
+	/* Jump: Terry -48/3 after 3 prejump ticks peaks at 96 px and lands 33
+	 * ticks later; Haohmaru -42/2 after 4 peaks at 110 and lands after 43. */
+	jump_test(terry, 3, 96, 33);
+	jump_test(haohmaru, 4, 110, 43);
+	/* Damage scale in a fight: Haohmaru's stand LP takes 28 from Terry,
+	 * Terry's takes 30 from Haohmaru. */
+	match(&s, haohmaru, terry, 200, 250);
+	assert(first_hit(&s, K(Y)) && s.p[1].hp == 1000 - 28);
+	match(&s, terry, haohmaru, 200, 260);
+	assert(first_hit(&s, K(Y)) == 4 && s.p[1].hp == 1000 - 30);
+	/* The rest edits Terry's stats in the loaded pack and restores them. */
+	struct character saved = pack.chr[terry];
+	struct stats *st = &pack.chr[terry].stats;
+	/* Life 1200: both start at 1200, stand LP leaves 1170, the life bar
+	 * is 1170 * 200 / 1200 = 195 px; that state is refused once the life
+	 * is back to 1000. */
+	st->life = 1200;
+	duel(&s, 200, 260);
+	assert(s.p[0].hp == 1200 && s.p[1].hp == 1200);
+	assert(first_hit(&s, K(Y)) == 4 && s.p[1].hp == 1170);
+	static struct scene scene;
+	fight_scene(&s, &pack, &scene);
+	int bar = -1;
+	for (unsigned k = 0; k < scene.count; k++)
+		if (scene.cmd[k].op == RECT && scene.cmd[k].x == 262 && scene.cmd[k].y == 18)
+			bar = scene.cmd[k].w;
+	assert(bar == 195);
+	fight_encode(&s, w);
+	assert(fight_decode(&back, &pack, w));
+	st->life = 1000;
+	assert(!fight_decode(&back, &pack, w));
+	/* Defense: 1500 takes 45 from the 30-point stand LP, 800 takes 24. */
+	st->defense = 1500;
+	duel(&s, 200, 260);
+	assert(first_hit(&s, K(Y)) == 4 && s.p[1].hp == 955);
+	st->defense = 800;
+	duel(&s, 200, 260);
+	assert(first_hit(&s, K(Y)) == 4 && s.p[1].hp == 976);
+	st->defense = 1000;
+	/* Weight: 2000 halves stand LP's 14 px pushback, 500 doubles it. */
+	static const int weights[2][2] = {{2000, 267}, {500, 288}};
+	for (int k = 0; k < 2; k++) {
+		st->weight = (int16_t)weights[k][0];
+		duel(&s, 200, 260);
+		for (int n = 1; n <= 30; n++)
+			run(&s, n, K(Y), 0, 0);
+		assert(s.p[1].x == QX(weights[k][1]) && s.p[0].x == QX(200));
+	}
+	st->weight = 1000;
+	/* Push distance: bodies 20 px apart are pushed to 46 around the
+	 * midpoint 210 (187 and 233), with push 60 to 180 and 240. */
+	duel(&s, 200, 220);
+	step2(&s, 0, 0);
+	assert(s.p[0].x == QX(187) && s.p[1].x == QX(233));
+	st->push = 60;
+	duel(&s, 200, 220);
+	step2(&s, 0, 0);
+	assert(s.p[0].x == QX(180) && s.p[1].x == QX(240));
+	st->push = 46;
+	/* Guard range: P1 holding back 60 px from a stand LP shows the guard
+	 * stance with range 160 and just walks back with range 40. */
+	duel(&s, 200, 260);
+	step2(&s, K(Y), K(RIGHT));
+	step2(&s, 0, K(RIGHT));
+	assert(s.p[1].block == 2);
+	st->guard_range = 40;
+	duel(&s, 200, 260);
+	step2(&s, K(Y), K(RIGHT));
+	step2(&s, 0, K(RIGHT));
+	assert(!s.p[1].block && s.p[1].x == QX(260) + 2 * st->walk_back);
+	st->guard_range = 160;
+	/* Buffer 2: of presses on calls 10 and 11 during a whiffed stand LP
+	 * (ends on call 13), only the later one comes out (with buffer 4 both
+	 * do, see buffer()). */
+	st->buffer = 2;
+	for (int press = 10; press <= 11; press++) {
+		duel(&s, 100, 400);
+		for (int n = 1; n <= 13; n++)
+			step2(&s, n == 1 ? K(Y) : n == press ? K(X) : 0, 0);
+		assert(press == 11 ? s.p[0].move == STAND_HP + 1 : !s.p[0].move);
+	}
+	st->buffer = 4;
+	/* Quarter-pixel x survives a state round trip; the jump bounds are the
+	 * character's: airborne Terry accepts vy -48 .. 87 (the fall from
+	 * MAX_HEIGHT), not -49 or 88. */
+	duel(&s, 100, 400);
+	step2(&s, K(RIGHT) | K(UP), 0);
+	for (int n = 0; n < 6; n++)
+		step2(&s, 0, 0);
+	assert(s.p[0].x == QX(100) + 7 && s.p[0].y < 0 && t->stats.jump.fall == 87);
+	fight_encode(&s, w);
+	assert(fight_decode(&back, &pack, w) && !memcmp(&back, &s, sizeof(s)));
+	static const struct {
+		uint32_t vy;
+		int ok;
+	} vys[] = {{(uint32_t)-48, 1}, {(uint32_t)-49, 0}, {87, 1}, {88, 0}};
+	for (size_t k = 0; k < sizeof(vys) / sizeof(vys[0]); k++) {
+		w[P0_VY] = vys[k].vy;
+		assert(fight_decode(&back, &pack, w) == vys[k].ok);
+	}
+	/* Haohmaru's 4-tick prejump is a valid state for him, not with 3. */
+	match(&s, haohmaru, terry, 100, 400);
+	step2(&s, K(UP), 0);
+	assert(s.p[0].squat == 4);
+	fight_encode(&s, w);
+	assert(fight_decode(&back, &pack, w));
+	pack.chr[haohmaru].stats.jump.prejump = 3;
+	assert(!fight_decode(&back, &pack, w));
+	pack.chr[haohmaru].stats.jump.prejump = 4;
+	pack.chr[terry] = saved;
 }
 /* The Auto pack's AI uses every move of every character (all normals and
  * specials), throws projectiles, guards at both heights, and finishes
@@ -878,6 +1096,9 @@ static void logic_tests(const uint8_t *data, size_t len)
 	terry = 0;
 	while (strcmp(pack.chr[terry].name, "TERRY"))
 		assert(++terry < pack.characters);
+	haohmaru = 0;
+	while (strcmp(pack.chr[haohmaru].name, "HAOHMARU"))
+		assert(++haohmaru < pack.characters);
 	frame_data();
 	hit_timing();
 	block_timing();
@@ -892,6 +1113,7 @@ static void logic_tests(const uint8_t *data, size_t len)
 	rising_tackle();
 	ladder();
 	state_words();
+	stat_tests();
 	ai_coverage();
 	previews();
 }
@@ -970,6 +1192,9 @@ int main(int argc, char **argv)
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
 	copy[7] = '3'; /* FGSTATE3, before buffer, specials, projectiles, ladder */
+	assert(!retro_unserialize(copy, n));
+	memcpy(copy, end, n);
+	copy[7] = '4'; /* FGSTATE4, pixel x and fixed stats */
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
 	memset(copy + 16 + 8 * 4, 0xff, 4);
@@ -1069,6 +1294,7 @@ int main(int argc, char **argv)
 	     "RGB565/XRGB8888, audio, ports, replay, pause, state validation, frame "
 	     "data, hit/block/hitstop ticks, pushback and corner, guard heights, "
 	     "trades, commands, buffer, prejump, cancels, projectiles and clash, "
-	     "specials, ladder, AI coverage and stress cycle passed");
+	     "specials, ladder, systems and stats, AI coverage and stress cycle "
+	     "passed");
 	return 0;
 }
