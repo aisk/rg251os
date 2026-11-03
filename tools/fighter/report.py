@@ -25,7 +25,7 @@ def main():
         parser.error(f'{path}: no fighter timing windows found')
     print(f'Log: {path}')
     print(f'10-minute completion markers: {text.count("fight: benchmark complete:")}')
-    print('Scene extra sprites: 0=0, 1=8, 2=24, 3=48 (128x160 alpha/add)')
+    print('Scene extra sprites: 0=two fighters only, 1=+8, 2=+24, 3=+48 effect sprites (alpha/add)')
     print('scene part    runs   avg_ms  max_window_p99_ms  max_ms')
     for (scene, part), samples in sorted(rows.items()):
         runs = sum(row[4] for row in samples)

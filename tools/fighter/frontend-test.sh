@@ -20,11 +20,12 @@ cp "$f" "$data/log/first.txt"
 grep -q 'starting .*Fighter-POC.fight with fighter' "$f"
 grep -q 'fight: pacing one tick per vblank' "$f"
 grep -q 'frame 480x320 pitch 480' "$f"
-grep -q 'state: wrote 184 bytes to Fighter-POC.fight.fighter.state' "$f"
+grep -q 'fight: FIGHTP02 package .* resident RGB565 KiB p1' "$f"
+grep -q 'state: wrote 216 bytes to Fighter-POC.fight.fighter.state' "$f"
 grep -q 'grid off .*color off' "$f"
 ! test -e "$data/saves/Fighter-POC.fight.sav"
 FE_SLEEP_AT=1500 run "$rom" 1800
-grep -q 'state: loaded 184 bytes from Fighter-POC.fight.fighter.state' "$f"
+grep -q 'state: loaded 216 bytes from Fighter-POC.fight.fighter.state' "$f"
 grep -q 'sleep #1: awake (light sleep)' "$f"
 grep -q 'underruns after warmup 0' "$f"
 FE_RESET_AT=60 run "$rom" 120
@@ -34,7 +35,7 @@ FE_END=poweroff run "$rom" 120
 grep -q '^core=fighter$' "$data/config/resume.txt"
 FE_END=quit run resume 120
 grep -q 'resume: found fighters/Fighter-POC.fight with fighter' "$f"
-grep -q 'state: loaded 184 bytes from Fighter-POC.fight.fighter.state' "$f"
+grep -q 'state: loaded 216 bytes from Fighter-POC.fight.fighter.state' "$f"
 grep -q 'headless: quit to ROM list' "$f"
 grep -q 'roms: folder /fighters: 2 ROMs, 0 folders' "$f"
 test ! -e "$data/config/resume.txt"
@@ -49,7 +50,7 @@ if run "$data/roms/fighters/Bad.fight" 1; then
     echo 'fighter frontend test: malformed content was accepted' >&2
     exit 1
 fi
-grep -q 'fight: invalid POC package' "$f"
+grep -q 'fight: invalid FIGHTP02 package' "$f"
 grep -q 'headless: .*Bad.fight did not start' "$f"
 test ! -e "$data/saves/Bad.fight.fighter.state"
 echo 'fighter frontend test: load, state, sleep, restart, boot resume, list, four scenes and bad content passed'

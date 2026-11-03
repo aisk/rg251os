@@ -1,8 +1,10 @@
 /* Native libretro callback harness: malformed content, deterministic state,
- * combat, clipping, output formats, audio and a complete automated scene cycle.
- * ASan/UBSan run this without a window or device; no host speed claims. */
+ * combat and animation mapping, output formats, audio and a complete
+ * automated scene cycle; test-render.c adds the pack decoder and pixel-exact
+ * renderer checks. ASan/UBSan run this without a window or device. */
 #include "fighter.h"
 #include "libretro.h"
+#include "test-render.h"
 #include <assert.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -107,6 +109,7 @@ int main(int argc, char **argv)
 	       av.timing.fps == 60 && av.timing.sample_rate == 48000);
 	size_t len;
 	uint8_t *data = read_all(argv[1], &len);
+	render_tests(data, len);
 	struct retro_game_info g = {argv[1], data, len, NULL};
 	assert(!retro_load_game(NULL));
 	for (size_t i = 0; i < 32; i++) {
@@ -150,11 +153,18 @@ int main(int argc, char **argv)
 		retro_run();
 	save(copy, n);
 	assert(!memcmp(end, copy, n) && picture == image_hash && sound == sound_hash);
+	assert(n == 16 + STATE_WORDS * 4);
 	memcpy(copy, end, n);
 	copy[8] ^= 1;
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
+	copy[7] = '1'; /* FGSTATE1 from the fixed-sprite POC */
+	assert(!retro_unserialize(copy, n));
+	memcpy(copy, end, n);
 	memset(copy + 16 + 8 * 4, 0xff, 4);
+	assert(!retro_unserialize(copy, n));
+	memcpy(copy, end, n);
+	copy[16 + 39 * 4] = 1; /* reserved words stay zero */
 	assert(!retro_unserialize(copy, n));
 	assert(!retro_unserialize(end, n - 1));
 	save(copy, n);
@@ -244,14 +254,33 @@ int main(int argc, char **argv)
 	uint32_t words[STATE_WORDS];
 	fight_encode(&s, words);
 	assert(fight_decode(&s, words));
+	/* Walking direction is relative to facing; holding back near a swing
+	 * shows the guard stance; a guarded hit keeps the guard pose. */
+	fight_reset(&s, 0);
+	fight_step(&s, 1u << RETRO_DEVICE_ID_JOYPAD_RIGHT, 0, 1);
+	assert(s.p[0].walk == 1 && s.p[0].x == 142);
+	fight_step(&s, 1u << RETRO_DEVICE_ID_JOYPAD_LEFT, 0, 1);
+	assert(s.p[0].walk == -1);
+	fight_reset(&s, 0);
+	s.p[0].x = 350;
+	s.p[1].x = 430;
+	fight_step(&s, 1u << RETRO_DEVICE_ID_JOYPAD_A, 1u << RETRO_DEVICE_ID_JOYPAD_RIGHT, 1);
+	assert(s.p[1].walk == -1 && s.p[1].block == 2);
+	for (int i = 0; i < 7 && !s.guards; i++)
+		fight_step(&s, 0, 1u << RETRO_DEVICE_ID_JOYPAD_RIGHT, 1);
+	assert(s.guards == 1 && s.p[1].block == 1 && s.p[1].stun == 8);
+	fight_encode(&s, words);
+	assert(fight_decode(&s, words));
+	words[8 + 10 + 9] = 2; /* guard stance during guard stun is impossible */
+	assert(!fight_decode(&s, words));
 	retro_unload_game();
 	retro_deinit();
 	free(start);
 	free(end);
 	free(copy);
 	free(data);
-	puts("fighter-test: content, RGB565/XRGB8888, audio, ports, replay, pause, "
-	     "state validation, simultaneous hits, guard, jumps and stress "
-	     "cycle passed");
+	puts("fighter-test: pack decoder, pixel-exact renderer, content, "
+	     "RGB565/XRGB8888, audio, ports, replay, pause, state validation, "
+	     "simultaneous hits, guard, walk, jumps and stress cycle passed");
 	return 0;
 }

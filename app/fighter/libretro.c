@@ -1,6 +1,7 @@
-/* Standard libretro POC core: content, input, deterministic saves, audio and
- * software frames. Timing below measures work only; the frontend owns pacing.
- * Reports each automatic scene every 600 runs, also when debug logging is off. */
+/* Standard libretro fighter core: FIGHTP02 content, input, deterministic
+ * FGSTATE2 saves, audio and software frames. Timing below measures work only;
+ * the frontend owns pacing. Reports each scene (0 = two fighters, 1-3 = +8,
+ * +24, +48 alpha/additive effects) every 600 runs, also with debug off. */
 #include "libretro.h"
 #include "fighter.h"
 #include <stdbool.h>
@@ -97,8 +98,8 @@ unsigned retro_api_version(void) { return RETRO_API_VERSION; }
 void retro_get_system_info(struct retro_system_info *i)
 {
 	memset(i, 0, sizeof(*i));
-	i->library_name = "Fighter POC";
-	i->library_version = "0.1";
+	i->library_name = "Fighter P0";
+	i->library_version = "0.2";
 	i->valid_extensions = "fight";
 	i->block_extract = true;
 }
@@ -121,8 +122,9 @@ bool retro_load_game(const struct retro_game_info *g)
 	loaded = 0;
 	if (!g || !fight_assets(&assets, g->data, g->size, &automatic)) {
 		if (logger)
-			logger(RETRO_LOG_ERROR, "fight: invalid POC package (magic, "
-						"dimensions, length or hash)\n");
+			logger(RETRO_LOG_ERROR,
+			       "fight: invalid FIGHTP02 package (magic, length, hash, "
+			       "limits or frame data)\n");
 		return false;
 	}
 	enum retro_pixel_format f = RETRO_PIXEL_FORMAT_RGB565;
@@ -139,14 +141,18 @@ bool retro_load_game(const struct retro_game_info *g)
 	scene_mode = 0;
 	loaded = 1;
 	benchmark_runs = 0;
-	if (logger)
+	if (logger) {
+		unsigned effect = assets.pixels - assets.chr[0].pixels - assets.chr[1].pixels;
 		logger(RETRO_LOG_INFO,
-		       "fight: POC v1 package %08x, sprites %dx%d x%d, "
-		       "%zu bytes decoded, 480x320 60Hz 48kHz, software %s, %s; L "
-		       "boxes R stress START pause\n",
-		       assets.hash, SW, SH, SPRITES, sizeof(assets),
+		       "fight: FIGHTP02 package %08x, %u images, %u spans, resident "
+		       "RGB565 KiB p1 %u p2 %u effects %u (%u effects), 480x320 "
+		       "60Hz 48kHz, software %s, %s; L boxes R stress START pause\n",
+		       assets.hash, assets.images, assets.spans,
+		       assets.chr[0].pixels * 2 / 1024, assets.chr[1].pixels * 2 / 1024,
+		       effect * 2 / 1024, assets.effects,
 		       format32 ? "XRGB8888" : "RGB565",
 		       automatic ? "automatic 4-scene cycle" : "player vs CPU");
+	}
 	return true;
 }
 void retro_unload_game(void)
@@ -190,7 +196,7 @@ void retro_run(void)
 		report();
 		scene_mode = state.stress;
 	}
-	fight_scene(&state, &scene);
+	fight_scene(&state, &assets, &scene);
 	fight_render(&assets, &scene, fb);
 	if (format32)
 		for (int i = 0; i < FW * FH; i++) {
@@ -241,7 +247,7 @@ bool retro_serialize(void *data, size_t size)
 	uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	fight_encode(&state, w);
-	memcpy(p, "FGSTATE1", 8);
+	memcpy(p, "FGSTATE2", 8);
 	put32(p + 8, assets.hash);
 	put32(p + 12, state.automatic);
 	for (int i = 0; i < STATE_WORDS; i++)
@@ -253,7 +259,7 @@ bool retro_unserialize(const void *data, size_t size)
 	const uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	if (!loaded || !p || size != retro_serialize_size() ||
-	    memcmp(p, "FGSTATE1", 8) || get32(p + 8) != assets.hash ||
+	    memcmp(p, "FGSTATE2", 8) || get32(p + 8) != assets.hash ||
 	    get32(p + 12) != state.automatic)
 		return false;
 	for (int i = 0; i < STATE_WORDS; i++)

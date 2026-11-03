@@ -1,6 +1,7 @@
 # SD card image assembled with genimage from the kernel, dtb, bootloader
 # blob and rootfs. The GBA partition is filled from the genimage root path,
-# which holds the POC .fight content in roms/ and an empty saves/ directory (the frontend creates
+# which holds the two .fight packs (KOF 2002 Terry from assets/fighter, see
+# mk/fighter.mk) in roms/ and an empty saves/ directory (the frontend creates
 # the rest on first boot). Needs genimage, mtools and dosfstools on the
 # host.
 

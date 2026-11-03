@@ -1,5 +1,7 @@
-# Portable fighting POC: static renamed libretro core for the handheld,
+# Portable fighter (P0): static renamed libretro core for the handheld,
 # native shared libretro core and callback harness for desktop verification.
+# Content packs are built from the committed sprite sheet and manifest in
+# assets/fighter; POC is player vs CPU, Auto runs the four timing scenes.
 FIGHTER_DIR := $(TOP)/app/fighter
 FIGHTER_BUILD := $(BUILD)/fighter
 FIGHTER_INCLUDE := $(EXTERNAL)/mgba/src/platform/libretro
@@ -19,23 +21,26 @@ $(FIGHTER_BUILD)/%.o: $(FIGHTER_DIR)/%.c $(FIGHTER_DIR)/fighter.h $(TOP)/mk/figh
 $(FIGHTER_LIB): $(FIGHTER_OBJS) $(TOP)/mk/core-archive.sh
 	$(TOP)/mk/core-archive.sh fighter $@ $(FIGHTER_OBJS)
 
-$(FIGHTER_BUILD)/Fighter-POC.fight: $(TOP)/tools/fighter/pack.py
-	python3 $< $@
-$(FIGHTER_BUILD)/Fighter-Auto.fight: $(TOP)/tools/fighter/pack.py
-	python3 $< $@ --auto
+FIGHTER_ASSETS := $(TOP)/assets/fighter/terry.json $(TOP)/assets/fighter/KOF02_Terry.png
+$(FIGHTER_BUILD)/Fighter-POC.fight: $(TOP)/tools/fighter/pack.py $(FIGHTER_ASSETS)
+	python3 $< build $(TOP)/assets/fighter/terry.json $@
+$(FIGHTER_BUILD)/Fighter-Auto.fight: $(TOP)/tools/fighter/pack.py $(FIGHTER_ASSETS)
+	python3 $< build $(TOP)/assets/fighter/terry.json $@ --auto
 
 $(FIGHTER_BUILD)/fighter_libretro.so: $(addprefix $(FIGHTER_DIR)/,$(FIGHTER_SRCS)) $(FIGHTER_DIR)/fighter.h $(TOP)/mk/fighter.mk
 	mkdir -p $(@D)
 	$(HOST_CC) $(FIGHTER_FLAGS) -fPIC -shared -o $@ $(addprefix $(FIGHTER_DIR)/,$(FIGHTER_SRCS))
 
-$(FIGHTER_BUILD)/test: $(addprefix $(FIGHTER_DIR)/,$(FIGHTER_SRCS)) $(FIGHTER_DIR)/test.c $(FIGHTER_DIR)/fighter.h $(TOP)/mk/fighter.mk
+FIGHTER_TEST_SRCS := $(FIGHTER_DIR)/test.c $(FIGHTER_DIR)/test-render.c
+FIGHTER_TEST_DEPS := $(FIGHTER_TEST_SRCS) $(FIGHTER_DIR)/test-render.h $(FIGHTER_DIR)/fighter.h $(TOP)/mk/fighter.mk
+$(FIGHTER_BUILD)/test: $(addprefix $(FIGHTER_DIR)/,$(FIGHTER_SRCS)) $(FIGHTER_TEST_DEPS)
 	mkdir -p $(@D)
-	$(HOST_CC) $(FIGHTER_FLAGS) -g -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ $(addprefix $(FIGHTER_DIR)/,$(FIGHTER_SRCS)) $(FIGHTER_DIR)/test.c
+	$(HOST_CC) $(FIGHTER_FLAGS) -g -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ $(addprefix $(FIGHTER_DIR)/,$(FIGHTER_SRCS)) $(FIGHTER_TEST_SRCS)
 
 # The same callbacks also exercise the actual ELF shared library via the
 # system dynamic loader; the source-linked build above instruments the core.
-$(FIGHTER_BUILD)/test-shared: $(FIGHTER_DIR)/test.c $(FIGHTER_BUILD)/fighter_libretro.so $(FIGHTER_DIR)/fighter.h $(TOP)/mk/fighter.mk
-	$(HOST_CC) $(FIGHTER_FLAGS) -o $@ $(FIGHTER_DIR)/test.c -L$(FIGHTER_BUILD) -l:$(notdir $(FIGHTER_BUILD)/fighter_libretro.so) -Wl,-rpath,'$$ORIGIN'
+$(FIGHTER_BUILD)/test-shared: $(FIGHTER_TEST_DEPS) $(FIGHTER_BUILD)/fighter_libretro.so
+	$(HOST_CC) $(FIGHTER_FLAGS) -o $@ $(FIGHTER_TEST_SRCS) -L$(FIGHTER_BUILD) -l:$(notdir $(FIGHTER_BUILD)/fighter_libretro.so) -Wl,-rpath,'$$ORIGIN'
 
 .PHONY: fighter fighter-test
 fighter: $(FIGHTER_LIB) $(FIGHTER_BUILD)/fighter_libretro.so $(FIGHTER_CONTENT)
