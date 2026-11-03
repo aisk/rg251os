@@ -1,5 +1,5 @@
 /* Standard libretro fighter core: FIGHTP07 content, input, deterministic
- * FGSTATE9 saves, audio and software frames. Timing below measures work only;
+ * FGSTAT10 saves, audio and software frames. Timing below measures work only;
  * the frontend owns pacing. Logs the system profiles, the roster with each
  * character's system and resolved stats, every move's frame data and class
  * (follow-ups with their parent and window) and the resident memory at
@@ -34,8 +34,9 @@
  * then up Rising Tackle; Iori's 214 Aoi Hana takes 214+P twice more as
  * it hits). Back guards (down-back guards low), UP jumps, L
  * toggles the hurt/hit box overlay, R cycles the stress scene, START
- * pauses; A or B skips the KO screen. In the select screen the d-pad moves
- * and any attack button picks. The desktop option fight_players=two lets
+ * pauses (showing P1's command list); A or B skips the KO screen. In the
+ * select screen the d-pad moves, any attack button picks and START shows
+ * or hides the highlighted character's command list. The desktop option fight_players=two lets
  * port 1 drive the ladder's opponent; the device only has port 0. */
 #include "libretro.h"
 #include "audio.h"
@@ -549,7 +550,7 @@ bool retro_serialize(void *data, size_t size)
 	uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	fight_encode(&state, w);
-	memcpy(p, "FGSTATE9", 8);
+	memcpy(p, "FGSTAT10", 8);
 	put32(p + 8, assets.hash);
 	put32(p + 12, state.automatic);
 	for (int i = 0; i < STATE_WORDS; i++)
@@ -562,7 +563,7 @@ bool retro_unserialize(const void *data, size_t size)
 	const uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	if (!loaded || !p || size != retro_serialize_size() ||
-	    memcmp(p, "FGSTATE9", 8) || get32(p + 8) != assets.hash ||
+	    memcmp(p, "FGSTAT10", 8) || get32(p + 8) != assets.hash ||
 	    get32(p + 12) != state.automatic)
 		return false;
 	for (int i = 0; i < STATE_WORDS; i++)

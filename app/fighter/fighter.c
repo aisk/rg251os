@@ -7,8 +7,9 @@
  * the select, result and clear screens, the READY/FIGHT round start and the
  * stress scenes, plus the draw-command list (parallax stage or the flat
  * fallback, the attacking fighter drawn on top, sparks, L overlays the real
- * boxes, "N HITS"; a frame or stage the render cache has not expanded yet
- * is left out and reported in the scene). Rules pick an
+ * boxes, "N HITS", the pause and select command lists; a frame or stage
+ * the render cache has not expanded yet is left out and reported in the
+ * scene). Rules pick an
  * action or move and its elapsed ticks; the pack's steps map that onto
  * frames, boxes and motion, so what is drawn is what collides. Feel comes
  * from each character's resolved stats (life, defense, weight, walk speeds,
@@ -109,7 +110,11 @@
  * FIGHT_TICKS while the round runs) and ROUND_START (fight_start has
  * neither and sounds it at once). A loss
  * shows the result screen, beating everyone the clear screen; both return
- * to select. Auto skips select and rotates P1 through the roster each run. */
+ * to select. Auto skips select and rotates P1 through the roster each run.
+ * START pauses a fight (the pause screen dims it under P1's command list);
+ * on the select screen it toggles the highlighted character's command list
+ * instead (fight_move_list builds both from the pack; the HUD font has
+ * arrow glyphs for the motions). */
 #include "fighter.h"
 #include "libretro.h"
 #include <stdlib.h>
@@ -1119,8 +1124,13 @@ void fight_step(struct fight_state *s, const struct assets *a, uint32_t input,
 	s->previous = input;
 	s->sounds = 0;
 	memset(s->sound, 0, sizeof(s->sound));
-	if (pressed & KEY(START))
-		s->paused ^= 1;
+	/* START pauses, or on the select screen toggles the command list. */
+	if (pressed & KEY(START)) {
+		if (s->mode == MODE_SELECT && !s->automatic && !s->paused)
+			s->list ^= 1;
+		else
+			s->paused ^= 1;
+	}
 	if (pressed & KEY(L))
 		s->boxes ^= 1;
 	if (pressed & KEY(R))
@@ -1203,38 +1213,171 @@ static void rect(struct scene *s, int x, int y, int w, int h, uint16_t color, in
 		    RECT, x, y, w, h, 0, 0, blend, color, (uint8_t)alpha};
 }
 /* Compact original 3x5 glyphs: digits, then the limited HUD alphabet. */
-static const char alphabet[] = "0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ:-/";
+static const char alphabet[] = "0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ:-/+[]>.";
 static const uint16_t glyph[] = {31599, 9362, 29671, 29647, 23497, 31183, 31215, 29257,
 				 31727, 31695, 0, 11245, 27566, 31015, 27502, 31207,
 				 31204, 31087, 23533, 29847, 4687, 23469, 18727, 24557,
 				 31597, 31599, 31716, 31611, 27565, 31183, 29842, 23407,
-				 23402, 23423, 23213, 23186, 29351, 1040, 448, 4772};
+				 23402, 23423, 23213, 23186, 29351, 1040, 448, 4772,
+				 1488, 26918, 12875, 17492, 2};
+/* Bytes 1..9 (not 5) are 5x5 arrows pointing like the numpad digit, as the
+ * move list writes motions for a fighter facing right (FIGHT_ARROW). */
+static const uint32_t arrow[9] = {1135388, 4347332, 17044583, 4488452, 0,
+				  4291652, 30167105, 4674692, 7443728};
+static int is_arrow(char c) { return c >= 1 && c <= 9 && c != 5; }
 /* Each glyph row's lit run is one rectangle of cell x cell pixels per glyph
- * pixel; glyphs advance 4 cells. */
+ * pixel; letters advance 4 cells, arrows 6. */
 static void text_cell(struct scene *s, int x, int y, const char *str, uint16_t color, int cell)
 {
-	for (; *str; str++, x += 4 * cell) {
-		const char *p = strchr(alphabet, *str);
-		if (!p)
-			continue;
-		unsigned bits = glyph[p - alphabet];
+	for (; *str; str++) {
+		int wide = is_arrow(*str), w = wide ? 5 : 3;
+		const char *p = wide ? NULL : strchr(alphabet, *str);
+		uint32_t bits = wide ? arrow[*str - 1] : p && *str ? glyph[p - alphabet] : 0;
 		for (int r = 0; r < 5; r++)
-			for (int c = 0; c < 3; c++) {
-				if (!(bits & (1u << (14 - r * 3 - c))))
+			for (int c = 0; c < w; c++) {
+				int top = w * 5 - 1 - r * w;
+				if (!(bits & (1u << (top - c))))
 					continue;
 				int n = 1;
-				while (c + n < 3 && (bits & (1u << (14 - r * 3 - c - n))))
+				while (c + n < w && (bits & (1u << (top - c - n))))
 					n++;
 				rect(s, x + c * cell, y + r * cell, cell * n, cell, color, OPAQUE, 255);
 				c += n - 1;
 			}
+		x += (w + 1) * cell;
 	}
 }
 static void text(struct scene *s, int x, int y, const char *str, uint16_t color)
 {
 	text_cell(s, x, y, str, color, 2);
 }
-static int text_width(const char *str) { return 8 * (int)strlen(str); }
+static int text_width(const char *str)
+{
+	int w = 0;
+	for (; *str; str++)
+		w += is_arrow(*str) ? 12 : 8;
+	return w;
+}
+/* ---- the move list ---- */
+static void append(char *out, const char *add)
+{
+	size_t n = strlen(out), k = strlen(add);
+	if (n + k >= LIST_TEXT)
+		k = LIST_TEXT - 1 - n;
+	memcpy(out + n, add, k);
+	out[n + k] = 0;
+}
+/* Button labels; weapon punches are slashes. */
+static void button_names(const struct character *c, unsigned bits, char *out)
+{
+	static const char *const plain[4] = {"LP", "HP", "LK", "HK"},
+				 *const weapon[4] = {"LS", "HS", "LK", "HK"};
+	const char *sep = "";
+	if ((bits & 3) == 3) {
+		append(out, (c->slash & 3) == 3 ? "S" : "P");
+		bits &= ~3u;
+		sep = "/";
+	}
+	if ((bits & 12) == 12) {
+		append(out, sep);
+		append(out, "K");
+		bits &= ~12u;
+		sep = "/";
+	}
+	for (int k = 0; k < 4; k++)
+		if (bits >> k & 1) {
+			append(out, sep);
+			append(out, (c->slash >> k & 1) ? weapon[k] : plain[k]);
+			sep = "/";
+		}
+}
+static void list_line(const struct character *c, unsigned k, char *out)
+{
+	static const char *const notation[MOTIONS] = {
+	    "\2\3\6", "\2\1\4", "\6\2\3", "[\4]\6", "[\2]\10", "", "", "\10", "\2", "\6", "\4"};
+	const struct move *m = &c->move[k];
+	out[0] = 0;
+	if (k < MOVES) {
+		/* A normal with follow-ups: its button, down for the crouching ones. */
+		if (k >= CROUCH_LP)
+			append(out, "\2 + ");
+		button_names(c, 1u << (k % 4), out);
+	} else {
+		const char *n = m->motion < MOTIONS ? notation[m->motion] : "";
+		append(out, n);
+		if (*n)
+			append(out, " + ");
+		button_names(c, m->buttons, out);
+	}
+	if (m->spawn)
+		append(out, "  PROJECTILE");
+	if (m->groups && m->hit.guard == GUARD_LOW)
+		append(out, "  LOW");
+	if (m->groups && m->hit.guard == GUARD_OVERHEAD)
+		append(out, "  OVERHEAD");
+	if (m->after && m->contact)
+		append(out, "  ON CONTACT");
+}
+static void list_children(const struct character *c, unsigned parent, unsigned depth,
+			  char text[LIST_LINES][LIST_TEXT], uint8_t level[LIST_LINES], unsigned *n)
+{
+	for (unsigned k = MOVES; depth <= 3 && k < c->moves && *n < LIST_LINES; k++)
+		if (c->move[k].after == parent + 1) {
+			list_line(c, k, text[*n]);
+			level[(*n)++] = (uint8_t)depth;
+			list_children(c, k, depth + 1, text, level, n);
+		}
+}
+unsigned fight_move_list(const struct character *c, char text[LIST_LINES][LIST_TEXT],
+			 uint8_t depth[LIST_LINES])
+{
+	unsigned n = 0;
+	for (unsigned k = MOVES; k < c->moves && n < LIST_LINES; k++)
+		if (!c->move[k].after) {
+			list_line(c, k, text[n]);
+			depth[n++] = 0;
+			list_children(c, k, 1, text, depth, &n);
+		}
+	for (unsigned k = 0; k < MOVES && n < LIST_LINES; k++) {
+		int parent = 0;
+		for (unsigned j = MOVES; j < c->moves; j++)
+			parent |= c->move[j].after == k + 1;
+		if (parent) {
+			list_line(c, k, text[n]);
+			depth[n++] = 0;
+			list_children(c, k, 1, text, depth, &n);
+		}
+	}
+	return n;
+}
+/* The list at x, y in lines of step pixels (follow-ups indented under a
+ * ">"), then the normals legend; returns the y below it. */
+static int move_list(struct scene *out, const struct character *c, int x, int y, int step)
+{
+	char lines[LIST_LINES][LIST_TEXT], legend[LIST_TEXT] = "";
+	uint8_t depth[LIST_LINES];
+	unsigned n = fight_move_list(c, lines, depth);
+	for (unsigned i = 0; i < n; i++, y += step) {
+		int dx = depth[i] * 16;
+		if (depth[i])
+			text(out, x + dx - 10, y, ">", 0x8410);
+		text(out, x + dx, y, lines[i], 0xffff);
+	}
+	if (!n) {
+		text(out, x, y, "NO SPECIALS", 0x8410);
+		y += step;
+	}
+	y += step / 2;
+	static const char *const keys[4] = {"Y ", "  X ", "  B ", "  A "};
+	for (int k = 0; k < 4; k++) {
+		append(legend, keys[k]);
+		button_names(c, 1u << k, legend);
+	}
+	text(out, x, y, legend, 0xbdf7);
+	text(out, x, y + step, "\2 CROUCH  \10 JUMP", 0xbdf7);
+	text(out, x, y + 2 * step, "\4 GUARD  \1 LOW GUARD", 0xbdf7);
+	return y + 3 * step;
+}
 static void sprite(struct scene *s, const struct assets *a, int image, int x, int y,
 		   int flip, int blend, int alpha)
 {
@@ -1336,10 +1479,28 @@ static void idle_sprite(struct scene *out, const struct fight_state *s, const st
 	if (im >= 0)
 		sprite(out, a, im, x, y, flip, OPAQUE, 255);
 }
+/* The select screen's command list: the highlighted fighter on the left,
+ * its list in a panel on the right. */
+static void select_list(const struct fight_state *s, const struct assets *a, struct scene *out)
+{
+	const struct character *c = &a->chr[s->chr[0]];
+	rect(out, 0, 262, 190, 2, 0x8c50, OPAQUE, 255);
+	idle_sprite(out, s, a, 0, 96, 262, 0);
+	text(out, 96 - text_width(c->name) / 2, 270, c->name, 0xffff);
+	text(out, 16, 290, "ATTACK TO FIGHT", 0x8410);
+	text(out, 16, 304, "START BACK", 0x8410);
+	rect(out, 196, 32, 276, 280, 0x2124, OPAQUE, 255);
+	text(out, 206, 40, c->name, 0xffe0);
+	move_list(out, c, 206, 60, 14);
+}
 static void select_scene(const struct fight_state *s, const struct assets *a, struct scene *out)
 {
 	rect(out, 0, 0, FW, FH, 0x0841, OPAQUE, 255);
 	text(out, 240 - text_width("SELECT") / 2, 12, "SELECT", 0xffff);
+	if (s->list) {
+		select_list(s, a, out);
+		return;
+	}
 	for (unsigned k = 0; k < a->characters; k++) {
 		int x = 16 + (int)(k % 4) * 114, y = 40 + (int)(k / 4) * 20;
 		rect(out, x, y, 108, 18, 0x2124, OPAQUE, 255);
@@ -1351,7 +1512,8 @@ static void select_scene(const struct fight_state *s, const struct assets *a, st
 	idle_sprite(out, s, a, 0, 120, 300, 0);
 	text(out, 220, 240, "P1", 0x07e0);
 	text(out, 220, 254, a->chr[s->chr[0]].name, 0xffff);
-	text(out, 220, 280, "ATTACK TO FIGHT", 0x8410);
+	text(out, 220, 272, "ATTACK TO FIGHT", 0x8410);
+	text(out, 220, 286, "START COMMANDS", 0x8410);
 }
 static void screen_scene(const struct fight_state *s, const struct assets *a, struct scene *out)
 {
@@ -1420,6 +1582,17 @@ static void intro_scene(const struct fight_state *s, const struct assets *a, str
 	if (a->stages && s->arena < a->stages)
 		text(out, 240 - text_width(a->stage[s->arena].name) / 2, 300,
 		     a->stage[s->arena].name, 0x8410);
+}
+/* Pause: the round dimmed under P1's command list. */
+static void pause_panel(struct scene *out, const struct fight_state *s, const struct assets *a)
+{
+	const struct character *c = who(s, a, 0);
+	rect(out, 0, 0, FW, FH, 0, ALPHA, 128);
+	rect(out, 44, 54, FW - 88, 250, 0x0841, ALPHA, 224);
+	text_cell(out, (FW - 19 * 4) / 2, 28, "PAUSE", 0xffff, 4);
+	text(out, 60, 62, c->name, 0xffe0);
+	int y = move_list(out, c, 60, 82, 14);
+	text(out, 60, y + 6, "START RESUME", 0x8410);
 }
 /* READY over the frozen round, then FIGHT as it begins: big glyphs (cell
  * BANNER_CELL) with a dark drop shadow, centred above the fighters. */
@@ -1563,14 +1736,14 @@ hud:
 		text_cell(out, x + 2, 52, hits, 0, 4);
 		text_cell(out, x, 50, hits, 0xffe0, 4);
 	}
-	if (s->paused)
-		text(out, 220, 80, "PAUSE", 0xffff);
-	else if (s->ended)
+	if (s->ended && !s->paused)
 		text(out, 232, 80, "KO", 0xffff);
 	/* Mode indicators don't depend on the text command budget. */
 	rect(out, 220, 16, 40, 13, (uint16_t)(0x001f + s->stress * 0x3800), OPAQUE,
 	     255);
 	banner(out, s);
+	if (s->paused)
+		pause_panel(out, s, a);
 }
 /* ---- state words ---- */
 #define FIGHTER_WORDS 27
@@ -1585,9 +1758,10 @@ hud:
 #define SPARK_WORDS 5
 #define SPARKS_AT (EXTRA_AT + 4)
 #define SOUNDS_AT (SPARKS_AT + SPARK_SLOTS * SPARK_WORDS)
-/* Then combo, shown, show and best per side. */
+/* Then combo, shown, show and best per side, and the select list flag. */
 #define COMBO_AT (SOUNDS_AT + 1 + MAX_SOUND_EVENTS)
-#define USED_WORDS (COMBO_AT + 8)
+#define LIST_AT (COMBO_AT + 8)
+#define USED_WORDS (LIST_AT + 1)
 static void fighter_fields(struct fighter *p, int32_t *v[FIGHTER_WORDS])
 {
 	int32_t *f[] = {&p->x,	   &p->y,     &p->vy,	     &p->hp,	&p->face,  &p->walk,
@@ -1659,6 +1833,7 @@ void fight_encode(const struct fight_state *s, uint32_t w[STATE_WORDS])
 		w[COMBO_AT + 4 + i] = t.show[i];
 		w[COMBO_AT + 6 + i] = t.best[i];
 	}
+	w[LIST_AT] = t.list;
 }
 /* Bounds come from the fighter's own character (life, jump velocities,
  * prejump, buffer, charge and grace) and the walls of the state's camera. */
@@ -1773,6 +1948,9 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 		    ((t.mode != MODE_FIGHT || t.timer < ROUND_TICKS) && t.best[i]))
 			return 0;
 	}
+	t.list = w[LIST_AT];
+	if (t.list > 1)
+		return 0;
 	unsigned n = a->characters;
 	uint32_t all = n >= 32 ? 0xffffffffu : (1u << n) - 1u;
 	if (t.paused > 1 || t.stress > 3 || t.boxes > 1 || t.automatic > 1 || t.mode >= MODES ||

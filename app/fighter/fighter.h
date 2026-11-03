@@ -4,7 +4,8 @@
  * stages), bounded draw commands, the per-tick sound events and the RGB565
  * software renderer interface. Rules (fighter.c) read the pack's steps,
  * boxes, moves and each character's resolved stats, keep the camera, the
- * spark pool and the sound events in the state and only emit draw commands;
+ * spark pool and the sound events in the state and only emit draw commands
+ * (the HUD, banners and command lists included);
  * render.c owns the pack decoder (which fills stats and class defaults from
  * the character's system and applies its damage scale), the render cache
  * (the fighters and stage the state shows, expanded to RGB565 lazily and in
@@ -260,7 +261,8 @@ struct sound_event {
  * attacking side: combo counts the unguarded hits since the defender last
  * left hitstun (0 = none running), shown the count on screen (at least 2,
  * 0 = none) for show more ticks once the combo ended, best the longest
- * combo of this round. */
+ * combo of this round. list is set while the select screen shows the
+ * highlighted character's command list (START toggles it there). */
 struct fight_state {
 	uint32_t tick, rng, previous, paused, stress, boxes, automatic, round;
 	uint32_t mode, timer, beaten, stage, run, wins[2], chr[2], pal[2];
@@ -272,7 +274,7 @@ struct fight_state {
 	/* This tick's sound events (see enum sound_id). */
 	uint32_t sounds;
 	struct sound_event sound[MAX_SOUND_EVENTS];
-	uint32_t combo[2], shown[2], show[2], best[2];
+	uint32_t combo[2], shown[2], show[2], best[2], list;
 };
 /* One opaque run in a frame row; pixels index the frame's data. */
 struct span {
@@ -540,6 +542,18 @@ uint32_t fight_prefetch(struct assets *a, uint32_t budget);
 uint32_t fight_demand(struct assets *a, const struct scene *scene);
 int fight_ready(const struct assets *a);
 int fight_cast(struct assets *a, const struct fight_state *s);
+/* The command list of the pause and select screens, from the pack: every
+ * special without a parent in pack order, then every normal that has
+ * follow-ups, each followed by its follow-ups one level deeper (depth, at
+ * most 3). A line is the motion as the HUD font's arrows for a fighter
+ * facing right (bytes 1..9 point like the numpad digit; [d] holds d), " + "
+ * and the buttons (P, K, or LP/HP/LK/HK; S, LS, HS for weapon punches),
+ * then the tags PROJECTILE, LOW, OVERHEAD and ON CONTACT (a follow-up that
+ * needs its parent to connect). Returns the line count. */
+#define LIST_LINES 16
+#define LIST_TEXT 48
+unsigned fight_move_list(const struct character *c, char text[LIST_LINES][LIST_TEXT],
+			 uint8_t depth[LIST_LINES]);
 void fight_encode(const struct fight_state *s, uint32_t words[STATE_WORDS]);
 int fight_decode(struct fight_state *s, const struct assets *a,
 		 const uint32_t words[STATE_WORDS]);

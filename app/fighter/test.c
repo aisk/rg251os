@@ -981,6 +981,7 @@ static void round_start(void)
 /* The combo words in a saved state (COMBO_AT in fighter.c): combo, shown,
  * show and best, two each. */
 #define COMBO_W 165
+#define LIST_W (COMBO_W + 8)
 /* Combos: crouch LP chains keep P1 in hitstun, the count shows from the
  * second hit and stays COMBO_TICKS after P1 recovers; LP into a Power Wave
  * that lands after the hitstun is two single hits; guarded hits count
@@ -1057,6 +1058,85 @@ static void combos(void)
 	/* A new round starts from nothing. */
 	fight_start(&s, &pack, terry, terry);
 	assert(!s.best[0] && !s.combo[0] && !s.shown[0] && !s.show[0]);
+}
+/* Command lists from the pack: Terry's three specials, Iori's Aoi Hana
+ * stages nested under each other, Haohmaru's slash buttons; every
+ * character's list names every special once, in characters the HUD font
+ * has, and its pause and select screens fit the command budget. START
+ * toggles the select list (the cursor still moves) and pauses a fight;
+ * the list flag round-trips and 2 is rejected. */
+static void move_lists(void)
+{
+	static struct scene sc;
+	char text[LIST_LINES][LIST_TEXT];
+	uint8_t depth[LIST_LINES];
+	assert(fight_move_list(&pack.chr[terry], text, depth) == 3);
+	assert(!strcmp(text[0], "\2\3\6 + P  PROJECTILE") && !strcmp(text[1], "\2\1\4 + P") &&
+	       !strcmp(text[2], "[\2]\10 + P") && !depth[0] && !depth[1] && !depth[2]);
+	unsigned iori = character("IORI");
+	assert(fight_move_list(&pack.chr[iori], text, depth) == 5);
+	assert(!strcmp(text[1], "\2\1\4 + P") && !depth[1] && !strcmp(text[2], "\2\1\4 + P") &&
+	       depth[2] == 1 && !strcmp(text[3], "\2\1\4 + P  OVERHEAD") && depth[3] == 2 &&
+	       !strcmp(text[4], "\6\2\3 + P") && !depth[4]);
+	unsigned n = fight_move_list(&pack.chr[haohmaru], text, depth);
+	assert(n >= 1 && strstr(text[0], " + S"));
+	static const char font[] = "0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ:-/+[]>.\1\2\3\4\6\7\10\11";
+	struct fight_state s;
+	for (unsigned c = 0; c < pack.characters; c++) {
+		const struct character *ch = &pack.chr[c];
+		n = fight_move_list(ch, text, depth);
+		unsigned listed = 0;
+		for (unsigned i = 0; i < n; i++) {
+			assert(text[i][0] && depth[i] <= 3 && strspn(text[i], font) == strlen(text[i]));
+			assert(!i || depth[i] <= depth[i - 1] + 1);
+		}
+		for (unsigned k = MOVES; k < ch->moves; k++)
+			listed++;
+		for (unsigned k = 0; k < MOVES; k++)
+			for (unsigned j = MOVES; j < ch->moves; j++)
+				if (ch->move[j].after == k + 1) {
+					listed++;
+					break;
+				}
+		if (n != listed) {
+			fprintf(stderr, "move list: %s lists %u of %u\n", ch->name, n, listed);
+			abort();
+		}
+		/* Pause in a mirror fight, and the select list. */
+		fight_reset(&s, 0);
+		fight_start(&s, &pack, c, c);
+		s.stage = 1;
+		step2(&s, K(START), 0);
+		assert(s.paused);
+		fight_cast(&pack, &s);
+		fight_scene(&s, &pack, &sc);
+		assert(sc.count < COMMANDS);
+		fight_reset(&s, 0);
+		s.chr[0] = s.chr[1] = c;
+		s.list = 1;
+		fight_cast(&pack, &s);
+		fight_scene(&s, &pack, &sc);
+		assert(sc.count < COMMANDS);
+	}
+	uint32_t w[STATE_WORDS];
+	struct fight_state t;
+	fight_reset(&s, 0);
+	step2(&s, K(START), 0);
+	assert(s.list && !s.paused && s.mode == MODE_SELECT);
+	step2(&s, K(RIGHT), 0);
+	assert(s.chr[0] == 1 % pack.characters && s.list);
+	fight_encode(&s, w);
+	assert(fight_decode(&t, &pack, w) && t.list);
+	w[LIST_W] = 2;
+	assert(!fight_decode(&t, &pack, w));
+	step2(&s, K(START), 0);
+	assert(!s.list && !s.paused);
+	step2(&s, 0, 0);
+	step2(&s, K(START), 0);
+	step2(&s, K(Y), 0);
+	assert(s.mode == MODE_FIGHT && s.list && !s.paused);
+	step2(&s, K(START), 0);
+	assert(s.paused);
 }
 /* Mid-hitstop state with a live projectile, a buffered special and a
  * charge round-trips, replays identically and rejects impossible values
@@ -1877,9 +1957,10 @@ static void snapshot(const struct fight_state *s, const char *suffix)
 	fight_render(&pack, &scene, fb);
 	write_ppm(path, fb);
 }
-/* Select, READY, FIGHT, a Power Wave in flight with the box overlay, a
- * lost run, a cleared one, a hit on each stage and a combo count, for
- * human review. */
+/* Select, a command list on the select screen, READY, FIGHT, a Power Wave
+ * in flight with the box overlay, a lost run, a cleared one, a hit on each
+ * stage, a combo count and a pause with its command list, for human
+ * review. */
 static void previews(void)
 {
 	struct fight_state s;
@@ -1887,6 +1968,13 @@ static void previews(void)
 	for (int n = 0; n < 20; n++)
 		step2(&s, 0, 0);
 	snapshot(&s, "select");
+	/* Iori's command list on the select screen and in a pause. */
+	s.chr[0] = s.chr[1] = character("IORI");
+	step2(&s, K(START), 0);
+	snapshot(&s, "commands");
+	step2(&s, 0, 0);
+	step2(&s, K(START), 0);
+	step2(&s, 0, 0);
 	/* READY over the stage, then FIGHT. */
 	step2(&s, K(Y), 0);
 	while (s.timer < INTRO_TICKS + 10)
@@ -1937,6 +2025,10 @@ static void previews(void)
 		step2(&s, K(DOWN) | (n % 2 ? K(Y) : 0), 0);
 	assert(s.shown[0] >= 2);
 	snapshot(&s, "combo");
+	s.chr[0] = character("IORI");
+	staged(&s, korea, s.chr[0], terry, centre - 60, centre + 60);
+	step2(&s, K(START), 0);
+	snapshot(&s, "pause");
 }
 static void logic_tests(const uint8_t *data, size_t len)
 {
@@ -1969,6 +2061,7 @@ static void logic_tests(const uint8_t *data, size_t len)
 	ladder();
 	round_start();
 	combos();
+	move_lists();
 	state_words();
 	stat_tests();
 	pack.stages = stages;
@@ -2049,28 +2142,31 @@ int main(int argc, char **argv)
 	copy[8] ^= 1;
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
-	copy[7] = '1'; /* FGSTATE1 from the fixed-sprite POC */
+	memcpy(copy, "FGSTATE1", 8); /* FGSTATE1 from the fixed-sprite POC */
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
-	copy[7] = '2'; /* FGSTATE2, before boxes, moves and hitstop */
+	memcpy(copy, "FGSTATE2", 8); /* FGSTATE2, before boxes, moves and hitstop */
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
-	copy[7] = '3'; /* FGSTATE3, before buffer, specials, projectiles, ladder */
+	memcpy(copy, "FGSTATE3", 8); /* FGSTATE3, before buffer, specials, projectiles, ladder */
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
-	copy[7] = '4'; /* FGSTATE4, pixel x and fixed stats */
+	memcpy(copy, "FGSTATE4", 8); /* FGSTATE4, pixel x and fixed stats */
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
-	copy[7] = '5'; /* FGSTATE5, before the camera, sparks and sound events */
+	memcpy(copy, "FGSTATE5", 8); /* FGSTATE5, before the camera, sparks and sound events */
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
-	copy[7] = '6'; /* FGSTATE6, before the intro and follow-up inputs */
+	memcpy(copy, "FGSTATE6", 8); /* FGSTATE6, before the intro and follow-up inputs */
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
-	copy[7] = '7'; /* FGSTATE7, before READY and FIGHT */
+	memcpy(copy, "FGSTATE7", 8); /* FGSTATE7, before READY and FIGHT */
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
-	copy[7] = '8'; /* FGSTATE8, before combos */
+	memcpy(copy, "FGSTATE8", 8); /* FGSTATE8, before combos */
+	assert(!retro_unserialize(copy, n));
+	memcpy(copy, end, n);
+	memcpy(copy, "FGSTATE9", 8); /* before the select command list */
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
 	memset(copy + 16 + 8 * 4, 0xff, 4);
@@ -2176,7 +2272,7 @@ int main(int argc, char **argv)
 	     "effect budget, camera and walls, sparks, sound events, content, "
 	     "RGB565/XRGB8888, audio, ports, replay, pause, state validation, frame "
 	     "data, hit/block/hitstop ticks, pushback and corner, guard heights, "
-	     "trades, combos, commands, buffer, prejump, cancels, follow-ups, projectiles and clash, "
+	     "trades, combos, move lists, commands, buffer, prejump, cancels, follow-ups, projectiles and clash, "
 	     "specials, ladder, systems and stats, AI coverage and stress cycle "
 	     "passed");
 	return 0;
