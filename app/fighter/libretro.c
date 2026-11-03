@@ -1,5 +1,5 @@
 /* Standard libretro fighter core: FIGHTP07 content, input, deterministic
- * FGSTATE8 saves, audio and software frames. Timing below measures work only;
+ * FGSTATE9 saves, audio and software frames. Timing below measures work only;
  * the frontend owns pacing. Logs the system profiles, the roster with each
  * character's system and resolved stats, every move's frame data and class
  * (follow-ups with their parent and window) and the resident memory at
@@ -14,8 +14,8 @@
  * each scene (0 = two fighters, 1-3 = +8, +24, +48 requested alpha/additive
  * effects, capped by the per-frame effect pixel budget) every 600 runs,
  * also with debug off: logic/render/audio/cache times, how many effects
- * were drawn of those requested, and the ladder and special/clash
- * counters.
+ * were drawn of those requested, and the ladder, special/clash and max
+ * combo counters; each KO logs the round with both lives and max combos.
  *
  * Sound comes from the bank next to the content (<pack>.fightsnd, found
  * from retro_game_info's path; audio.c): after each unpaused tick the rule
@@ -175,11 +175,12 @@ static void report(void)
 		       state.cam, sample_count);
 		logger(RETRO_LOG_INFO,
 		       "fight: tick %u round %u hits %u guards %u specials %u clashes %u "
-		       "mode %u run %u stage %u beaten %08x %s vs %s; frontend perf "
-		       "measures rotate/present/audio output\n",
+		       "max combo %u/%u mode %u run %u stage %u beaten %08x %s vs %s; "
+		       "frontend perf measures rotate/present/audio output\n",
 		       state.tick, state.round, state.hits, state.guards, state.specials,
-		       state.clashes, state.mode, state.run, state.stage, state.beaten,
-		       assets.chr[state.chr[0]].name, assets.chr[state.chr[1]].name);
+		       state.clashes, state.best[0], state.best[1], state.mode, state.run,
+		       state.stage, state.beaten, assets.chr[state.chr[0]].name,
+		       assets.chr[state.chr[1]].name);
 	}
 	if (logger && sound.bank) {
 		const struct audio_stats *st = &sound.stats;
@@ -460,10 +461,16 @@ void retro_run(void)
 			     devices[p] == RETRO_DEVICE_JOYPAD && k < 16; k++)
 				if (input(p, RETRO_DEVICE_JOYPAD, 0, k))
 					keys[p] |= 1u << k;
-	uint32_t old_tick = state.tick;
+	uint32_t old_tick = state.tick, old_ended = state.ended;
 	uint64_t t0 = tick_us();
 	fight_step(&state, &assets, keys[0], keys[1], two_players);
 	uint64_t t1 = tick_us();
+	if (!old_ended && state.ended && logger)
+		logger(RETRO_LOG_INFO,
+		       "fight: KO stage %u round %u %s vs %s life %d/%d, max combo %u/%u, tick %u\n",
+		       state.stage, state.round + 1, assets.chr[state.chr[0]].name,
+		       assets.chr[state.chr[1]].name, state.p[0].hp, state.p[1].hp, state.best[0],
+		       state.best[1], state.tick);
 	if (state.automatic && state.tick != old_tick && ++benchmark_runs == 36000 &&
 	    logger)
 		logger(
@@ -542,7 +549,7 @@ bool retro_serialize(void *data, size_t size)
 	uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	fight_encode(&state, w);
-	memcpy(p, "FGSTATE8", 8);
+	memcpy(p, "FGSTATE9", 8);
 	put32(p + 8, assets.hash);
 	put32(p + 12, state.automatic);
 	for (int i = 0; i < STATE_WORDS; i++)
@@ -555,7 +562,7 @@ bool retro_unserialize(const void *data, size_t size)
 	const uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	if (!loaded || !p || size != retro_serialize_size() ||
-	    memcmp(p, "FGSTATE8", 8) || get32(p + 8) != assets.hash ||
+	    memcmp(p, "FGSTATE9", 8) || get32(p + 8) != assets.hash ||
 	    get32(p + 12) != state.automatic)
 		return false;
 	for (int i = 0; i < STATE_WORDS; i++)

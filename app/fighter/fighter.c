@@ -2,13 +2,13 @@
  * jumps, crouching, data-driven normals and specials with an input buffer,
  * motion and charge commands, cancels, projectiles with clashes, hurt/hit
  * boxes from the pack, hitstop, hitstun, blockstun, high/low/overhead guard,
- * pushback with corner transfer, KO, AI (with specials), the camera and
- * walls, hit sparks, screen shake, the KO flash, sound events, the select,
- * result and clear screens, the READY/FIGHT round start and the stress
- * scenes, plus the draw-command list
- * (parallax stage or the flat fallback, the attacking fighter drawn on top,
- * sparks, L overlays the real boxes; a frame or stage the render cache has
- * not expanded yet is left out and reported in the scene). Rules pick an
+ * pushback with corner transfer, KO, combo counts, AI (with specials), the
+ * camera and walls, hit sparks, screen shake, the KO flash, sound events,
+ * the select, result and clear screens, the READY/FIGHT round start and the
+ * stress scenes, plus the draw-command list (parallax stage or the flat
+ * fallback, the attacking fighter drawn on top, sparks, L overlays the real
+ * boxes, "N HITS"; a frame or stage the render cache has not expanded yet
+ * is left out and reported in the scene). Rules pick an
  * action or move and its elapsed ticks; the pack's steps map that onto
  * frames, boxes and motion, so what is drawn is what collides. Feel comes
  * from each character's resolved stats (life, defense, weight, walk speeds,
@@ -49,6 +49,12 @@
  * by its button (LP/LK light, HP/HK heavy, specials and projectiles
  * special). Sound events (enum sound_id) are appended to the state as the
  * rules act.
+ * Combos: an unguarded hit (strike or projectile) on a defender still in
+ * hitstun as the tick's contacts land continues the attacker's combo,
+ * any other starts it at 1; the combo ends at the end of the first tick
+ * the defender is out of hitstun. From two hits on "N HITS" shows under the
+ * attacker's name until COMBO_TICKS after the combo ended; each round keeps
+ * both sides' longest (best).
  * A step's motion moves
  * the fighter on every unfrozen tick it shows, from the move's first tick;
  * a projectile launches on its step's first tick at the owner's anchor plus
@@ -181,6 +187,8 @@ static void place(struct fight_state *s)
 	s->p[0].face = 1;
 	s->p[1].face = -1;
 	s->ended = s->cam = s->arena = s->shake = s->flash = 0;
+	for (int i = 0; i < 2; i++)
+		s->combo[i] = s->shown[i] = s->show[i] = s->best[i] = 0;
 }
 void fight_reset(struct fight_state *s, int automatic)
 {
@@ -890,6 +898,21 @@ static void react(struct fight_state *s, const struct assets *a, int i, const st
 		s->flash = FLASH_TICKS;
 	}
 }
+/* An unguarded hit by side i: the next hit of a combo when the defender was
+ * still in hitstun, else the first. From the second hit on the count is on
+ * screen and its timer waits until the combo ends. */
+static void count_hit(struct fight_state *s, int i, int stunned)
+{
+	uint32_t n = stunned && s->combo[i] ? s->combo[i] + 1 : 1;
+	s->combo[i] = n < MAX_COMBO ? n : MAX_COMBO;
+	if (s->combo[i] >= 2) {
+		s->shown[i] = s->combo[i];
+		s->show[i] = COMBO_TICKS;
+	}
+	if (s->combo[i] > s->best[i])
+		s->best[i] = s->combo[i];
+}
+static int in_hitstun(const struct fighter *p) { return p->stun && p->block != 1; }
 static void shots_move(struct fight_state *s, const struct assets *a)
 {
 	for (int k = 0; k < MAX_PROJECTILES; k++) {
@@ -920,6 +943,8 @@ static void combat(struct fight_state *s, const struct assets *a, const uint32_t
 	shots_move(s, a);
 	for (int i = 0; i < 2; i++)
 		frozen[i] = update(s, a, i, keys[i], threat[i]);
+	/* Who is still in hitstun as contacts land (a combo goes on). */
+	int stunned[2] = {in_hitstun(&s->p[0]), in_hitstun(&s->p[1])};
 	/* Resolve every contact from the same state before changing any. */
 	const struct move *move[2] = {NULL, NULL};
 	int guarded[2] = {0, 0}, group[2] = {0, 0}, struck_now[2] = {0, 0}, at[2][2],
@@ -959,6 +984,8 @@ static void combat(struct fight_state *s, const struct assets *a, const uint32_t
 		int alive = s->p[1 - i].hp > 0;
 		struck(s, p, &s->p[1 - i], who(s, a, 1 - i), &move[i]->hit, guarded[i], p->face,
 		       keys[1 - i]);
+		if (!guarded[i])
+			count_hit(s, i, stunned[1 - i]);
 		react(s, a, i, &move[i]->hit, p->move, move[i]->slash, guarded[i], at[i], p->face,
 		      alive && !s->p[1 - i].hp);
 		if (p->move)
@@ -970,6 +997,8 @@ static void combat(struct fight_state *s, const struct assets *a, const uint32_t
 			int d = 1 - sh->owner, alive = s->p[d].hp > 0;
 			const struct hit *h = &shot_type(s, a, sh)->hit;
 			struck(s, NULL, &s->p[d], who(s, a, d), h, shot_guard[k], sh->face, keys[d]);
+			if (!shot_guard[k])
+				count_hit(s, sh->owner, stunned[d]);
 			react(s, a, sh->owner, h, 0, 0, shot_guard[k], shot_at[k], sh->face,
 			      alive && !s->p[d].hp);
 		}
@@ -985,6 +1014,10 @@ static void combat(struct fight_state *s, const struct assets *a, const uint32_t
 		p1->x = wall(s, a, mid + f * 2 * push);
 	}
 	camera(s, a);
+	/* A combo ends once its defender is out of hitstun. */
+	for (int i = 0; i < 2; i++)
+		if (!in_hitstun(&s->p[1 - i]))
+			s->combo[i] = 0;
 	if (!p0->hp || !p1->hp)
 		s->ended = 1;
 }
@@ -1115,6 +1148,11 @@ void fight_step(struct fight_state *s, const struct assets *a, uint32_t input,
 			s->shake--;
 		if (s->flash)
 			s->flash--;
+		/* A count fades COMBO_TICKS after its combo ended (a single hit
+		 * since does not hold it). */
+		for (int i = 0; i < 2; i++)
+			if (s->combo[i] < 2 && s->show[i] && !--s->show[i])
+				s->shown[i] = 0;
 	}
 	if (s->mode != MODE_FIGHT) {
 		if (s->timer > (s->automatic ? AUTO_SCREEN : SCREEN_TICKS) ||
@@ -1514,6 +1552,17 @@ hud:
 	if (s->automatic)
 		text(out, 224, 48, "AUTO", 0x8410);
 	/* Keep labels short: each glyph row run is a bounded command. */
+	/* Combo counts under each attacker's name. */
+	for (int i = 0; i < 2; i++) {
+		if (!s->shown[i])
+			continue;
+		char hits[12];
+		number(hits, s->shown[i]);
+		strcat(hits, " HITS");
+		int w = (4 * (int)strlen(hits) - 1) * 4, x = i ? 464 - w : 16;
+		text_cell(out, x + 2, 52, hits, 0, 4);
+		text_cell(out, x, 50, hits, 0xffe0, 4);
+	}
 	if (s->paused)
 		text(out, 220, 80, "PAUSE", 0xffff);
 	else if (s->ended)
@@ -1536,7 +1585,9 @@ hud:
 #define SPARK_WORDS 5
 #define SPARKS_AT (EXTRA_AT + 4)
 #define SOUNDS_AT (SPARKS_AT + SPARK_SLOTS * SPARK_WORDS)
-#define USED_WORDS (SOUNDS_AT + 1 + MAX_SOUND_EVENTS)
+/* Then combo, shown, show and best per side. */
+#define COMBO_AT (SOUNDS_AT + 1 + MAX_SOUND_EVENTS)
+#define USED_WORDS (COMBO_AT + 8)
 static void fighter_fields(struct fighter *p, int32_t *v[FIGHTER_WORDS])
 {
 	int32_t *f[] = {&p->x,	   &p->y,     &p->vy,	     &p->hp,	&p->face,  &p->walk,
@@ -1601,6 +1652,12 @@ void fight_encode(const struct fight_state *s, uint32_t w[STATE_WORDS])
 		const struct sound_event *e2 = &t.sound[k];
 		w[SOUNDS_AT + 1 + k] = e2->id | (uint32_t)e2->side << 8 | (uint32_t)e2->chr << 9 |
 				       (uint32_t)e2->system << 16 | (uint32_t)e2->move << 24;
+	}
+	for (int i = 0; i < 2; i++) {
+		w[COMBO_AT + i] = t.combo[i];
+		w[COMBO_AT + 2 + i] = t.shown[i];
+		w[COMBO_AT + 4 + i] = t.show[i];
+		w[COMBO_AT + 6 + i] = t.best[i];
 	}
 }
 /* Bounds come from the fighter's own character (life, jump velocities,
@@ -1703,6 +1760,19 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 			return 0;
 		t.sound[k] = e2;
 	}
+	/* Combos: a running one of two or more is on screen at full time, a
+	 * shown count has time left, nothing outside a running round. */
+	for (int i = 0; i < 2; i++) {
+		t.combo[i] = w[COMBO_AT + i];
+		t.shown[i] = w[COMBO_AT + 2 + i];
+		t.show[i] = w[COMBO_AT + 4 + i];
+		t.best[i] = w[COMBO_AT + 6 + i];
+		if (t.best[i] > MAX_COMBO || t.combo[i] > t.best[i] || t.shown[i] > t.best[i] ||
+		    t.shown[i] == 1 || t.show[i] > COMBO_TICKS || !t.shown[i] != !t.show[i] ||
+		    (t.combo[i] >= 2 && (t.shown[i] != t.combo[i] || t.show[i] != COMBO_TICKS)) ||
+		    ((t.mode != MODE_FIGHT || t.timer < ROUND_TICKS) && t.best[i]))
+			return 0;
+	}
 	unsigned n = a->characters;
 	uint32_t all = n >= 32 ? 0xffffffffu : (1u << n) - 1u;
 	if (t.paused > 1 || t.stress > 3 || t.boxes > 1 || t.automatic > 1 || t.mode >= MODES ||
@@ -1730,6 +1800,9 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 		if (!valid(&t, &t.p[i], a, &a->chr[t.chr[i]]))
 			return 0;
 	}
+	for (int i = 0; i < 2; i++)
+		if (t.combo[i] && !in_hitstun(&t.p[1 - i]))
+			return 0;
 	int owned[2] = {0, 0};
 	for (int k = 0; k < MAX_PROJECTILES; k++) {
 		struct shot *sh = &t.shot[k];

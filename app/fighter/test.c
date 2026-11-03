@@ -2,14 +2,15 @@
  * output formats, audio (the sound bank next to the pack, replayed after a
  * state load to the same samples) and a complete automated scene cycle, plus
  * the rules on exact ticks: frame data, hit/block/hitstop/hitstun timing,
- * pushback and corner transfer, guard heights, trades, motion and charge
- * commands, the input buffer and prejump, special and chain cancels, Power
- * Wave flight, hits, guard and clash, Burn Knuckle motion, Rising Tackle
- * height, follow-ups (Iori's three Aoi Hana stages: windows, the buffer,
- * expiry, contact, the move clock across a state load; May Lee's Tatsuo
- * Kyaku branches by held direction), the arcade ladder (the versus card
- * and READY freezing the rules, held buttons no press at FIGHT, the banner,
- * select, opponents, loss, clear, Auto rotation, replay), state round-trip and rejection, the AI's use of every move, and
+ * pushback and corner transfer, guard heights, trades, combo counts, motion
+ * and charge commands, the input buffer and prejump, special and chain
+ * cancels, Power Wave flight, hits, guard and clash, Burn Knuckle motion,
+ * Rising Tackle height, follow-ups (Iori's three Aoi Hana stages: windows,
+ * the buffer, expiry, contact, the move clock across a state load; May
+ * Lee's Tatsuo Kyaku branches by held direction), the arcade ladder (the
+ * versus card and READY freezing the rules, held buttons no press at FIGHT,
+ * the banner, select, opponents, loss, clear, Auto rotation, replay), state
+ * round-trip and rejection, the AI's use of every move, and
  * the stats: each character's system and resolved stats, walk speeds, jump
  * arcs and prejump, life, defense, weight, push distance, guard range, input
  * windows and the samsho5sp damage scale changing the fight by exact
@@ -977,6 +978,86 @@ static void round_start(void)
 	w[19 + 17] = STAND_LP + 1; /* P1 buffer */
 	assert(!fight_decode(&t, &pack, w));
 }
+/* The combo words in a saved state (COMBO_AT in fighter.c): combo, shown,
+ * show and best, two each. */
+#define COMBO_W 165
+/* Combos: crouch LP chains keep P1 in hitstun, the count shows from the
+ * second hit and stays COMBO_TICKS after P1 recovers; LP into a Power Wave
+ * that lands after the hitstun is two single hits; guarded hits count
+ * nothing; mid-combo states round-trip and bad combo words are rejected. */
+static void combos(void)
+{
+	static struct scene with, without;
+	struct fight_state s, t;
+	uint32_t w[STATE_WORDS], bad[STATE_WORDS];
+	unsigned top = 0;
+	int saved = 0;
+	duel(&s, 200, 250);
+	for (int n = 1; n <= 40; n++) {
+		step2(&s, K(DOWN) | (n % 2 ? K(Y) : 0), 0);
+		if (s.combo[0] >= 2) {
+			assert(s.shown[0] == s.combo[0] && s.show[0] == COMBO_TICKS &&
+			       s.p[1].stun && !s.p[1].block);
+			if (!saved++) {
+				fight_encode(&s, w);
+				assert(fight_decode(&t, &pack, w));
+				fight_cast(&pack, &s);
+				fight_scene(&s, &pack, &with);
+				t.shown[0] = t.show[0] = 0;
+				fight_scene(&t, &pack, &without);
+				assert(with.count > without.count);
+				static const struct {
+					int at;
+					uint32_t value;
+				} cases[] = {{0, 3}, {2, 1}, {6, MAX_COMBO + 1}, {4, COMBO_TICKS - 1},
+					     {1, 1}, {7, MAX_COMBO + 1}, {5, 1}, {3, 2}};
+				for (size_t k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+					memcpy(bad, w, sizeof(w));
+					bad[COMBO_W + cases[k].at] = cases[k].value;
+					if (fight_decode(&t, &pack, bad)) {
+						fprintf(stderr, "bad combo case %zu accepted\n", k);
+						abort();
+					}
+				}
+			}
+		}
+		top = s.combo[0] > top ? s.combo[0] : top;
+		assert(!s.combo[1] && !s.best[1]);
+	}
+	assert(top >= 2 && s.best[0] == top && s.hits >= top && saved);
+	/* Once the second hit lands nothing more is pressed: the count holds
+	 * until P1 leaves hitstun, then fades. */
+	duel(&s, 200, 250);
+	for (int n = 1; s.combo[0] < 2; n++) {
+		assert(n <= 40);
+		step2(&s, K(DOWN) | (n % 2 ? K(Y) : 0), 0);
+	}
+	while (s.combo[0]) {
+		assert(s.shown[0] == s.combo[0] && s.show[0] == COMBO_TICKS);
+		step2(&s, 0, 0);
+	}
+	assert(s.shown[0] >= 2 && s.show[0] == COMBO_TICKS && !s.p[1].stun);
+	for (int j = 1; j <= COMBO_TICKS; j++) {
+		step2(&s, 0, 0);
+		assert(s.show[0] == (uint32_t)(COMBO_TICKS - j) && !s.shown[0] == (j == COMBO_TICKS));
+	}
+	assert(s.best[0] == top);
+	/* LP, then the cancelled Power Wave hits after P1 left hitstun. */
+	duel(&s, 200, 260);
+	for (int n = 1; n <= 30; n++) {
+		step2(&s, n == 1 ? K(Y) : motion(MOTION_236, n, 9, 1, K(Y)), 0);
+		assert(s.combo[0] <= 1 && !s.shown[0]);
+	}
+	assert(s.hits == 2 && s.best[0] == 1);
+	/* Guarded: nothing. */
+	duel(&s, 200, 250);
+	for (int n = 1; n <= 40; n++)
+		step2(&s, K(DOWN) | (n % 2 ? K(Y) : 0), K(RIGHT) | K(DOWN));
+	assert(s.guards >= 1 && s.hits == s.guards && !s.best[0] && !s.shown[0]);
+	/* A new round starts from nothing. */
+	fight_start(&s, &pack, terry, terry);
+	assert(!s.best[0] && !s.combo[0] && !s.shown[0] && !s.show[0]);
+}
 /* Mid-hitstop state with a live projectile, a buffered special and a
  * charge round-trips, replays identically and rejects impossible values
  * without touching the destination. */
@@ -1797,7 +1878,8 @@ static void snapshot(const struct fight_state *s, const char *suffix)
 	write_ppm(path, fb);
 }
 /* Select, READY, FIGHT, a Power Wave in flight with the box overlay, a
- * lost run, a cleared one and a hit on each stage, for human review. */
+ * lost run, a cleared one, a hit on each stage and a combo count, for
+ * human review. */
 static void previews(void)
 {
 	struct fight_state s;
@@ -1847,6 +1929,14 @@ static void previews(void)
 		step2(&s, 0, 0);
 		snapshot(&s, k ? "mizuki" : "korea");
 	}
+	/* A crouch LP chain's count on screen. */
+	unsigned korea = stage_index("KOREA");
+	int centre = pack.stage[korea].width / 2;
+	staged(&s, korea, terry, terry, centre - 25, centre + 25);
+	for (int n = 1; n <= 40 && s.shown[0] < 2; n++)
+		step2(&s, K(DOWN) | (n % 2 ? K(Y) : 0), 0);
+	assert(s.shown[0] >= 2);
+	snapshot(&s, "combo");
 }
 static void logic_tests(const uint8_t *data, size_t len)
 {
@@ -1878,6 +1968,7 @@ static void logic_tests(const uint8_t *data, size_t len)
 	follow_ups();
 	ladder();
 	round_start();
+	combos();
 	state_words();
 	stat_tests();
 	pack.stages = stages;
@@ -1977,6 +2068,9 @@ int main(int argc, char **argv)
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
 	copy[7] = '7'; /* FGSTATE7, before READY and FIGHT */
+	assert(!retro_unserialize(copy, n));
+	memcpy(copy, end, n);
+	copy[7] = '8'; /* FGSTATE8, before combos */
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
 	memset(copy + 16 + 8 * 4, 0xff, 4);
@@ -2082,7 +2176,7 @@ int main(int argc, char **argv)
 	     "effect budget, camera and walls, sparks, sound events, content, "
 	     "RGB565/XRGB8888, audio, ports, replay, pause, state validation, frame "
 	     "data, hit/block/hitstop ticks, pushback and corner, guard heights, "
-	     "trades, commands, buffer, prejump, cancels, follow-ups, projectiles and clash, "
+	     "trades, combos, commands, buffer, prejump, cancels, follow-ups, projectiles and clash, "
 	     "specials, ladder, systems and stats, AI coverage and stress cycle "
 	     "passed");
 	return 0;

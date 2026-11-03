@@ -123,6 +123,10 @@
 #define FIGHT_TICKS 24
 #define ROUND_TICKS (INTRO_TICKS + READY_TICKS)
 #define BANNER_END (ROUND_TICKS + FIGHT_TICKS)
+/* Combo counter: "N HITS" stays this many ticks after a combo of at least
+ * two hits ends; counts stop at MAX_COMBO. */
+#define COMBO_TICKS 60
+#define MAX_COMBO 99
 /* Cast frames a scene can report missing (see struct scene). */
 #define SCENE_MISSES 16
 enum action {
@@ -252,7 +256,11 @@ struct sound_event {
  * runs once it reaches ROUND_TICKS) and the FIGHT banner (up to
  * BANNER_END), run counts ladder runs (the Auto rotation). arena is the
  * pack stage of the fight (0 without stages), cam the camera column, shake
- * and flash the remaining screen shake and KO flash ticks. */
+ * and flash the remaining screen shake and KO flash ticks. Combos, per
+ * attacking side: combo counts the unguarded hits since the defender last
+ * left hitstun (0 = none running), shown the count on screen (at least 2,
+ * 0 = none) for show more ticks once the combo ended, best the longest
+ * combo of this round. */
 struct fight_state {
 	uint32_t tick, rng, previous, paused, stress, boxes, automatic, round;
 	uint32_t mode, timer, beaten, stage, run, wins[2], chr[2], pal[2];
@@ -264,6 +272,7 @@ struct fight_state {
 	/* This tick's sound events (see enum sound_id). */
 	uint32_t sounds;
 	struct sound_event sound[MAX_SOUND_EVENTS];
+	uint32_t combo[2], shown[2], show[2], best[2];
 };
 /* One opaque run in a frame row; pixels index the frame's data. */
 struct span {
