@@ -8,8 +8,8 @@
  * height, follow-ups (Iori's three Aoi Hana stages: windows, the buffer,
  * expiry, contact, the move clock across a state load; May Lee's Tatsuo
  * Kyaku branches by held direction), the arcade ladder (the versus card
- * freezing the rules, select, opponents, loss, clear, Auto rotation,
- * replay), state round-trip and rejection, the AI's use of every move, and
+ * and READY freezing the rules, held buttons no press at FIGHT, the banner,
+ * select, opponents, loss, clear, Auto rotation, replay), state round-trip and rejection, the AI's use of every move, and
  * the stats: each character's system and resolved stats, walk speeds, jump
  * arcs and prejump, life, defense, weight, push distance, guard range, input
  * windows and the samsho5sp damage scale changing the fight by exact
@@ -790,26 +790,26 @@ static void follow_ups(void)
 }
 /* The arcade ladder on a four-character roster made of Terry copies:
  * select, random unbeaten opponents, a loss, a clear and save/replay. */
-/* Step through a ladder round's versus card: nothing moves, a held button
- * is no press afterwards and ROUND_START sounds on its last tick. */
+/* Step through a ladder round's versus card and READY: nothing moves, a
+ * held button is no press afterwards and ROUND_START sounds at FIGHT. */
 static void intro(struct fight_state *s)
 {
 	assert(s->mode == MODE_FIGHT);
 	struct fight_state t = *s;
-	for (uint32_t n = s->timer; n < INTRO_TICKS; n++) {
+	for (uint32_t n = s->timer; n < ROUND_TICKS; n++) {
 		step2(s, K(A) | K(LEFT), K(B));
 		assert(s->p[0].x == t.p[0].x && !s->p[0].move && !s->p[1].move &&
 		       s->p[0].keys == (int32_t)(K(A) | K(LEFT)) &&
-		       (s->timer == INTRO_TICKS || !s->sounds));
+		       (s->timer == ROUND_TICKS || !s->sounds));
 	}
-	assert(s->timer == INTRO_TICKS && s->sounds == 1 && s->sound[0].id == SOUND_ROUND_START);
+	assert(s->timer == ROUND_TICKS && s->sounds == 1 && s->sound[0].id == SOUND_ROUND_START);
 	/* A, still held, does not kick when the round begins. */
 	step2(s, K(A), 0);
 	assert(!s->p[0].move);
 }
 static void win_round(struct fight_state *s, int winner)
 {
-	if (s->timer < INTRO_TICKS)
+	if (s->timer < ROUND_TICKS)
 		intro(s);
 	/* Stand LP into a 10 hp loser: KO within a few calls, round over 180 later. */
 	s->p[0].x = QX(200);
@@ -898,6 +898,84 @@ static void ladder(void)
 		win_round(&s, 0);
 		assert(s.mode == MODE_CLEAR);
 	}
+}
+/* Does scene a start with b's commands (the same draws, then more)? */
+static int extends(const struct scene *a, const struct scene *b)
+{
+	if (a->count <= b->count)
+		return 0;
+	for (unsigned k = 0; k < b->count; k++) {
+		const struct command *x = &a->cmd[k], *y = &b->cmd[k];
+		if (x->op != y->op || x->x != y->x || x->y != y->y || x->w != y->w || x->h != y->h ||
+		    x->image != y->image || x->color != y->color)
+			return 0;
+	}
+	return 1;
+}
+/* READY then FIGHT: the rules hold through the versus card and READY, a
+ * button held into FIGHT is no press but a fresh one is, ROUND_START sounds
+ * once at FIGHT, the banner draws on top of the plain round's commands
+ * until BANNER_END, and a state in READY with anything in motion is
+ * rejected. */
+static void round_start(void)
+{
+	static struct scene sc, plain;
+	struct fight_state s, t;
+	uint32_t w[STATE_WORDS];
+	fight_reset(&s, 0);
+	step2(&s, K(Y), 0);
+	assert(s.mode == MODE_FIGHT && s.timer == 0);
+	for (int n = 0; n < INTRO_TICKS; n++)
+		step2(&s, K(X) | K(RIGHT), 0);
+	assert(s.timer == INTRO_TICKS && !s.sounds);
+	fight_cast(&pack, &s);
+	t = s;
+	t.timer = BANNER_END;
+	fight_scene(&t, &pack, &plain);
+	fight_scene(&s, &pack, &sc);
+	assert(extends(&sc, &plain));
+	int x0 = s.p[0].x, x1 = s.p[1].x;
+	for (int n = INTRO_TICKS; n < ROUND_TICKS; n++) {
+		assert(!s.sounds);
+		step2(&s, K(X) | K(RIGHT), 0);
+		assert(s.p[0].x == x0 && s.p[1].x == x1 && !s.p[0].move && !s.p[1].move &&
+		       !s.p[0].buffer && !s.p[1].plan);
+	}
+	assert(s.timer == ROUND_TICKS && s.sounds == 1 && s.sound[0].id == SOUND_ROUND_START);
+	fight_encode(&s, w);
+	assert(fight_decode(&t, &pack, w));
+	fight_scene(&s, &pack, &sc);
+	t = s;
+	t.timer = BANNER_END;
+	fight_scene(&t, &pack, &plain);
+	assert(extends(&sc, &plain));
+	/* X is still held: no press; RIGHT walks. */
+	step2(&s, K(X) | K(RIGHT), 0);
+	assert(!s.p[0].move && s.p[0].x > x0 && s.timer == ROUND_TICKS + 1 && !s.sounds);
+	step2(&s, 0, 0);
+	step2(&s, K(X), 0);
+	assert(s.p[0].move == STAND_HP + 1);
+	while (s.timer < BANNER_END)
+		step2(&s, 0, 0);
+	step2(&s, 0, 0);
+	assert(s.timer == BANNER_END);
+	fight_scene(&s, &pack, &sc);
+	t = s;
+	t.timer = BANNER_END - 1;
+	fight_scene(&t, &pack, &plain);
+	assert(extends(&plain, &sc));
+	/* Past the banner, or a READY state with a buffered press. */
+	fight_encode(&s, w);
+	w[9] = BANNER_END + 1;
+	assert(!fight_decode(&t, &pack, w));
+	fight_reset(&s, 0);
+	step2(&s, K(Y), 0);
+	for (int n = 0; n < INTRO_TICKS + 4; n++)
+		step2(&s, 0, 0);
+	fight_encode(&s, w);
+	assert(fight_decode(&t, &pack, w));
+	w[19 + 17] = STAND_LP + 1; /* P1 buffer */
+	assert(!fight_decode(&t, &pack, w));
 }
 /* Mid-hitstop state with a live projectile, a buffered special and a
  * charge round-trips, replays identically and rejects impossible values
@@ -1323,11 +1401,11 @@ static void spark_sound_tests(void)
 	fight_scene(&s, &pack, &sc);
 	assert(sc.layers > 0);
 	int starts = 0;
-	for (int n = 0; n < 200 + INTRO_TICKS && !starts; n++) {
+	for (int n = 0; n < 200 + ROUND_TICKS && !starts; n++) {
 		step2(&s, 0, 0);
 		starts = heard(&s, SOUND_ROUND_START, 0);
 	}
-	assert(starts == 1 && s.mode == MODE_FIGHT && !s.ended && s.timer == INTRO_TICKS);
+	assert(starts == 1 && s.mode == MODE_FIGHT && !s.ended && s.timer == ROUND_TICKS);
 	/* A paused tick emits nothing and changes nothing. */
 	staged(&s, korea, terry, terry, 346, 406);
 	step2(&s, K(START), 0);
@@ -1718,8 +1796,8 @@ static void snapshot(const struct fight_state *s, const char *suffix)
 	fight_render(&pack, &scene, fb);
 	write_ppm(path, fb);
 }
-/* Select, a Power Wave in flight with the box overlay, a lost run, a
- * cleared one and a hit on each stage, for human review. */
+/* Select, READY, FIGHT, a Power Wave in flight with the box overlay, a
+ * lost run, a cleared one and a hit on each stage, for human review. */
 static void previews(void)
 {
 	struct fight_state s;
@@ -1727,6 +1805,14 @@ static void previews(void)
 	for (int n = 0; n < 20; n++)
 		step2(&s, 0, 0);
 	snapshot(&s, "select");
+	/* READY over the stage, then FIGHT. */
+	step2(&s, K(Y), 0);
+	while (s.timer < INTRO_TICKS + 10)
+		step2(&s, 0, 0);
+	snapshot(&s, "ready");
+	while (s.timer < ROUND_TICKS + 2)
+		step2(&s, 0, 0);
+	snapshot(&s, "fight");
 	duel(&s, 100, 330);
 	for (int n = 1; n <= 40; n++)
 		step2(&s, motion(MOTION_236, n, 5, 1, K(Y)), 0);
@@ -1791,6 +1877,7 @@ static void logic_tests(const uint8_t *data, size_t len)
 	rising_tackle();
 	follow_ups();
 	ladder();
+	round_start();
 	state_words();
 	stat_tests();
 	pack.stages = stages;
@@ -1889,6 +1976,9 @@ int main(int argc, char **argv)
 	copy[7] = '6'; /* FGSTATE6, before the intro and follow-up inputs */
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
+	copy[7] = '7'; /* FGSTATE7, before READY and FIGHT */
+	assert(!retro_unserialize(copy, n));
+	memcpy(copy, end, n);
 	memset(copy + 16 + 8 * 4, 0xff, 4);
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
@@ -1936,7 +2026,7 @@ int main(int argc, char **argv)
 	keys[0] = 1u << RETRO_DEVICE_ID_JOYPAD_Y;
 	retro_run();
 	keys[0] = 0;
-	for (int i = 0; i < INTRO_TICKS; i++)
+	for (int i = 0; i < ROUND_TICKS; i++)
 		retro_run();
 	keys[1] = 1u << RETRO_DEVICE_ID_JOYPAD_LEFT;
 	retro_run();
@@ -1946,7 +2036,7 @@ int main(int argc, char **argv)
 	keys[0] = 1u << RETRO_DEVICE_ID_JOYPAD_Y;
 	retro_run();
 	keys[0] = 0;
-	for (int i = 0; i <= INTRO_TICKS; i++)
+	for (int i = 0; i <= ROUND_TICKS; i++)
 		retro_run();
 	save(end, n);
 	assert(memcmp(start, end, n));
@@ -1956,7 +2046,7 @@ int main(int argc, char **argv)
 	keys[0] = 1u << RETRO_DEVICE_ID_JOYPAD_Y;
 	retro_run();
 	keys[0] = 0;
-	for (int i = 0; i < INTRO_TICKS; i++)
+	for (int i = 0; i < ROUND_TICKS; i++)
 		retro_run();
 	keys[1] = 1u << RETRO_DEVICE_ID_JOYPAD_LEFT;
 	retro_run();

@@ -1,5 +1,5 @@
 /* Standard libretro fighter core: FIGHTP07 content, input, deterministic
- * FGSTATE7 saves, audio and software frames. Timing below measures work only;
+ * FGSTATE8 saves, audio and software frames. Timing below measures work only;
  * the frontend owns pacing. Logs the system profiles, the roster with each
  * character's system and resolved stats, every move's frame data and class
  * (follow-ups with their parent and window) and the resident memory at
@@ -542,7 +542,7 @@ bool retro_serialize(void *data, size_t size)
 	uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	fight_encode(&state, w);
-	memcpy(p, "FGSTATE7", 8);
+	memcpy(p, "FGSTATE8", 8);
 	put32(p + 8, assets.hash);
 	put32(p + 12, state.automatic);
 	for (int i = 0; i < STATE_WORDS; i++)
@@ -555,7 +555,7 @@ bool retro_unserialize(const void *data, size_t size)
 	const uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	if (!loaded || !p || size != retro_serialize_size() ||
-	    memcmp(p, "FGSTATE7", 8) || get32(p + 8) != assets.hash ||
+	    memcmp(p, "FGSTATE8", 8) || get32(p + 8) != assets.hash ||
 	    get32(p + 12) != state.automatic)
 		return false;
 	for (int i = 0; i < STATE_WORDS; i++)

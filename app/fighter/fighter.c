@@ -4,7 +4,8 @@
  * boxes from the pack, hitstop, hitstun, blockstun, high/low/overhead guard,
  * pushback with corner transfer, KO, AI (with specials), the camera and
  * walls, hit sparks, screen shake, the KO flash, sound events, the select,
- * result and clear screens and the stress scenes, plus the draw-command list
+ * result and clear screens, the READY/FIGHT round start and the stress
+ * scenes, plus the draw-command list
  * (parallax stage or the flat fallback, the attacking fighter drawn on top,
  * sparks, L overlays the real boxes; a frame or stage the render cache has
  * not expanded yet is left out and reported in the scene). Rules pick an
@@ -96,9 +97,11 @@
  * a one-character roster), fought on that opponent's home stage, or on
  * pack stage (opponent index % stages) when it has none. Every ladder round
  * opens with a versus card of INTRO_TICKS ticks (stage number, both
- * fighters, names and stage name) during which nothing moves and held keys
- * are only recorded, so a button held over it is no press; ROUND_START
- * sounds as it ends (fight_start has no card and sounds it at once). A loss
+ * fighters, names and stage name), then READY_TICKS of a big READY over the
+ * stage; nothing moves through both and held keys are only recorded, so a
+ * button held over them is no press. The round begins with FIGHT (shown
+ * FIGHT_TICKS while the round runs) and ROUND_START (fight_start has
+ * neither and sounds it at once). A loss
  * shows the result screen, beating everyone the clear screen; both return
  * to select. Auto skips select and rotates P1 through the roster each run. */
 #include "fighter.h"
@@ -189,7 +192,7 @@ void fight_reset(struct fight_state *s, int automatic)
 	place(s);
 }
 /* A round between c0 and c1; with intro it opens with the versus card and
- * ROUND_START sounds when that ends, otherwise at once. */
+ * READY and ROUND_START sounds at FIGHT, otherwise at once (no banner). */
 static void begin_round(struct fight_state *s, const struct assets *a, unsigned c0, unsigned c1,
 			int intro)
 {
@@ -204,7 +207,7 @@ static void begin_round(struct fight_state *s, const struct assets *a, unsigned 
 	s->p[0].hp = a->chr[c0 < a->characters ? c0 : 0].stats.life;
 	s->p[1].hp = opponent->stats.life;
 	s->mode = MODE_FIGHT;
-	s->timer = intro ? 0 : INTRO_TICKS;
+	s->timer = intro ? 0 : BANNER_END;
 	s->chr[0] = c0;
 	s->chr[1] = c1;
 	s->pal[0] = 0;
@@ -1119,15 +1122,18 @@ void fight_step(struct fight_state *s, const struct assets *a, uint32_t input,
 			to_select(s, a);
 		return;
 	}
-	if (s->timer < INTRO_TICKS) {
-		/* The versus card: nothing moves and the AI waits; buttons held
-		 * now are no press when the round begins. */
+	if (s->timer < ROUND_TICKS) {
+		/* The versus card and READY: nothing moves and the AI waits;
+		 * buttons held now are no press when FIGHT appears. */
 		s->p[0].keys = (int32_t)((s->automatic ? 0 : input) & 0xffffu);
 		s->p[1].keys = (int32_t)((human ? second : 0) & 0xffffu);
-		if (++s->timer == INTRO_TICKS)
+		if (++s->timer == ROUND_TICKS)
 			sound(s, a, SOUND_ROUND_START, 0, 0);
 		return;
 	}
+	/* FIGHT stays up for a while as the round runs. */
+	if (s->timer < BANNER_END)
+		s->timer++;
 	if (s->ended) {
 		/* Airborne fighters still land and projectiles fly while the KO
 		 * plays; nothing hits. */
@@ -1165,10 +1171,11 @@ static const uint16_t glyph[] = {31599, 9362, 29671, 29647, 23497, 31183, 31215,
 				 31204, 31087, 23533, 29847, 4687, 23469, 18727, 24557,
 				 31597, 31599, 31716, 31611, 27565, 31183, 29842, 23407,
 				 23402, 23423, 23213, 23186, 29351, 1040, 448, 4772};
-/* Each glyph row's lit run is one 2-pixel-high rectangle. */
-static void text(struct scene *s, int x, int y, const char *str, uint16_t color)
+/* Each glyph row's lit run is one rectangle of cell x cell pixels per glyph
+ * pixel; glyphs advance 4 cells. */
+static void text_cell(struct scene *s, int x, int y, const char *str, uint16_t color, int cell)
 {
-	for (; *str; str++, x += 8) {
+	for (; *str; str++, x += 4 * cell) {
 		const char *p = strchr(alphabet, *str);
 		if (!p)
 			continue;
@@ -1180,10 +1187,14 @@ static void text(struct scene *s, int x, int y, const char *str, uint16_t color)
 				int n = 1;
 				while (c + n < 3 && (bits & (1u << (14 - r * 3 - c - n))))
 					n++;
-				rect(s, x + c * 2, y + r * 2, 2 * n, 2, color, OPAQUE, 255);
+				rect(s, x + c * cell, y + r * cell, cell * n, cell, color, OPAQUE, 255);
 				c += n - 1;
 			}
 	}
+}
+static void text(struct scene *s, int x, int y, const char *str, uint16_t color)
+{
+	text_cell(s, x, y, str, color, 2);
 }
 static int text_width(const char *str) { return 8 * (int)strlen(str); }
 static void sprite(struct scene *s, const struct assets *a, int image, int x, int y,
@@ -1372,6 +1383,19 @@ static void intro_scene(const struct fight_state *s, const struct assets *a, str
 		text(out, 240 - text_width(a->stage[s->arena].name) / 2, 300,
 		     a->stage[s->arena].name, 0x8410);
 }
+/* READY over the frozen round, then FIGHT as it begins: big glyphs (cell
+ * BANNER_CELL) with a dark drop shadow, centred above the fighters. */
+#define BANNER_CELL 10
+static void banner(struct scene *out, const struct fight_state *s)
+{
+	if (s->timer < INTRO_TICKS || s->timer >= BANNER_END)
+		return;
+	int ready = s->timer < ROUND_TICKS;
+	const char *word = ready ? "READY" : "FIGHT";
+	int w = (4 * (int)strlen(word) - 1) * BANNER_CELL, x = (FW - w) / 2, y = 96;
+	text_cell(out, x + 4, y + 4, word, 0x0000, BANNER_CELL);
+	text_cell(out, x, y, word, ready ? 0xffe0 : 0xfa00, BANNER_CELL);
+}
 void fight_scene(const struct fight_state *s, const struct assets *a, struct scene *out)
 {
 	out->count = out->effects_requested = out->effects_drawn = out->sparks = out->layers = 0;
@@ -1497,6 +1521,7 @@ hud:
 	/* Mode indicators don't depend on the text command budget. */
 	rect(out, 220, 16, 40, 13, (uint16_t)(0x001f + s->stress * 0x3800), OPAQUE,
 	     255);
+	banner(out, s);
 }
 /* ---- state words ---- */
 #define FIGHTER_WORDS 27
@@ -1688,7 +1713,7 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 		return 0;
 	if (t.mode == MODE_FIGHT) {
 		uint32_t opp = opponents(a, t.chr[0]);
-		if (t.timer > INTRO_TICKS || (t.timer < INTRO_TICKS && (t.ended || t.shake || t.flash)))
+		if (t.timer > BANNER_END || (t.timer < ROUND_TICKS && (t.ended || t.shake || t.flash)))
 			return 0;
 		/* A mirror is always a valid fight (tests and versus set one up). */
 		if (t.pal[0] || t.pal[1] != (t.chr[0] == t.chr[1]) ||
@@ -1725,8 +1750,8 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 		    sh->age >= a->chr[t.chr[sh->owner]].projectile[sh->kind - 1].lifetime)
 			return 0;
 	}
-	/* Nothing moves during the versus card. */
-	for (int i = 0; t.mode == MODE_FIGHT && t.timer < INTRO_TICKS && i < 2; i++)
+	/* Nothing moves during the versus card and READY. */
+	for (int i = 0; t.mode == MODE_FIGHT && t.timer < ROUND_TICKS && i < 2; i++)
 		if (t.p[i].move || t.p[i].stun || t.p[i].buffer || owned[i])
 			return 0;
 	*s = t;

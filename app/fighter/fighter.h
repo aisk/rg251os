@@ -113,10 +113,16 @@
 #define HISTORY 32
 /* Rounds a fighter must win to take a match (1 = single round). */
 #define ROUNDS_TO_WIN 1
-/* Ticks of the versus card before a ladder round: the rules hold still
- * (no input, no AI) while the core fills the render cache; ROUND_START
- * sounds when it ends. */
+/* A ladder round opens with the versus card (INTRO_TICKS, while the core
+ * fills the render cache), then READY over the frozen stage (READY_TICKS);
+ * the rules hold still through both (no input, no AI). The round runs from
+ * ROUND_TICKS on, when ROUND_START sounds, and FIGHT stays on screen for
+ * FIGHT_TICKS more (the timer stops at BANNER_END). */
 #define INTRO_TICKS 45
+#define READY_TICKS 36
+#define FIGHT_TICKS 24
+#define ROUND_TICKS (INTRO_TICKS + READY_TICKS)
+#define BANNER_END (ROUND_TICKS + FIGHT_TICKS)
 /* Cast frames a scene can report missing (see struct scene). */
 #define SCENE_MISSES 16
 enum action {
@@ -223,7 +229,8 @@ struct spark_slot {
  *   CLASH           two projectiles cancel out. side: the lower slot's owner.
  *   KO              a fighter's life reaches 0. side: the fighter knocked
  *                   out.
- *   ROUND_START     a round begins (fight_start). side 0, P1's character.
+ *   ROUND_START     a round begins: FIGHT after READY in the ladder, at once
+ *                   in fight_start. side 0, P1's character.
  * side is 0 or 1, chr the character index in the pack, system its system
  * profile index (struct assets sys[]), move a move index + 1 or 0. */
 enum sound_id {
@@ -241,8 +248,9 @@ struct sound_event {
  * side; in the select screen chr[0] is the cursor. beaten has a bit per
  * character beaten in this ladder run, stage counts from 1, wins counts
  * rounds in the current match, timer counts ticks in a select, result or
- * clear screen and, in the fight mode, the intro (the round runs once it
- * reaches INTRO_TICKS), run counts ladder runs (the Auto rotation). arena is the
+ * clear screen and, in the fight mode, the versus card and READY (the round
+ * runs once it reaches ROUND_TICKS) and the FIGHT banner (up to
+ * BANNER_END), run counts ladder runs (the Auto rotation). arena is the
  * pack stage of the fight (0 without stages), cam the camera column, shake
  * and flash the remaining screen shake and KO flash ticks. */
 struct fight_state {
