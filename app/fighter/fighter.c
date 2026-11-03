@@ -91,7 +91,10 @@
  * on the first free tick). A newer press replaces the buffer unless that
  * would trade a special for a normal. Motions are matched backwards from
  * the press, relative to the current facing: 236 and 214 within quarter
- * ticks, 623 within dragon; [4]6 and [2]8 need charge ticks of back/down,
+ * ticks, 623, 421 and the half circles within dragon (a half circle needs
+ * its 4, 2 and 6 in order, 41236 back to forward and 63214 forward to back,
+ * so it also completes a 236 or 214: pack order decides, half circles
+ * first); [4]6 and [2]8 need charge ticks of back/down,
  * released at most grace ticks ago (or still held), and forward/up in the
  * last release ticks (all from the fighter's stats). A projectile special
  * is not recognised while its owner has one alive.
@@ -343,13 +346,17 @@ static int charged(uint32_t c, const struct stats *st, int which)
 {
 	return charge_byte(c, 2 * which) >= st->charge || charge_byte(c, 2 * which + 1);
 }
+/* Key directions of each motion, matched in order (in-between directions
+ * are allowed); charges and held directions have none. */
+static const int motion_keys[MOTIONS][3] = {
+	[MOTION_236] = {2, 3, 6},   [MOTION_214] = {2, 1, 4},   [MOTION_623] = {6, 2, 3},
+	[MOTION_41236] = {4, 2, 6}, [MOTION_63214] = {6, 2, 4}, [MOTION_421] = {4, 2, 1}};
 /* Motion m in the last limit ticks of history at most (a follow-up's
  * motion must come after its parent began); the held-direction commands
  * look at this tick's direction only. */
 static int motion_in(const struct fighter *p, const struct stats *st, int motion, unsigned limit)
 {
-	static const int seq[3][3] = {{2, 3, 6}, {2, 1, 4}, {6, 2, 3}};
-	if (motion >= MOTION_ANY && motion < MOTIONS) {
+	if (motion >= MOTION_ANY && motion <= HOLD_4) {
 		int n = numpad(history_at(p, 0), p->face);
 		switch (motion) {
 		case HOLD_5:
@@ -378,10 +385,10 @@ static int motion_in(const struct fighter *p, const struct stats *st, int motion
 	}
 	if (motion < 0 || motion >= MOTIONS)
 		return 0;
-	unsigned window = motion == MOTION_623 ? st->dragon : st->quarter;
+	unsigned window = motion <= MOTION_214 ? st->quarter : st->dragon;
 	int k = 2;
 	for (unsigned i = 0; i < window && i < limit && k >= 0; i++)
-		if (numpad(history_at(p, i), p->face) == seq[motion][k])
+		if (numpad(history_at(p, i), p->face) == motion_keys[motion][k])
 			k--;
 	return k < 0;
 }
@@ -552,7 +559,8 @@ static uint32_t button_key(unsigned bits)
 			return buttons[k];
 	return 0;
 }
-/* The AI's input for tick t of a special's motion, or 0 when it is done;
+/* The AI's input for tick t of a special's motion, or 0 when it is done:
+ * each key direction of a motion for two ticks, the button with the last;
  * charges hold for charge + 2 ticks. */
 static uint32_t macro(int motion, uint32_t charge, uint32_t t, int face, uint32_t button)
 {
@@ -563,8 +571,7 @@ static uint32_t macro(int motion, uint32_t charge, uint32_t t, int face, uint32_
 			 release = motion == CHARGE_46 ? fwd : KEY(UP);
 		return t < charge + 2 ? hold : t == charge + 2 ? release | button : 0;
 	}
-	static const int seq[3][3] = {{2, 3, 6}, {2, 1, 4}, {6, 2, 3}};
-	if (motion >= MOTION_ANY) {
+	if (motion >= MOTION_ANY && motion <= HOLD_4) {
 		static const int held[] = {5, 5, 8, 2, 6, 4};
 		int n = held[motion - MOTION_ANY];
 		uint32_t key = n == 8 ? KEY(UP) : n == 2 ? down : n == 6 ? fwd : n == 4 ? back : 0;
@@ -572,7 +579,7 @@ static uint32_t macro(int motion, uint32_t charge, uint32_t t, int face, uint32_
 	}
 	if (t >= 5)
 		return 0;
-	int n = seq[motion][t / 2];
+	int n = motion_keys[motion][t / 2];
 	uint32_t key = (n <= 3 ? down : 0) | (n % 3 == 0 ? fwd : n % 3 == 1 ? back : 0);
 	return t == 4 ? key | button : key;
 }
@@ -643,7 +650,7 @@ static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
 			const struct move *m = &c->move[k];
 			if (m->after != parent || (m->contact && !p->hit))
 				continue;
-			unsigned lead = m->motion >= MOTION_ANY ? 0 : 4;
+			unsigned lead = m->motion >= MOTION_ANY && m->motion <= HOLD_4 ? 0 : 4;
 			int from = (int)m->open - (int)lead, to = (int)m->close - (int)lead;
 			if (p->elapsed >= from && p->elapsed <= to && h % (options + 1) == 0)
 				pick = k;
@@ -1626,7 +1633,8 @@ static void button_names(const struct character *c, unsigned bits, char *out)
 static void list_line(const struct character *c, unsigned k, char *out)
 {
 	static const char *const notation[MOTIONS] = {
-	    "\2\3\6", "\2\1\4", "\6\2\3", "[\4]\6", "[\2]\10", "", "", "\10", "\2", "\6", "\4"};
+	    "\2\3\6", "\2\1\4", "\6\2\3", "[\4]\6", "[\2]\10", "", "", "\10", "\2", "\6", "\4",
+	    "\4\1\2\3\6", "\6\3\2\1\4", "\4\2\1"};
 	const struct move *m = &c->move[k];
 	out[0] = 0;
 	if (k < MOVES) {

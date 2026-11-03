@@ -42,9 +42,10 @@ Bank format FIGHTSND version 1, little-endian:
              u8 move (0 any, else move index + 1), u8 variants (1..4),
              u16 clip[4] (0xffff = stay silent for that variant), u16 gain
              (/256), u16 reserved 0
-  music x 32: scope[16] ("" or a system name), u8 cue (0 select, 1 fight,
-             2 win, 3 continue, 4 clear), u8 tracks (1..6), u16 track[6],
-             u16 reserved 0
+  music x 32: scope[16] ("", a system name or a stage's display name; a
+             stage row wins over the system's in that arena), u8 cue (0
+             select, 1 fight, 2 win, 3 continue, 4 clear), u8 tracks
+             (1..6), u16 track[6], u16 reserved 0
 """
 import array
 import gzip
@@ -486,7 +487,8 @@ def scope16(text, what):
 
 
 def roster_info(roster):
-    """{display name: [move names in pack order]}, system names."""
+    """{display name: [move names in pack order]}, system names, stage display
+    names."""
     roster = pathlib.Path(roster)
     data = json.loads(roster.read_text())
     paths = [roster.parent / p for p in data['manifests']] if 'manifests' in data else [roster]
@@ -496,13 +498,15 @@ def roster_info(roster):
             moves = list(pack.MOVES) + [k for k in ch['moves'] if k not in pack.MOVES]
             chars[pack.display_name(key)] = moves
     systems = json.loads((roster.parent / 'systems.json').read_text())['systems']
-    return chars, list(systems)
+    stages = [pack.display_name(json.loads((roster.parent / p).read_text())['name'])
+              for p in data.get('stages', [])]
+    return chars, list(systems), stages
 
 
 def build(roster, output):
     m = load_manifest()
     events = sound_ids()
-    chars, systems = roster_info(roster)
+    chars, systems, stages = roster_info(roster)
     tracks_meta = json.loads(TRACKS.read_text()) if TRACKS.exists() else {}
     clip_names = list(m['clips'])
     clips, synthesized = [], []
@@ -534,9 +538,12 @@ def build(roster, output):
                        1 if loops else 0, int(m['tracks'][name].get('level', 1000))))
     track_index = {t[0]: i for i, t in enumerate(tracks)}
 
-    def scope_of(text, what):
+    def scope_of(text, what, music=False):
+        if music and text in stages:
+            return scope16(text, what)
         if text and text not in systems and text not in chars:
-            raise ValueError(f'{what}: scope {text!r} is neither a system nor a character')
+            raise ValueError(f'{what}: scope {text!r} is neither a system nor a character' +
+                             (' nor a stage' if music else ''))
         return scope16(text, what)
 
     cues = []
@@ -573,7 +580,7 @@ def build(roster, output):
             continue
         if len(ids) > 6:
             raise ValueError(f'{what}: at most 6 tracks')
-        music_rows.append(scope_of(c.get('scope', ''), what) +
+        music_rows.append(scope_of(c.get('scope', ''), what, music=True) +
                           struct.pack('<BB6HH', MUSIC_CUES.index(c['cue']), len(ids),
                                       *(ids + [0] * (6 - len(ids))), 0))
     if len(clips) > MAX_CLIPS or len(tracks) > MAX_TRACKS or len(cues) > MAX_CUES or \

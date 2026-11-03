@@ -145,12 +145,14 @@ enum trigger {
 	CROUCH_HK, MOVES
 };
 /* Special move motions, directions relative to facing; [d] holds d. From
- * MOTION_ANY on a follow-up's command is the button with a direction held
- * on the press (any, none, up, down, forward or back; numpad 7/8/9 count as
- * up, 1/2/3 as down, 3/6/9 forward, 1/4/7 back). */
+ * MOTION_ANY to HOLD_4 a follow-up's command is the button with a direction
+ * held on the press (any, none, up, down, forward or back; numpad 7/8/9
+ * count as up, 1/2/3 as down, 3/6/9 forward, 1/4/7 back). The half circles
+ * 41236 and 63214 and 421 come after them so older motion numbers keep
+ * their meaning. */
 enum motion {
 	MOTION_236, MOTION_214, MOTION_623, CHARGE_46, CHARGE_28, MOTION_ANY, HOLD_5, HOLD_8,
-	HOLD_2, HOLD_6, HOLD_4, MOTIONS
+	HOLD_2, HOLD_6, HOLD_4, MOTION_41236, MOTION_63214, MOTION_421, MOTIONS
 };
 /* Button bits of a special's trigger. */
 enum button { BUTTON_LP = 1, BUTTON_HP = 2, BUTTON_LK = 4, BUTTON_HK = 8 };

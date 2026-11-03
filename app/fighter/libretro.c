@@ -418,7 +418,8 @@ bool retro_load_game(const struct retro_game_info *g)
 		    "stand LP", "stand HP", "stand LK", "stand HK",
 		    "crouch LP", "crouch HP", "crouch LK", "crouch HK"};
 		static const char *const motions[MOTIONS] = {
-		    "236", "214", "623", "[4]6", "[2]8", "any", "5", "8", "2", "6", "4"};
+		    "236", "214", "623", "[4]6", "[2]8", "any", "5", "8", "2", "6", "4",
+		    "41236", "63214", "421"};
 		static const char *const classes[CLASSES] = {
 		    "none", "light", "heavy", "command", "special", "super", "throw"};
 		static const char *const heights[HEIGHTS] = {"low", "mid", "high"};

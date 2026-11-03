@@ -3,7 +3,8 @@
  * resampling, interpolation, gains and pan on a bank built here, voice
  * slots and stealing, the cue precedence (character + move over system
  * over any, the opponent's voice on hits, silent variants), the music cues
- * (select, fight by system and stage, KO fade into the winner's jingle),
+ * (select, fight by the arena's stage row or else by system and ladder
+ * stage, KO fade into the winner's jingle),
  * MP2 seeking (every sampled frame decoded after a seek equals the
  * continuous decode), loops (the run across a loop end equals the same run
  * restored from a state saved before it), the audio state block (round
@@ -146,6 +147,9 @@ static void setup_pack(void)
 	pack.chr[0].system = 0;
 	strcpy(pack.chr[1].name, "HAOHMARU");
 	pack.chr[1].system = 1;
+	pack.stages = 2;
+	strcpy(pack.stage[0].name, "KOREA");
+	strcpy(pack.stage[1].name, "MIZUKI");
 }
 
 static void tick_event(struct fight_state *s, unsigned id, unsigned side, unsigned move)
@@ -379,11 +383,17 @@ static void music_and_state(const uint8_t *bank, size_t n)
 	s.chr[1] = 1;
 	audio_tick(&au, &s, &pack);
 	assert(au.s.track == (uint32_t)track_named(&au, "kof-select") + 1);
-	/* Fight music by the opponent's system and the stage. */
+	/* Fight music by the opponent's system and the ladder stage on an
+	 * arena without a row of its own, by the arena's row on Korea. */
 	s.mode = MODE_FIGHT;
 	s.stage = 2;
+	s.arena = 1;
 	audio_tick(&au, &s, &pack);
 	assert(au.s.track == (uint32_t)track_named(&au, "lb-theme2") + 1);
+	s.arena = 0;
+	tick_event(&s, SOUND_ROUND_START, 0, 0);
+	assert(au.s.track == (uint32_t)track_named(&au, "kof-korea") + 1);
+	s.arena = 1;
 	s.chr[1] = 0;
 	s.stage = 1;
 	tick_event(&s, SOUND_ROUND_START, 0, 0);

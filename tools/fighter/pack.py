@@ -92,9 +92,12 @@ top-level keys such as "notes" are ignored):
               most 16, upper-cased in the pack); without it the key is used
               the way character names are. Every special needs
               "trigger": {"motion": M, "buttons": B} with M one of 236, 214,
-              623, [4]6, [2]8 (directions relative to facing; [d] = charge)
-              and B "P", "K" or a list of lp/hp/lk/hk. Specials are checked
-              in manifest order, the first match wins. A follow-up (the next
+              623, 41236, 63214, 421, [4]6, [2]8 (directions relative to
+              facing; [d] = charge) and B "P", "K" or a list of lp/hp/lk/hk.
+              Specials are checked in manifest order, the first match wins;
+              a half circle also completes the quarter circle it ends with
+              (41236 a 236, 63214 a 214), so it must come before any such
+              special sharing a button. A follow-up (the next
               stage of a rekka) adds "after": the special or normal it
               continues, "window": [open, close] (elapsed ticks of that move,
               0 <= open <= close < its length) and optional "contact" (true:
@@ -193,7 +196,7 @@ attacker an advantage of hitstun - (active + recovery), blockstun likewise;
 hitstop freezes both fighters equally and does not change it.
 
 systems.json: {"systems": {name: profile}, "characters": {character:
-system}, "notes": ...}. Profile names are a-z, 0-9 and "_" (at most 12). A
+system}, "notes": ..., "sources": {id: {url, ...}} for the profiles' src}. Profile names are a-z, 0-9 and "_" (at most 12). A
 profile needs life, damage_scale (per mille, applied to its characters'
 damage and chip), walk, walk_back, jump {vy, gravity, vx, prejump, optional
 vx_back}, stun_table {class: [hitstun, blockstun]}, hitstop_table {class:
@@ -241,7 +244,7 @@ Pack layout, all little endian (the C loader in app/fighter/render.c checks it):
              moves, projectiles; 15 actions x (u16 first step, u16 steps);
              moves x 20 u16 (kind 0 normal or 1 special, trigger or motion
              (0 236, 1 214, 2 623, 3 [4]6, 4 [2]8, follow-ups also 5 any,
-             6 5, 7 8, 8 2, 9 6, 10 4), buttons, first step, steps, damage,
+             6 5, 7 8, 8 2, 9 6, 10 4; 11 41236, 12 63214, 13 421), buttons, first step, steps, damage,
              chip, hitstun, blockstun, hitstop, pushback, block_pushback,
              guard, cancel bits, class 0 none or 1 + class, defaults: bit 0
              hitstun, 1 blockstun, 2 hitstop from the class, packed as 0;
@@ -300,9 +303,12 @@ FLAG_KNOCKDOWN, FLAG_OTG = 1, 2
 MAX_WAKEUP = 120
 MOVES = ['stand_lp', 'stand_hp', 'stand_lk', 'stand_hk',
          'crouch_lp', 'crouch_hp', 'crouch_lk', 'crouch_hk']
-MOTIONS = ['236', '214', '623', '[4]6', '[2]8', 'any', '5', '8', '2', '6', '4']
-# Motions from 'any' on are a direction held with the button: follow-ups only.
-FOLLOW_ONLY = MOTIONS.index('any')
+MOTIONS = ['236', '214', '623', '[4]6', '[2]8', 'any', '5', '8', '2', '6', '4',
+           '41236', '63214', '421']
+# A direction held with the button: follow-ups only.
+FOLLOW_ONLY = {'any', '5', '8', '2', '6', '4'}
+# Half circles complete these quarter circles too.
+HALF_CIRCLES = {'41236': '236', '63214': '214'}
 BUTTONS = ['lp', 'hp', 'lk', 'hk']
 GUARDS = ['high', 'low', 'overhead']
 CANCELS = ['chain', 'special', 'super']
@@ -757,10 +763,12 @@ class Systems:
         if not path.exists():
             raise ValueError(f'{path}: no systems.json next to the roster or manifest')
         data = json.loads(path.read_text())
-        if not isinstance(data, dict) or set(data) - {'systems', 'characters', 'notes'} or \
+        if not isinstance(data, dict) or \
+                set(data) - {'systems', 'characters', 'notes', 'sources'} or \
                 not isinstance(data.get('systems'), dict) or not data['systems']:
             raise ValueError(f'{path}: needs "systems" (non-empty) and optional "characters", '
-                             f'"notes"')
+                             f'"notes", "sources"')
+        self.sources = check_sources(data, str(path))
         if len(data['systems']) > MAX_SYSTEMS:
             raise ValueError(f'{path}: at most {MAX_SYSTEMS} systems')
         self.names = list(data['systems'])
@@ -772,8 +780,7 @@ class Systems:
         if DEFAULT_SYSTEM not in self.profile:
             raise ValueError(f'{path}: the default system {DEFAULT_SYSTEM} is missing')
 
-    @staticmethod
-    def _profile(name, p, path):
+    def _profile(self, name, p, path):
         what = f'{path.name} {name}'
         if not (1 <= len(name) <= MAX_NAME and set(name) <= set('abcdefghijklmnopqrstuvwxyz0123456789_')):
             raise ValueError(f'{what}: names are 1..{MAX_NAME} of a-z, 0-9 and _')
@@ -812,7 +819,7 @@ class Systems:
                     classes.setdefault(cls, {})[k] = check_int(x, low, high,
                                                                f'{what}: {table} {cls}')
         if 'src' in p:
-            check_src(p['src'], what, set(p) - {'src', 'notes'}, {})
+            check_src(p['src'], what, set(p) - {'src', 'notes'}, self.sources)
         throw = p.get('throw', {})
         if not isinstance(throw, dict) or set(throw) - set(THROW_KEYS):
             raise ValueError(f'{what}: throw is {{{", ".join(THROW_KEYS)}}} (all optional)')
@@ -1117,7 +1124,7 @@ class Character:
                     follow = (tr['after'], window, tr.get('contact', False))
                 elif set(tr) - {'motion', 'buttons'}:
                     raise ValueError(f'{what}: "window" and "contact" need "after"')
-                elif MOTIONS.index(tr['motion']) >= FOLLOW_ONLY:
+                elif tr['motion'] in FOLLOW_ONLY:
                     raise ValueError(f'{what}: motion {tr["motion"]} is only for follow-ups')
                 head = (1, MOTIONS.index(tr['motion']), button_mask(tr['buttons'], what))
             else:
@@ -1141,6 +1148,17 @@ class Character:
             check_int(close, open_, total - 1, f'{what}: window close (open .. {total - 1})')
             self.moves[k] = self.moves[k][:16] + (p + 1, open_, close, int(contact)) + \
                 self.moves[k][20:]
+        # A half circle behind a quarter circle it completes, with a shared
+        # button and the same parent, would never come out.
+        for k, mv in enumerate(self.moves):
+            motion = MOTIONS[mv[1]] if mv[0] else None
+            for j in range(k):
+                if motion in HALF_CIRCLES and self.moves[j][0] and \
+                        MOTIONS[self.moves[j][1]] == HALF_CIRCLES[motion] and \
+                        self.moves[j][2] & mv[2] and self.moves[j][16] == mv[16]:
+                    raise ValueError(f'{name} {self.move_names[k]}: {motion} after '
+                                     f'{self.move_names[j]} ({MOTIONS[self.moves[j][1]]}) '
+                                     f'sharing a button never comes out; list it first')
         # Knockdown: written, else the sweep (crouch HK) and every special
         # of class special/super that has hitboxes, launches nothing and is
         # the last stage of its rekka (nothing follows it).
