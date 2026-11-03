@@ -7,7 +7,8 @@ Terry's manifest as it was before convert-stats.py ran (no sheet decoding):
 the real files load, every malformed variant is refused with ValueError,
 stats resolve from the system plus overrides, class defaults and the damage
 scale give the expected numbers, follow-ups pack their parent, window and
-contact flag, and the conversion keeps every loaded
+contact flag, a half circle behind the quarter circle it completes is
+refused, and the conversion keeps every loaded
 value and is idempotent. It also checks that every roster manifest is
 already converted."""
 import copy
@@ -76,15 +77,15 @@ def main():
     kof, ss = real.profile['kof2002'], real.profile['samsho5sp']
     assert kof['damage_scale'] == 1000 and ss['damage_scale'] == 800
     assert kof['stats'] == {'life': 1000, 'defense': 1000, 'weight': 1000, 'height': 1,
-                            'walk': 7, 'walk_back': 6, 'jump_vy': -48, 'gravity': 3, 'vx': 8,
-                            'vx_back': 8, 'prejump': 3}
-    assert kof['classes']['light'] == {'hitstun': 11, 'blockstun': 9, 'hitstop': 6}
-    assert kof['classes']['command'] == {'hitstun': 19, 'blockstun': 17}
+                            'walk': 12, 'walk_back': 10, 'jump_vy': -51, 'gravity': 3, 'vx': 8,
+                            'vx_back': 8, 'prejump': 4}
+    assert kof['classes']['light'] == {'hitstun': 11, 'blockstun': 9, 'hitstop': 8}
+    assert kof['classes']['command'] == {'hitstun': 19, 'blockstun': 17, 'hitstop': 12}
     # Walls and weapon moves: KOF strikes, Samurai Shodown slashes LP, HP
     # and specials (bits 0, 1 and 4).
     assert kof['margin'] == ss['margin'] == 24 and kof['play_width'] == ss['play_width'] == 480
     assert kof['slash'] == 0 and ss['slash'] == 0b10011 and ss['effects']['blood_light']
-    assert pack.jump_arc(-48, 3) == (96, 33) and pack.jump_arc(-42, 2) == (110, 43)
+    assert pack.jump_arc(-51, 3) == (108, 35) and pack.jump_arc(-42, 2) == (110, 43)
     t = character(TERRY)
     assert t.system['name'] == 'kof2002' and not t.overrides and t.stats == kof['stats']
     # Terry under samsho5sp (by assignment): damage 30 * 0.8 = 24, chip of
@@ -93,7 +94,7 @@ def main():
     moved['characters']['terry'] = 'samsho5sp'
     t8 = character(TERRY, data=moved)
     assert t8.hits[0].resolved[:2] == [24, 0] and t8.hits[len(pack.MOVES) + 1].resolved[1] == 14
-    assert t8.stats['walk'] == 6 and t8.stats['prejump'] == 4
+    assert t8.stats['walk'] == 6 and t8.stats['prejump'] == 1
     # Overrides: walk, a partial jump (vx_back follows vx) and prejump.
     m = with_terry(lambda c, _: c.update(stats={'walk': 9, 'jump': {'vx': 5}, 'prejump': 2,
                                                 'height': 'low', 'defense': 1100,
@@ -101,13 +102,13 @@ def main():
     c = character(m)
     assert c.overrides == {'walk': 9, 'vx': 5, 'vx_back': 5, 'prejump': 2, 'height': 0,
                            'defense': 1100}
-    assert c.stats['walk_back'] == 6 and c.stats['jump_vy'] == -48
-    # Class defaults: stand LP without its stun values takes light 11/9/6.
+    assert c.stats['walk_back'] == 10 and c.stats['jump_vy'] == -51
+    # Class defaults: stand LP without its stun values takes light 11/9/8.
     m = with_terry(lambda c, _: [c['moves']['stand_lp'].pop(k) for k in
                                  ('hitstun', 'blockstun', 'hitstop')] and
                    c['moves']['stand_lp'].update({'class': 'light'}))
     lp = character(m).hits[0]
-    assert lp.resolved[2:5] == [11, 9, 6] and lp.packed[2:5] == [0, 0, 0] and lp.defaults == 7
+    assert lp.resolved[2:5] == [11, 9, 8] and lp.packed[2:5] == [0, 0, 0] and lp.defaults == 7
     assert lp.cls == pack.CLASSES.index('light') + 1
     # Written values win over the class.
     m = with_terry(lambda c, _: c['moves']['stand_lp'].update({'class': 'light'}))
@@ -130,6 +131,11 @@ def main():
     assert c.moves[k][16:] == (c.move_names.index('power_wave') + 1, 3, 9, 1)
     assert c.moves[k - 1][16:] == (0, 0, 0, 0)
     assert character(follow(after='stand_hp', window=[0, 0])).moves[k][16:19] == (2, 0, 0)
+    # Half circles and 421 pack as motions 11..13; a half circle may follow
+    # its quarter circle only without a shared button.
+    for index, motion in enumerate(['41236', '63214', '421'], 11):
+        assert character(follow(motion=motion, buttons='K')).moves[k][1] == index
+    assert character(follow(motion='63214')).moves[k][1] == 12
 
     # Malformed systems.json.
     bad_systems = [
@@ -161,6 +167,8 @@ def main():
         ('an unknown effect key', lambda: with_system(['kof2002', 'effects', 'dust'], 'kof.x')),
         ('an effect without a set', lambda: with_system(['kof2002', 'effects', 'guard'], 'x')),
         ('a slash button', lambda: with_system(['kof2002', 'slash'], ['lp', 'zz'])),
+        ('a src naming an unknown source', lambda: with_system(['kof2002', 'src'],
+                                                               {'walk': 'dc99'})),
     ]
     for what, data in bad_systems:
         refused(f'systems.json with {what}', lambda d=data: systems(d()))
@@ -184,7 +192,7 @@ def main():
         ('an unknown class', with_terry(lambda c, _: c['moves']['stand_lp'].update(
             {'class': 'medium'}))),
         ('a class without a hitstop default', with_terry(lambda c, _: (
-            c['moves']['stand_lp'].update({'class': 'command'}),
+            c['moves']['stand_lp'].update({'class': 'throw'}),
             c['moves']['stand_lp'].pop('hitstop')))),
         ('no class and no hitstun', with_terry(lambda c, _: c['moves']['stand_lp'].pop(
             'hitstun'))),
@@ -207,6 +215,7 @@ def main():
         ('contact not a bool', follow(after='power_wave', window=[0, 1], contact=1)),
         ('a held direction on its own', follow(motion='6')),
         ('any on its own', follow(motion='any')),
+        ('a 41236+P behind the 236+P Power Wave', follow(motion='41236')),
     ]
     for what, m in bad_terry:
         refused(f'terry with {what}', lambda mm=m: character(mm))
@@ -223,14 +232,16 @@ def main():
     assert convert.loaded(TERRY, real) == convert.loaded(after, real)
     assert convert.convert(new, after, real, False, lambda _: None) == new
     lp = after['characters']['terry']['moves']['stand_lp']
-    assert lp['class'] == 'light' and 'hitstop' not in lp and lp['hitstun'] == 12 and \
+    assert lp['class'] == 'light' and lp['hitstop'] == 6 and lp['hitstun'] == 12 and \
         lp['src'] == {'*': 'estimate'} and after['characters']['terry']['system'] == 'kof2002'
+    clp = after['characters']['terry']['moves']['crouch_lp']
+    assert not {'hitstun', 'blockstun'} & set(clp) and clp['hitstop'] == 6
     assert len(new.splitlines()) == len(text.splitlines()) + 1
     # --adopt-class drops the normals' stun values in favour of the class.
     adopted = json.loads(convert.convert(text, TERRY, real, True, lambda _: None))
     lp = adopted['characters']['terry']['moves']['stand_lp']
     assert not {'hitstun', 'blockstun', 'hitstop'} & set(lp)
-    assert character(adopted).hits[0].resolved[2:5] == [11, 9, 6]
+    assert character(adopted).hits[0].resolved[2:5] == [11, 9, 8]
     # The real manifests have been converted: converting again changes nothing.
     for name in json.loads((ASSETS / 'roster.json').read_text())['manifests']:
         name = name if isinstance(name, str) else name['manifest']

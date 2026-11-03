@@ -444,7 +444,7 @@ static int character(struct reader *r, struct assets *a, struct character *c, un
 			  : trigger != k || buttons) ||
 		    guard >= GUARD_TYPES || (cancel & ~(unsigned)CANCEL_MASK) ||
 		    !anim(&m->anim, first, count, steps, base) || after > moves || after == k + 1 ||
-		    (after && !kind) || (!after && trigger >= MOTION_ANY && kind) ||
+		    (after && !kind) || (!after && trigger >= MOTION_ANY && trigger <= HOLD_4 && kind) ||
 		    (!after && (open || close || contact)) || open > close ||
 		    close >= MAX_MOVE_TICKS || contact > 1)
 			return 0;
