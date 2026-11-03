@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a FIGHTP02 content pack from a ripped sprite sheet and a manifest.
+"""Build a FIGHTP03 content pack from a ripped sprite sheet and a manifest.
 
 The manifest (assets/fighter/*.json) is the source of truth: every frame is a
 hand-checked sheet rectangle plus a foot anchor, every action a list of
@@ -10,18 +10,54 @@ box or its white animation underlines. Subcommands:
 
   build MANIFEST OUTPUT [--auto]   write the pack (Auto runs the AI scene cycle)
   detect MANIFEST                  print candidate frame boxes per sheet row
-  preview MANIFEST OUTPUT.ppm      actions side by side on their anchors
+  preview MANIFEST OUTPUT.ppm      every action and move of the first
+                                   character on its anchor, with hurtboxes
+                                   (green) and hitboxes (red) outlined
+  data MANIFEST                    frame data table of every move
+
+Manifest schema (assets/fighter/terry.json is the reference):
+  frames      name -> [x, y, w, h, anchor x, anchor y] in sheet pixels
+  hurtboxes   frame -> [[x, y, w, h], ...] or the name of another frame whose
+              boxes it shares. Boxes are frame pixels relative to the anchor
+              (x forward for a right-facing sprite, y down, so heights above
+              the feet are negative); the core mirrors them with facing.
+              Every frame a character uses needs an entry ([] = invulnerable).
+  characters  name -> {"actions": {action: [steps]}, "moves": {move: {...}}}
+              A step is [frame, ticks] or [frame, ticks, {"hit": boxes,
+              "hurt": boxes}]; "hurt" replaces the frame's hurtboxes for that
+              step, "hit" is only allowed in moves. Contiguous steps with hit
+              boxes form one hit (a move may have several).
+              A move has "steps" plus damage, chip, hitstun, blockstun,
+              hitstop (ticks), pushback and block_pushback (pixels), guard
+              (high = stand or crouch block, low = crouch block only,
+              overhead = stand block only) and cancel (list of chain,
+              special, super; stored for later, no rules use it yet).
+  players     two {"character", "palette"} slots: P1 and P2
+  palettes    name -> {sheet RGB hex: replacement hex}
+  effects     [frame, palette] pairs for the effect sprites
+
+Frame data printed by `data` (all in 60 Hz ticks): startup = ticks before
+the first hitbox (the press tick is elapsed 0, so the first active tick is
+startup ticks after the press), active = ticks from the first to the last
+hitbox step, recovery = the rest. A hit on the first active tick gives the
+attacker an advantage of hitstun - (active + recovery), blockstun likewise;
+hitstop freezes both fighters equally and does not change it.
 
 Pack layout, all little endian (the C loader in app/fighter/render.c checks it):
-  header   "FIGHTP02", u32 size, u32 FNV-1a of bytes 16..size, u32 flags
-           (bit 0 automatic), u32 palettes, frames, steps, effects
-  palette  u16 n (1..256), n x u16 RGB565
-  frame    u16 w, h; i16 anchor x, y; u32 spans; h x u16 spans per row;
-           spans x (u16 x, u16 len); then sum(len) u8 palette indices
-  2 chars  u16 palette, 8 actions x (u16 first step, u16 steps)
-  steps    u16 frame, u16 ticks (>0)
-  effects  u16 frame, u16 palette
-Actions, in order: idle walk_forward walk_back jump attack guard hurt ko.
+  header     "FIGHTP03", u32 size, u32 FNV-1a of bytes 16..size, u32 flags
+             (bit 0 automatic), u32 palettes, frames, characters, effects
+  palette    u16 n (1..256), n x u16 RGB565
+  frame      u16 w, h; i16 anchor x, y; u32 spans; h x u16 spans per row;
+             spans x (u16 x, u16 len); then sum(len) u8 palette indices
+  character  u16 steps, boxes, moves; 10 actions x (u16 first step, u16 steps);
+             moves x 12 u16 (trigger, first step, steps, damage, chip,
+             hitstun, blockstun, hitstop, pushback, block_pushback, guard,
+             cancel bits); steps x (u16 frame, u16 ticks, u16 first box,
+             u8 hurt boxes, u8 hit boxes: hurt first, then hit);
+             boxes x (i16 x, i16 y, u16 w, u16 h). Step and box indices are
+             local to the character.
+  players    2 x (u16 character, u16 palette)
+  effects    u16 frame, u16 palette
 """
 import argparse
 import hashlib
@@ -31,8 +67,22 @@ import struct
 import sys
 import zlib
 
-ACTIONS = ['idle', 'walk_forward', 'walk_back', 'jump', 'attack', 'guard', 'hurt', 'ko']
-MAGIC = b'FIGHTP02'
+MAGIC = b'FIGHTP03'
+# Order matters: these are the C enums in app/fighter/fighter.h.
+ACTIONS = ['idle', 'walk_forward', 'walk_back', 'jump', 'guard', 'hurt', 'ko',
+           'crouch', 'crouch_guard', 'crouch_hurt']
+MOVES = ['stand_lp', 'stand_hp', 'stand_lk', 'stand_hk',
+         'crouch_lp', 'crouch_hp', 'crouch_lk', 'crouch_hk']
+GUARDS = ['high', 'low', 'overhead']
+CANCELS = ['chain', 'special', 'super']
+# Limits shared with fighter.h; the C loader rejects anything beyond them.
+MAX_SIDE = 1024
+MAX_STEP_BOXES = 15
+MAX_MOVE_TICKS = 255
+MAX_DAMAGE = 1000
+MAX_STUN = 120
+MAX_HITSTOP = 30
+MAX_PUSH = 120
 
 
 def read_png(path):
@@ -178,6 +228,118 @@ def rgb565(c):
     return (c[0] >> 3) << 11 | (c[1] >> 2) << 5 | c[2] >> 3
 
 
+def check_boxes(boxes, what):
+    if not isinstance(boxes, list) or len(boxes) > MAX_STEP_BOXES:
+        raise ValueError(f'{what}: box list must have at most {MAX_STEP_BOXES} boxes')
+    for b in boxes:
+        if (len(b) != 4 or not all(isinstance(v, int) for v in b) or
+                not -MAX_SIDE <= b[0] <= MAX_SIDE or not -MAX_SIDE <= b[1] <= MAX_SIDE or
+                not 1 <= b[2] <= MAX_SIDE or not 1 <= b[3] <= MAX_SIDE):
+            raise ValueError(f'{what}: bad box {b}')
+    return [tuple(b) for b in boxes]
+
+
+class Character:
+    """One character's steps, boxes and moves, resolved from the manifest."""
+
+    def __init__(self, m, name, frame_names):
+        ch = m['characters'][name]
+        self.name = name
+        self.steps, self.boxes, self.actions, self.moves = [], [], [], []
+        hurt = m['hurtboxes']
+
+        def frame_hurt(f):
+            seen = set()
+            while isinstance(hurt.get(f), str):
+                if f in seen:
+                    raise ValueError(f'{f}: hurtbox alias loop')
+                seen.add(f)
+                f = hurt[f]
+            if f not in hurt:
+                raise ValueError(f'{name}: frame {f} has no hurtboxes')
+            return check_boxes(hurt[f], f'hurtboxes {f}')
+
+        def sequence(seq, what, allow_hit):
+            first = len(self.steps)
+            if not seq:
+                raise ValueError(f'{what}: empty step list')
+            for step in seq:
+                f, ticks = step[0], step[1]
+                extra = step[2] if len(step) > 2 else {}
+                if f not in frame_names:
+                    raise ValueError(f'{what}: unknown frame {f}')
+                if not isinstance(ticks, int) or not 1 <= ticks <= 65535:
+                    raise ValueError(f'{what}: step durations must be positive')
+                if set(extra) - {'hit', 'hurt'}:
+                    raise ValueError(f'{what}: unknown step keys {sorted(extra)}')
+                if 'hit' in extra and not allow_hit:
+                    raise ValueError(f'{what}: hitboxes are only allowed in moves')
+                hb = check_boxes(extra['hurt'], what) if 'hurt' in extra else frame_hurt(f)
+                xb = check_boxes(extra.get('hit', []), what)
+                self.steps.append((frame_names.index(f), ticks, len(self.boxes), len(hb), len(xb)))
+                self.boxes += hb + xb
+            return first, len(seq)
+
+        if sorted(ch['actions']) != sorted(ACTIONS):
+            raise ValueError(f'{name}: needs exactly the actions {ACTIONS}')
+        for action in ACTIONS:
+            self.actions.append(sequence(ch['actions'][action], f'{name} {action}', False))
+        if sorted(ch['moves']) != sorted(MOVES):
+            raise ValueError(f'{name}: needs exactly the moves {MOVES}')
+        for trigger, move in enumerate(MOVES):
+            mv = ch['moves'][move]
+            what = f'{name} {move}'
+            known = {'steps', 'damage', 'chip', 'hitstun', 'blockstun', 'hitstop',
+                     'pushback', 'block_pushback', 'guard', 'cancel'}
+            if set(mv) != known:
+                raise ValueError(f'{what}: fields must be exactly {sorted(known)}')
+            first, count = sequence(mv['steps'], what, True)
+            total = sum(t for t in (s[1] for s in self.steps[first:first + count]))
+            limits = {'damage': MAX_DAMAGE, 'chip': mv['damage'], 'hitstun': MAX_STUN,
+                      'blockstun': MAX_STUN, 'hitstop': MAX_HITSTOP, 'pushback': MAX_PUSH,
+                      'block_pushback': MAX_PUSH}
+            for k, top in limits.items():
+                low = 1 if k in ('hitstun', 'blockstun') else 0
+                if not isinstance(mv[k], int) or not low <= mv[k] <= top:
+                    raise ValueError(f'{what}: {k} must be {low}..{top}')
+            if total > MAX_MOVE_TICKS:
+                raise ValueError(f'{what}: {total} ticks, at most {MAX_MOVE_TICKS}')
+            if mv['guard'] not in GUARDS or not set(mv['cancel']) <= set(CANCELS):
+                raise ValueError(f'{what}: guard must be one of {GUARDS}, cancel of {CANCELS}')
+            cancel = sum(1 << CANCELS.index(c) for c in set(mv['cancel']))
+            self.moves.append((trigger, first, count, mv['damage'], mv['chip'], mv['hitstun'],
+                               mv['blockstun'], mv['hitstop'], mv['pushback'],
+                               mv['block_pushback'], GUARDS.index(mv['guard']), cancel))
+
+    def pack(self):
+        out = struct.pack('<3H', len(self.steps), len(self.boxes), len(self.moves))
+        for first, count in self.actions:
+            out += struct.pack('<HH', first, count)
+        for mv in self.moves:
+            out += struct.pack('<12H', *mv)
+        for s in self.steps:
+            out += struct.pack('<3HBB', *s)
+        for b in self.boxes:
+            out += struct.pack('<hhHH', *b)
+        return out
+
+    def frame_data(self, trigger):
+        """(startup, active, recovery, total, hits) of a move, as the core sees it."""
+        _, first, count = self.moves[trigger][:3]
+        t, startup, end, hits, previous = 0, None, None, 0, False
+        for f, ticks, box, hurt, hit in self.steps[first:first + count]:
+            if hit:
+                if startup is None:
+                    startup = t
+                end = t + ticks
+                hits += not previous
+            previous = bool(hit)
+            t += ticks
+        if startup is None:
+            return 0, 0, t, t, 0
+        return startup, end - startup, t - end, t, hits
+
+
 def build(sheet, automatic):
     m = sheet.m
     names = list(m['frames'])
@@ -216,24 +378,17 @@ def build(sheet, automatic):
         for s in spans:
             out += struct.pack('<HH', *s)
         out += data
-    steps = []
-    for ch in m['characters']:
-        out += struct.pack('<H', pal_names.index(ch['palette']))
-        if sorted(ch['actions']) != sorted(ACTIONS):
-            raise ValueError(f'{ch["name"]}: needs exactly the actions {ACTIONS}')
-        for action in ACTIONS:
-            seq = ch['actions'][action]
-            out += struct.pack('<HH', len(steps), len(seq))
-            steps += [(names.index(f), t) for f, t in seq]
-    if len(m['characters']) != 2:
-        raise ValueError('exactly two characters are required')
-    for f, t in steps:
-        if t < 1:
-            raise ValueError('step durations must be positive')
-        out += struct.pack('<HH', f, t)
+    char_names = list(m['characters'])
+    chars = [Character(m, c, names) for c in char_names]
+    for c in chars:
+        out += c.pack()
+    if len(m['players']) != 2:
+        raise ValueError('exactly two players are required')
+    for p in m['players']:
+        out += struct.pack('<HH', char_names.index(p['character']), pal_names.index(p['palette']))
     for f, p in m['effects']:
         out += struct.pack('<HH', names.index(f), pal_names.index(p))
-    body = struct.pack('<5I', int(automatic), len(palettes), len(names), len(steps),
+    body = struct.pack('<5I', int(automatic), len(palettes), len(names), len(chars),
                        len(m['effects'])) + out
     checksum = 2166136261
     for b in body:
@@ -242,6 +397,21 @@ def build(sheet, automatic):
     stats = {n: (len(frames[n][0][0]), len(frames[n][0]),
                  sum(c is not None for row in frames[n][0] for c in row)) for n in names}
     return MAGIC + struct.pack('<II', size, checksum) + body, checksum, len(colors), stats
+
+
+def frame_data(sheet):
+    m = sheet.m
+    names = list(m['frames'])
+    for cname in m['characters']:
+        c = Character(m, cname, names)
+        print(f'{cname}: move startup/active/recovery total hits, damage, '
+              f'hitstun/blockstun/hitstop, adv hit/block, guard')
+        for trigger, move in enumerate(MOVES):
+            s, a, r, t, hits = c.frame_data(trigger)
+            mv = c.moves[trigger]
+            print(f'  {move:10} {s:2}/{a:2}/{r:2} {t:3} {hits}  {mv[3]:4}  '
+                  f'{mv[5]:3}/{mv[6]:3}/{mv[7]:2}  {mv[5] - a - r:+3}/{mv[6] - a - r:+3}  '
+                  f'{GUARDS[mv[10]]}')
 
 
 def detect(sheet):
@@ -253,31 +423,51 @@ def detect(sheet):
 
 
 def preview(sheet, path):
-    """One strip per action, frames on a shared baseline and anchor column grid."""
+    """One strip per action and move, frames on a shared baseline and anchor
+    column grid, hurtboxes outlined green and hitboxes red."""
     m = sheet.m
-    ch = m['characters'][0]
-    strips = []
-    for action in ACTIONS:
-        strips.append([sheet.frame(f) for f, _ in ch['actions'][action]])
-    cell_w, up, down = 160, 170, 10
+    names = list(m['frames'])
+    c = Character(m, list(m['characters'])[0], names)
+    strips = [c.steps[f:f + n] for f, n in c.actions]
+    strips += [c.steps[mv[1]:mv[1] + mv[2]] for mv in c.moves]
+    cache = {}
+    cell_w, left, up, down = 200, 90, 150, 12
     width = cell_w * max(len(s) for s in strips)
     height = (up + down) * len(strips)
     img = bytearray(b'\x30\x30\x40' * width * height)
+
+    def put(x, y, c):
+        if 0 <= x < width and 0 <= y < height:
+            img[(y * width + x) * 3:(y * width + x) * 3 + 3] = c
+
+    def outline(ox, base, b, c):
+        x0, y0, x1, y1 = ox + b[0], base + b[1], ox + b[0] + b[2] - 1, base + b[1] + b[3] - 1
+        for x in range(x0, x1 + 1):
+            put(x, y0, c)
+            put(x, y1, c)
+        for y in range(y0, y1 + 1):
+            put(x0, y, c)
+            put(x1, y, c)
+
     for row, strip in enumerate(strips):
         base = row * (up + down) + up
-        for col, (pix, ax, ay) in enumerate(strip):
-            ox = col * cell_w + cell_w // 2
+        for col, (f, ticks, box, hurt, hit) in enumerate(strip):
+            if f not in cache:
+                cache[f] = sheet.frame(names[f])
+            pix, ax, ay = cache[f]
+            ox = col * cell_w + left
             for x in range(col * cell_w, (col + 1) * cell_w):
-                img[(base * width + x) * 3:(base * width + x) * 3 + 3] = b'\x80\x80\x80'
+                put(x, base, b'\x80\x80\x80')
             for j, line in enumerate(pix):
-                for i, c in enumerate(line):
-                    X, Y = ox - ax + i, base - ay + j
-                    if c and 0 <= X < width and 0 <= Y < height:
-                        img[(Y * width + X) * 3:(Y * width + X) * 3 + 3] = c
+                for i, px in enumerate(line):
+                    if px:
+                        put(ox - ax + i, base - ay + j, px)
             for y in range(base - up, base + down):
                 p = (y * width + ox) * 3
                 if img[p:p + 3] == b'\x30\x30\x40':
-                    img[p:p + 3] = b'\x00\xc0\x00'
+                    img[p:p + 3] = b'\x00\x60\x00'
+            for k in range(hurt + hit):
+                outline(ox, base, c.boxes[box + k], b'\x00\xff\x40' if k < hurt else b'\xff\x20\x20')
     pathlib.Path(path).write_bytes(b'P6\n%d %d\n255\n' % (width, height) + img)
 
 
@@ -293,12 +483,16 @@ def main():
     p = sub.add_parser('preview')
     p.add_argument('manifest')
     p.add_argument('output')
+    t = sub.add_parser('data')
+    t.add_argument('manifest')
     args = ap.parse_args()
     sheet = Sheet(args.manifest)
     if args.cmd == 'detect':
         detect(sheet)
     elif args.cmd == 'preview':
         preview(sheet, args.output)
+    elif args.cmd == 'data':
+        frame_data(sheet)
     else:
         data, checksum, ncolors, stats = build(sheet, args.auto)
         args.output.parent.mkdir(parents=True, exist_ok=True)

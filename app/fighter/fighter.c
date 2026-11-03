@@ -1,15 +1,28 @@
-/* Deterministic two-fighter P0 rules: movement, jumps, one strike, guard,
- * hurt, KO, AI and the stress scenes, plus the draw-command list. Rules only
- * pick an action and its elapsed ticks; the pack's animation steps map that
- * onto real frames. Coordinates are integer pixels, jumps use quarter-pixel
- * vertical velocity. A test ruleset, not a recreation of the original moves. */
+/* Deterministic two-fighter rules: movement, jumps, crouching, eight
+ * data-driven normals, hurt/hit boxes from the pack, hitstop, hitstun,
+ * blockstun, high/low/overhead guard, pushback with corner transfer, KO,
+ * AI and the stress scenes, plus the draw-command list (L overlays the real
+ * boxes). Rules pick an action or move and its elapsed ticks; the pack's
+ * steps map that onto frames and boxes, so what is drawn is what collides.
+ * Coordinates are integer pixels, jumps use quarter-pixel vertical velocity.
+ *
+ * Timing, in ticks (one fight_step each): a move pressed on tick T shows
+ * elapsed 0 on T and ends on tick T + total, when the fighter may act
+ * again. A contact on tick C freezes both fighters for hitstop ticks
+ * (C+1 .. C+hitstop); the defender is then stunned and acts again on tick
+ * C + hitstop + hitstun (or blockstun). Pushback slides the defender
+ * ceil(rest / 4) pixels per unfrozen tick; what a wall stops moves the
+ * attacker back instead. */
 #include "fighter.h"
 #include "libretro.h"
 #include <stdlib.h>
 #include <string.h>
 #define KEY(k) (1u << RETRO_DEVICE_ID_JOYPAD_##k)
-/* Strike reach between anchors, matched to the fist of the strike frames. */
-#define REACH 96
+/* Normals by strength, strongest first; see libretro.c for the layout. */
+static const uint32_t buttons[4] = {KEY(A), KEY(X), KEY(B), KEY(Y)};
+static const int strength[4] = {STAND_HK, STAND_HP, STAND_LK, STAND_LP};
+/* Holding back while the opponent's move is this close shows the guard. */
+#define GUARD_RANGE 160
 static int clamp(int x, int lo, int hi) { return x < lo ? lo : x > hi ? hi : x; }
 static uint32_t random_next(struct fight_state *s)
 {
@@ -23,20 +36,199 @@ void fight_reset(struct fight_state *s, int automatic)
 	memset(s, 0, sizeof(*s));
 	s->rng = 0x351f123u;
 	s->automatic = automatic;
-	s->p[0] = (struct fighter){140, 0, 0, 1000, 0, 0, 1, 0, 0, 0};
-	s->p[1] = (struct fighter){340, 0, 0, 1000, 0, 0, -1, 0, 0, 0};
+	s->p[0].x = 140;
+	s->p[1].x = 340;
+	s->p[0].hp = s->p[1].hp = 1000;
+	s->p[0].face = 1;
+	s->p[1].face = -1;
 }
-static uint32_t ai(struct fight_state *s, int i)
+static int grounded(const struct fighter *p) { return !p->y && !p->vy; }
+static uint32_t back_key(const struct fighter *p)
 {
-	int d = s->p[1 - i].x - s->p[i].x;
-	uint32_t key = abs(d) > 88 ? (d > 0 ? KEY(RIGHT) : KEY(LEFT)) : 0;
-	if ((s->tick + (unsigned)i * 17) % 43 == 0)
-		key |= KEY(A);
-	if ((random_next(s) & 255) == 0)
+	return p->face > 0 ? KEY(LEFT) : KEY(RIGHT);
+}
+/* Step index for an animation after t ticks; looping wraps, others hold. */
+static unsigned step_at(const struct assets *a, const struct anim *an, uint32_t t, int loop)
+{
+	t = loop ? t % an->total : t >= an->total ? an->total - 1u : t;
+	for (unsigned i = 0; i < an->count; i++) {
+		const struct step *st = &a->step[an->first + i];
+		if (t < st->ticks)
+			return an->first + i;
+		t -= st->ticks;
+	}
+	return an->first + an->count - 1u;
+}
+unsigned fight_pose(const struct fight_state *s, const struct assets *a, int i)
+{
+	const struct fighter *p = &s->p[i];
+	const struct character *c = &a->chr[i];
+	if (!p->hp)
+		return step_at(a, &c->action[KO], s->ended, 0);
+	if (p->move)
+		return step_at(a, &c->move[p->move - 1].anim, (uint32_t)p->elapsed, 0);
+	int low = p->crouch && grounded(p);
+	if (p->stun)
+		return step_at(a,
+			       &c->action[p->block ? (low ? CROUCH_GUARD : GUARD)
+						   : (low ? CROUCH_HURT : HURT)],
+			       (uint32_t)p->elapsed, 0);
+	if (!grounded(p))
+		return step_at(a, &c->action[JUMP], (uint32_t)(p->vy + 48) / 3, 0);
+	if (p->block)
+		return step_at(a, &c->action[low ? CROUCH_GUARD : GUARD],
+			       (uint32_t)p->elapsed, 0);
+	if (p->crouch)
+		return step_at(a, &c->action[CROUCH], s->tick, 1);
+	if (p->walk)
+		return step_at(a, &c->action[p->walk > 0 ? WALK_FORWARD : WALK_BACK],
+			       s->tick, 1);
+	return step_at(a, &c->action[IDLE], s->tick + (unsigned)i * 17, 1);
+}
+struct area fight_box(const struct box *b, int x, int y, int face)
+{
+	return (struct area){face > 0 ? x + b->x : x - b->x - b->w, GROUND + y + b->y,
+			     b->w, b->h};
+}
+static int overlap(struct area p, struct area q)
+{
+	return p.x < q.x + q.w && q.x < p.x + p.w && p.y < q.y + q.h && q.y < p.y + p.h;
+}
+static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
+{
+	const struct fighter *p = &s->p[i], *q = &s->p[1 - i];
+	int d = q->x - p->x, dist = abs(d);
+	uint32_t toward = d > 0 ? KEY(RIGHT) : KEY(LEFT),
+		 away = d > 0 ? KEY(LEFT) : KEY(RIGHT);
+	uint32_t r = random_next(s);
+	/* Guard about two swings in three, at the wrong height one time in
+	 * five; the choice is fixed for the whole swing. */
+	if (q->move && dist < GUARD_RANGE) {
+		const struct move *m = &a->chr[1 - i].move[q->move - 1];
+		uint32_t h = ((s->tick - (uint32_t)q->elapsed) * 2654435761u + (unsigned)i) >> 27;
+		if (h < 22) {
+			int low = m->guard == GUARD_LOW;
+			if (h < 4)
+				low = !low;
+			return away | (low ? KEY(DOWN) : 0u);
+		}
+	}
+	/* Each 29-tick window plans one normal: walk in until its hitbox can
+	 * reach the opponent's body, then press it once. */
+	unsigned window = (s->tick + (unsigned)i * 17) / 29, plan = window * 2654435761u >> 24;
+	int button = (int)(plan & 3), low = (int)(plan >> 2) & 1;
+	const struct move *m = &a->chr[i].move[strength[button] + (low ? CROUCH_LP : 0)];
+	uint32_t key = dist > m->reach + 20 ? toward : 0;
+	if (!key && !p->move && !p->stun && !(r & 7))
+		key = buttons[button] | (low ? KEY(DOWN) : 0u);
+	if ((r & 255) == 0)
 		key |= KEY(UP);
 	return key;
 }
-void fight_step(struct fight_state *s, uint32_t input, uint32_t second, int human)
+static void age(struct fighter *p)
+{
+	if (p->elapsed < 255)
+		p->elapsed++;
+}
+/* Pushback: ceil(rest / 4) pixels this tick; a wall passes the remainder
+ * to the other fighter (the attacker) in the opposite direction. */
+static void slide(struct fighter *p, struct fighter *q)
+{
+	int dir = p->slide > 0 ? 1 : -1, d = (abs(p->slide) + 3) / 4;
+	p->slide -= dir * d;
+	int x = clamp(p->x + dir * d, WALL_LEFT, WALL_RIGHT), rest = d - abs(x - p->x);
+	p->x = x;
+	if (rest)
+		q->x = clamp(q->x - dir * rest, WALL_LEFT, WALL_RIGHT);
+}
+/* One fighter's tick before contacts; returns 1 if it was frozen. */
+static int update(struct fight_state *s, const struct assets *a, int i, uint32_t keys,
+		  int threat)
+{
+	struct fighter *p = &s->p[i], *q = &s->p[1 - i];
+	uint32_t edge = keys & ~(uint32_t)p->keys;
+	p->keys = (int32_t)(keys & 0xffffu);
+	if (p->freeze) {
+		p->freeze--;
+		return 1;
+	}
+	if (p->move && ++p->elapsed >= a->chr[i].move[p->move - 1].anim.total)
+		p->move = p->elapsed = p->hit = 0;
+	if (p->stun) {
+		age(p);
+		if (!--p->stun)
+			p->block = p->elapsed = 0;
+	}
+	if (p->slide)
+		slide(p, q);
+	if (!grounded(p)) {
+		p->y += p->vy / 4;
+		p->vy += 3;
+		if (p->y >= 0)
+			p->y = p->vy = 0;
+	}
+	p->walk = 0;
+	if (!p->move && !p->stun) {
+		int ground = grounded(p), trigger = -1;
+		if (ground)
+			p->face = q->x >= p->x ? 1 : -1;
+		p->crouch = ground && (keys & KEY(DOWN));
+		for (int k = 0; k < 4 && ground; k++)
+			if (edge & buttons[k]) {
+				trigger = strength[k] + (p->crouch ? CROUCH_LP : 0);
+				break;
+			}
+		if (trigger >= 0) {
+			p->move = trigger + 1;
+			p->elapsed = p->hit = p->block = 0;
+		} else if (ground && threat && (keys & back_key(p))) {
+			if (p->block != 2)
+				p->block = 2, p->elapsed = 0;
+			else
+				age(p);
+		} else {
+			if (p->block)
+				p->block = p->elapsed = 0;
+			if (!p->crouch) {
+				int dx = (keys & KEY(RIGHT) ? 2 : 0) - (keys & KEY(LEFT) ? 2 : 0);
+				p->x += dx;
+				p->walk = dx * p->face > 0 ? 1 : dx ? -1 : 0;
+				if ((keys & KEY(UP)) && ground)
+					p->vy = -48;
+			}
+		}
+	}
+	p->x = clamp(p->x, WALL_LEFT, WALL_RIGHT);
+	return 0;
+}
+/* Does fighter i's current hitbox touch the other's hurtboxes? */
+static int contact(const struct fight_state *s, const struct assets *a, int i)
+{
+	const struct fighter *p = &s->p[i], *q = &s->p[1 - i];
+	if (!p->move || !q->hp)
+		return 0;
+	const struct step *hit = &a->step[fight_pose(s, a, i)],
+			  *body = &a->step[fight_pose(s, a, 1 - i)];
+	if (!hit->group || hit->group == p->hit)
+		return 0;
+	for (unsigned h = 0; h < hit->hit; h++) {
+		struct area x = fight_box(&a->box[hit->box + hit->hurt + h], p->x, p->y, p->face);
+		for (unsigned k = 0; k < body->hurt; k++)
+			if (overlap(x, fight_box(&a->box[body->box + k], q->x, q->y, q->face)))
+				return 1;
+	}
+	return 0;
+}
+/* Can the defender block this move with these keys? */
+static int blocks(const struct fighter *q, uint32_t keys, const struct move *m)
+{
+	if (q->move || (q->stun && q->block != 1) || !grounded(q) || !(keys & back_key(q)))
+		return 0;
+	int low = (keys & KEY(DOWN)) != 0;
+	return m->guard == GUARD_HIGH || (m->guard == GUARD_LOW) == low;
+}
+void fight_step(struct fight_state *s, const struct assets *a, uint32_t input,
+		uint32_t second, int human)
 {
 	uint32_t pressed = input & ~s->previous;
 	s->previous = input;
@@ -54,7 +246,7 @@ void fight_step(struct fight_state *s, uint32_t input, uint32_t second, int huma
 		/* Airborne fighters still land while the KO plays. */
 		for (int i = 0; i < 2; i++) {
 			struct fighter *p = &s->p[i];
-			if (p->y || p->vy) {
+			if (!grounded(p)) {
 				p->y += p->vy / 4;
 				p->vy += 3;
 				if (p->y >= 0)
@@ -76,77 +268,52 @@ void fight_step(struct fight_state *s, uint32_t input, uint32_t second, int huma
 		}
 		return;
 	}
-	uint32_t keys[2] = {s->automatic ? ai(s, 0) : input, human ? second : ai(s, 1)};
-
-	int damage[2] = {0, 0}, guard[2] = {0, 0};
-	for (int i = 0; i < 2; i++) {
-		struct fighter *p = &s->p[i];
-		p->face = s->p[1 - i].x >= p->x ? 1 : -1;
-		if (p->stun && !--p->stun)
-			p->block = 0;
-		if (p->attack)
-			p->attack--;
-		if (p->y || p->vy) {
-			p->y += p->vy / 4;
-			p->vy += 3;
-			if (p->y >= 0)
-				p->y = p->vy = 0;
-		}
-		p->walk = 0;
-		if (!p->stun && !p->attack) {
-			int dx = (keys[i] & KEY(RIGHT) ? 2 : 0) - (keys[i] & KEY(LEFT) ? 2 : 0);
-			p->x += dx;
-			p->walk = dx * p->face > 0 ? 1 : dx ? -1 : 0;
-			if ((keys[i] & KEY(UP)) && !p->y)
-				p->vy = -48;
-			if (keys[i] & (KEY(A) | KEY(B) | KEY(X) | KEY(Y))) {
-				p->attack = 24;
-				p->hit = 0;
-			}
-		}
-		p->x = clamp(p->x, 50, 430);
-	}
-	/* Holding back in range of a swing shows the guard stance (block 2). */
-	for (int i = 0; i < 2; i++) {
-		struct fighter *p = &s->p[i];
-		const struct fighter *q = &s->p[1 - i];
-		if (!p->stun)
-			p->block = p->walk < 0 && !p->y && q->attack &&
-				   abs(p->x - q->x) < 160
-				       ? 2
-				       : 0;
-	}
-	/* Resolve simultaneous hits from the same state before changing either fighter.
-	 */
-	for (int i = 0; i < 2; i++) {
-		struct fighter *p = &s->p[i], *q = &s->p[1 - i];
-		if (p->attack == 17 && !p->hit && abs(p->x - q->x) < REACH &&
-		    abs(p->y - q->y) < 65) {
-			p->hit = 1;
-			guard[1 - i] =
-			    !q->attack && !q->stun &&
-			    (keys[1 - i] & (q->face > 0 ? KEY(LEFT) : KEY(RIGHT)));
-			damage[1 - i] = guard[1 - i] ? 8 : 65;
-		}
-	}
+	uint32_t keys[2] = {s->automatic ? ai(s, a, 0) : input, human ? second : ai(s, a, 1)};
+	int threat[2], frozen[2];
+	/* Both fighters see the other's state from the start of the tick. */
 	for (int i = 0; i < 2; i++)
-		if (damage[i]) {
-			struct fighter *p = &s->p[i];
-			p->hp = clamp(p->hp - damage[i], 0, 1000);
-			p->stun = guard[i] ? 8 : 14;
-			p->block = guard[i];
-			p->x = clamp(p->x - p->face * 8, 50, 430);
-			p->attack = 0;
-			s->tone = 2400;
-			s->hits++;
-			s->guards += guard[i];
+		threat[i] = s->p[1 - i].move && abs(s->p[1 - i].x - s->p[i].x) < GUARD_RANGE;
+	for (int i = 0; i < 2; i++)
+		frozen[i] = update(s, a, i, keys[i], threat[i]);
+	/* Resolve both contacts from the same state before changing either. */
+	const struct move *move[2] = {NULL, NULL};
+	int guarded[2] = {0, 0}, group[2] = {0, 0};
+	for (int i = 0; i < 2; i++)
+		if (!frozen[i] && contact(s, a, i)) {
+			move[i] = &a->chr[i].move[s->p[i].move - 1];
+			group[i] = a->step[fight_pose(s, a, i)].group;
+			guarded[i] = blocks(&s->p[1 - i], keys[1 - i], move[i]);
 		}
-	if (!s->p[0].y && !s->p[1].y && abs(s->p[0].x - s->p[1].x) < 45) {
-		int mid = (s->p[0].x + s->p[1].x) / 2;
-		s->p[0].x = clamp(mid - s->p[0].face * 23, 50, 430);
-		s->p[1].x = clamp(mid + s->p[0].face * 23, 50, 430);
+	for (int i = 0; i < 2; i++) {
+		const struct move *m = move[i];
+		if (!m)
+			continue;
+		struct fighter *p = &s->p[i], *q = &s->p[1 - i];
+		q->hp = clamp(q->hp - (guarded[i] ? m->chip : m->damage), 0, 1000);
+		q->move = q->hit = 0;
+		q->stun = guarded[i] ? m->blockstun : m->hitstun;
+		q->block = guarded[i];
+		q->elapsed = 0;
+		if (guarded[i])
+			q->crouch = (keys[1 - i] & KEY(DOWN)) != 0;
+		q->slide = p->face * (guarded[i] ? m->block_pushback : m->pushback);
+		if (p->move)
+			p->hit = group[i];
+		if (p->freeze < m->hitstop)
+			p->freeze = m->hitstop;
+		if (q->freeze < m->hitstop)
+			q->freeze = m->hitstop;
+		s->tone = 2400;
+		s->hits++;
+		s->guards += (unsigned)guarded[i];
 	}
-	if (!s->p[0].hp || !s->p[1].hp)
+	struct fighter *p0 = &s->p[0], *p1 = &s->p[1];
+	if (grounded(p0) && grounded(p1) && abs(p0->x - p1->x) < 45) {
+		int mid = (p0->x + p1->x) / 2, f = p0->x <= p1->x ? 1 : -1;
+		p0->x = clamp(mid - f * 23, WALL_LEFT, WALL_RIGHT);
+		p1->x = clamp(mid + f * 23, WALL_LEFT, WALL_RIGHT);
+	}
+	if (!p0->hp || !p1->hp)
 		s->ended = 1;
 	s->tick++;
 }
@@ -178,37 +345,6 @@ static void text(struct scene *s, int x, int y, const char *str, uint16_t color)
 					     OPAQUE, 255);
 	}
 }
-/* Image for an action after t ticks; looping actions wrap, others hold. */
-static int frame(const struct assets *a, int who, int action, uint32_t t, int loop)
-{
-	const struct anim *an = &a->chr[who].action[action];
-	t = loop ? t % an->total : t >= an->total ? an->total - 1u : t;
-	for (unsigned i = 0; i < an->count; i++) {
-		const struct step *st = &a->step[an->first + i];
-		if (t < st->ticks)
-			return st->image;
-		t -= st->ticks;
-	}
-	return a->step[an->first + an->count - 1].image;
-}
-static int pose(const struct fight_state *s, const struct assets *a, int i)
-{
-	const struct fighter *p = &s->p[i], *q = &s->p[1 - i];
-	if (!p->hp)
-		return frame(a, i, KO, s->ended, 0);
-	if (p->stun)
-		return p->block ? frame(a, i, GUARD, 8u - (unsigned)p->stun, 0)
-				: frame(a, i, HURT, 14u - (unsigned)p->stun, 0);
-	if (p->attack)
-		return frame(a, i, ATTACK, 24u - (unsigned)p->attack, 0);
-	if (p->y || p->vy)
-		return frame(a, i, JUMP, (unsigned)(p->vy + 48) / 3, 0);
-	if (p->block)
-		return frame(a, i, GUARD, 24u - (unsigned)q->attack, 0);
-	if (p->walk)
-		return frame(a, i, p->walk > 0 ? WALK_FORWARD : WALK_BACK, s->tick, 1);
-	return frame(a, i, IDLE, s->tick + (unsigned)i * 17, 1);
-}
 static void sprite(struct scene *s, const struct assets *a, int image, int x, int y,
 		   int flip, int blend, int alpha)
 {
@@ -218,9 +354,33 @@ static void sprite(struct scene *s, const struct assets *a, int image, int x, in
 		    SPRITE, flip ? x - (im->w - im->ax) : x - im->ax,
 		    y - im->ay, im->w, im->h, image, flip, blend, 0, (uint8_t)alpha};
 }
+/* Blended effects share EFFECT_PIXEL_BUDGET opaque pixels per frame; an
+ * effect that no longer fits is dropped and later smaller ones may still
+ * draw. Rules never see effects, so dropping cannot change the fight. */
+static void effect(struct scene *s, const struct assets *a, int image, int x, int y,
+		   int flip, int blend, int alpha, uint32_t *budget)
+{
+	uint32_t cost = a->image[image].count;
+	s->effects_requested++;
+	if (cost > *budget || s->count >= COMMANDS)
+		return;
+	*budget -= cost;
+	s->effects_drawn++;
+	sprite(s, a, image, x, y, flip, blend, alpha);
+}
+/* Box overlay: a one-pixel opaque outline, hitboxes also tinted. */
+static void outline(struct scene *s, struct area r, uint16_t color, int alpha)
+{
+	if (alpha)
+		rect(s, r.x, r.y, r.w, r.h, color, ALPHA, alpha);
+	rect(s, r.x, r.y, r.w, 1, color, OPAQUE, 255);
+	rect(s, r.x, r.y + r.h - 1, r.w, 1, color, OPAQUE, 255);
+	rect(s, r.x, r.y, 1, r.h, color, OPAQUE, 255);
+	rect(s, r.x + r.w - 1, r.y, 1, r.h, color, OPAQUE, 255);
+}
 void fight_scene(const struct fight_state *s, const struct assets *a, struct scene *out)
 {
-	out->count = 0;
+	out->count = out->effects_requested = out->effects_drawn = 0;
 	/* Background is deliberately drawn in software, not supplied by the host. */
 	rect(out, 0, 0, FW, FH, 0x10c6, OPAQUE, 255);
 	for (int i = 0; i < 8; i++)
@@ -231,23 +391,26 @@ void fight_scene(const struct fight_state *s, const struct assets *a, struct sce
 		const struct fighter *p = &s->p[i];
 		rect(out, p->x - 30, GROUND - 4, 60, 6, 0, ALPHA, 120);
 		/* Sheet art faces right; the foot anchor stands on the ground. */
-		sprite(out, a, pose(s, a, i), p->x, GROUND + p->y, p->face < 0, OPAQUE,
-		       255);
-		if (s->boxes) {
-			rect(out, p->x - 22, GROUND - 100 + p->y, 44, 100, 0x07e0, ALPHA,
-			     50);
-			if (p->attack > 12 && p->attack < 19)
-				rect(out, p->face > 0 ? p->x : p->x - REACH,
-				     GROUND - 82 + p->y, REACH, 20, 0xf800, ALPHA, 100);
-		}
+		const struct step *st = &a->step[fight_pose(s, a, i)];
+		sprite(out, a, st->image, p->x, GROUND + p->y, p->face < 0, OPAQUE, 255);
+	}
+	/* Drawn after both fighters so neither sprite hides the other's boxes. */
+	for (int i = 0; s->boxes && i < 2; i++) {
+		const struct fighter *p = &s->p[i];
+		const struct step *st = &a->step[fight_pose(s, a, i)];
+		for (unsigned k = 0; k < (unsigned)st->hurt + st->hit; k++)
+			outline(out, fight_box(&a->box[st->box + k], p->x, p->y, p->face),
+				k < st->hurt ? 0x07e0 : 0xf800, k < st->hurt ? 0 : 96);
+		rect(out, p->x - 3, GROUND + p->y, 7, 1, 0xffff, OPAQUE, 255);
 	}
 	/* Stress modes: 8, 24 or 48 overlapping animated alpha/additive effects. */
 	int n = s->stress == 1 ? 8 : s->stress == 2 ? 24 : s->stress == 3 ? 48 : 0;
+	uint32_t budget = EFFECT_PIXEL_BUDGET;
 	for (int i = 0; i < n && a->effects; i++) {
 		int x = (int)((s->tick * 3 + (unsigned)i * 71) % 560) - 80;
 		int y = 200 + (i * 23) % 120;
 		int image = a->effect[(s->tick / 4 + (unsigned)i) % a->effects];
-		sprite(out, a, image, x, y, i % 2, i % 3 ? ALPHA : ADD, 160);
+		effect(out, a, image, x, y, i % 2, i % 3 ? ALPHA : ADD, 160, &budget);
 	}
 	rect(out, 16, 16, 204, 13, 0, OPAQUE, 255);
 	rect(out, 260, 16, 204, 13, 0, OPAQUE, 255);
@@ -264,6 +427,7 @@ void fight_scene(const struct fight_state *s, const struct assets *a, struct sce
 	rect(out, 220, 16, 40, 13, (uint16_t)(0x001f + s->stress * 0x3800), OPAQUE,
 	     255);
 }
+#define FIGHTER_WORDS 15
 void fight_encode(const struct fight_state *s, uint32_t w[STATE_WORDS])
 {
 	memset(w, 0, STATE_WORDS * sizeof(*w));
@@ -277,31 +441,46 @@ void fight_encode(const struct fight_state *s, uint32_t w[STATE_WORDS])
 	w[7] = s->round;
 	for (int i = 0; i < 2; i++) {
 		const struct fighter *p = &s->p[i];
-		uint32_t *d = w + 8 + i * 10;
-		d[0] = (uint32_t)p->x;
-		d[1] = (uint32_t)p->y;
-		d[2] = (uint32_t)p->vy;
-		d[3] = (uint32_t)p->hp;
-		d[4] = (uint32_t)p->attack;
-		d[5] = (uint32_t)p->stun;
-		d[6] = (uint32_t)p->face;
-		d[7] = (uint32_t)p->hit;
-		d[8] = (uint32_t)p->walk;
-		d[9] = (uint32_t)p->block;
+		const int32_t v[FIGHTER_WORDS] = {
+		    p->x,    p->y,	p->vy,	   p->hp,  p->face,
+		    p->walk, p->block,	p->crouch, p->move, p->elapsed,
+		    p->hit,  p->stun,	p->freeze, p->slide, p->keys};
+		for (int k = 0; k < FIGHTER_WORDS; k++)
+			w[8 + i * FIGHTER_WORDS + k] = (uint32_t)v[k];
 	}
-	w[28] = s->tone;
-	w[29] = s->phase;
-	w[30] = s->ended;
-	w[31] = s->hits;
-	w[32] = s->guards;
+	w[38] = s->tone;
+	w[39] = s->phase;
+	w[40] = s->ended;
+	w[41] = s->hits;
+	w[42] = s->guards;
 }
-int fight_decode(struct fight_state *s, const uint32_t w[STATE_WORDS])
+static int valid(const struct fighter *p, const struct character *c)
+{
+	if (p->x < WALL_LEFT || p->x > WALL_RIGHT || p->y < -300 || p->y > 0 ||
+	    p->vy < -48 || p->vy > 60 || p->hp < 0 || p->hp > 1000 ||
+	    (p->face != 1 && p->face != -1) || p->walk < -1 || p->walk > 1 ||
+	    p->block < 0 || p->block > 2 || p->crouch < 0 || p->crouch > 1 ||
+	    (p->crouch && p->y) || p->move < 0 || p->move > MOVES || p->elapsed < 0 ||
+	    p->hit < 0 || p->stun < 0 || p->stun > MAX_STUN || p->freeze < 0 ||
+	    p->freeze > MAX_HITSTOP || p->slide < -MAX_PUSH || p->slide > MAX_PUSH ||
+	    p->keys < 0 || p->keys > 0xffff)
+		return 0;
+	if (p->move) {
+		const struct move *m = &c->move[p->move - 1];
+		if (p->elapsed >= m->anim.total || p->hit > m->groups || p->stun || p->block)
+			return 0;
+	} else if (p->elapsed > 255 || p->hit)
+		return 0;
+	return (p->block != 1 || p->stun) && (p->block != 2 || !p->stun);
+}
+int fight_decode(struct fight_state *s, const struct assets *a,
+		 const uint32_t w[STATE_WORDS])
 {
 	struct fight_state t = {0};
-	if (w[3] > 1 || w[4] > 3 || w[5] > 1 || w[6] > 1 || w[28] > 2400 ||
-	    w[29] >= 48000 || w[30] > 180)
+	if (w[3] > 1 || w[4] > 3 || w[5] > 1 || w[6] > 1 || w[38] > 2400 ||
+	    w[39] >= 48000 || w[40] > 180)
 		return 0;
-	for (int i = 33; i < STATE_WORDS; i++)
+	for (int i = 43; i < STATE_WORDS; i++)
 		if (w[i])
 			return 0;
 	t.tick = w[0];
@@ -313,32 +492,22 @@ int fight_decode(struct fight_state *s, const uint32_t w[STATE_WORDS])
 	t.automatic = w[6];
 	t.round = w[7];
 	for (int i = 0; i < 2; i++) {
-		const uint32_t *d = w + 8 + i * 10;
+		const uint32_t *d = w + 8 + i * FIGHTER_WORDS;
 		struct fighter *p = &t.p[i];
-		p->x = (int32_t)d[0];
-		p->y = (int32_t)d[1];
-		p->vy = (int32_t)d[2];
-		p->hp = (int32_t)d[3];
-		p->attack = (int32_t)d[4];
-		p->stun = (int32_t)d[5];
-		p->face = (int32_t)d[6];
-		p->hit = (int32_t)d[7];
-		p->walk = (int32_t)d[8];
-		p->block = (int32_t)d[9];
-		if (p->x < 50 || p->x > 430 || p->y < -300 || p->y > 0 || p->vy < -48 ||
-		    p->vy > 60 || p->hp < 0 || p->hp > 1000 || p->attack < 0 ||
-		    p->attack > 24 || p->stun < 0 || p->stun > 14 ||
-		    (p->face != 1 && p->face != -1) || p->hit < 0 || p->hit > 1 ||
-		    p->walk < -1 || p->walk > 1 || p->block < 0 || p->block > 2 ||
-		    (p->block == 1 && (!p->stun || p->stun > 8)) ||
-		    (p->block == 2 && p->stun))
+		int32_t *v[FIGHTER_WORDS] = {
+		    &p->x,    &p->y,	 &p->vy,     &p->hp,	&p->face,
+		    &p->walk, &p->block, &p->crouch, &p->move,	&p->elapsed,
+		    &p->hit,  &p->stun,	 &p->freeze, &p->slide, &p->keys};
+		for (int k = 0; k < FIGHTER_WORDS; k++)
+			*v[k] = (int32_t)d[k];
+		if (!valid(p, &a->chr[i]))
 			return 0;
 	}
-	t.tone = w[28];
-	t.phase = w[29];
-	t.ended = w[30];
-	t.hits = w[31];
-	t.guards = w[32];
+	t.tone = w[38];
+	t.phase = w[39];
+	t.ended = w[40];
+	t.hits = w[41];
+	t.guards = w[42];
 	*s = t;
 	return 1;
 }
