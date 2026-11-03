@@ -9,8 +9,8 @@ stats resolve from the system plus overrides, class defaults and the damage
 scale give the expected numbers, follow-ups pack their parent, window and
 contact flag, a half circle behind the quarter circle it completes is
 refused, specials pack their names (every roster special has one),
-knockdown and OTG flags, the derived knockdown and throw actions, wakeup and
-the throw rules, and the conversion keeps every loaded
+knockdown and OTG flags, the derived knockdown, throw, run and backdash
+actions, wakeup, the throw rules and the run and backdash rules, and the conversion keeps every loaded
 value and is idempotent. It also checks that every roster manifest is
 already converted."""
 import copy
@@ -178,7 +178,28 @@ def main():
     assert not any(len(s) > 2 and 'hit' in s[2] for s in grab)
     assert derived['thrown'] == t['hurt']
     c = character(TERRY)
-    assert len(c.actions) == len(pack.ACTIONS) == 15
+    assert len(c.actions) == len(pack.ACTIONS) == 17
+    # Run: walk_forward at twice the pace; backdash: walk_back, the jump's
+    # second and last frames, walk_back again.
+    assert [s[0] for s in derived['run']] == [s[0] for s in t['walk_forward']]
+    assert [s[1] for s in derived['run']] == [max(1, s[1] // 2) for s in t['walk_forward']]
+    assert [s[0] for s in derived['backdash']] == [t['walk_back'][0][0], t['jump'][1][0],
+                                                   t['jump'][-1][0], t['walk_back'][0][0]]
+    kd, sd = real.profile['kof2002']['dash'], real.profile['samsho5sp']['dash']
+    assert kd['run_min'] == 10 and kd['backdash_air'] == 18 and kd['run_scale'] == 2100
+    assert sd['run_grace'] == 3 and sd['backdash_invuln'] == 2 and not sd['backdash_startup']
+    assert pack.run_speed(12, kd) == 25
+    refused('an unknown dash key', lambda: systems(with_system(['kof2002', 'dash'],
+                                                                {'speed': 1})))
+    refused('dash backdash_air 0', lambda: systems(with_system(['kof2002', 'dash'],
+                                                                {'backdash_air': 0})))
+    refused('dash run_scale 999', lambda: systems(with_system(['kof2002', 'dash'],
+                                                               {'run_scale': 999})))
+    refused('backdash_invuln past the backdash', lambda: systems(with_system(
+        ['kof2002', 'dash'], {'backdash_invuln': 25})))
+    refused('a run past MAX_RUN', lambda: character(with_terry(
+        lambda c, _: c.setdefault('stats', {}).update(walk=64)), data=with_system(
+        ['kof2002', 'dash'], {'run_scale': 4000})))
     kof = real.profile['kof2002']['throw']
     assert kof['range'] == 4 and kof['tech'] == 6 and kof['wakeup_safe'] == 8
     assert real.profile['samsho5sp']['throw']['tech'] == 0

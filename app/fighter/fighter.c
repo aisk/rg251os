@@ -1,4 +1,5 @@
-/* Deterministic fighter rules and the arcade ladder: movement, prejump,
+/* Deterministic fighter rules and the arcade ladder: movement, run and
+ * backdash, prejump,
  * jumps, crouching, data-driven normals and specials with an input buffer,
  * motion and charge commands, cancels, projectiles with clashes, hurt/hit
  * boxes from the pack, hitstop, hitstun, blockstun, high/low/overhead guard,
@@ -136,6 +137,19 @@
  * thrower's elapsed reaches its THROW total, the one held takes the
  * system's throw hit (class throw, unguardable, it knocks down; a back
  * throw first moves it behind the thrower and sends it the other way).
+ * Run and backdash (the fighter's system's dash rule): on the ground and
+ * free, 6 released and 6 again within window ticks runs, 4 likewise
+ * backdashes. A run moves walk speed for run_startup ticks, then run speed
+ * (walk times run_scale); once it has lasted run_startup + run_min ticks,
+ * letting go of forward coasts run_grace ticks (forward again runs on) and
+ * skids run_stop ticks at a falling speed. A buffered move or UP ends a
+ * run at once (the move starts, the jump's prejump begins); a run never
+ * guards or throws. A backdash waits back_startup ticks, flies back_air
+ * ticks back back_distance pixels on a parabola back_height high (no
+ * gravity) and lands for back_stop ticks; it cannot guard or be thrown,
+ * strikes and projectiles miss it for its first back_invuln ticks, and a
+ * hit ends it (an airborne one falls). The AI runs in from afar in some
+ * plan windows and backdashes from some close swings it does not guard.
  * Cancels: a normal whose hit connected (hit or block) can be cancelled
  * into a special (cancel "special") or another normal (cancel "chain")
  * while its elapsed is inside startup + active; the buffered move starts on
@@ -185,14 +199,17 @@ static const unsigned button_bit[4] = {BUTTON_HK, BUTTON_HP, BUTTON_LK, BUTTON_L
  * a follow-up comes after a contact one time in hit_follow and after a
  * whiff one time in whiff_follow (0 = never); a normal that connects is
  * cancelled into a motion special cancel times in 4; its hits deal damage
- * per mille (the ladder's CPU only). */
+ * per mille (the ladder's CPU only). Of 8 plan windows run runs in from
+ * afar, and of 32 close swings it does not guard backdash backdashes
+ * away. */
 static const struct level_ai {
-	uint8_t guard, wrong, react, hit_follow, whiff_follow, cancel, tech, tech_at, grab;
+	uint8_t guard, wrong, react, hit_follow, whiff_follow, cancel, tech, tech_at, grab, run,
+	    backdash;
 	uint16_t special, press, damage;
 } levels[LEVELS] = {
-    {14, 6, 4, 2, 4, 0, 6, 4, 1, 128, 16, 750},
-    {22, 4, 0, 1, 2, 0, 12, 3, 2, 64, 8, 1000},
-    {28, 1, 0, 1, 0, 3, 20, 2, 3, 24, 4, 1000},
+    {14, 6, 4, 2, 4, 0, 6, 4, 1, 1, 2, 128, 16, 750},
+    {22, 4, 0, 1, 2, 0, 12, 3, 2, 3, 4, 64, 8, 1000},
+    {28, 1, 0, 1, 0, 3, 20, 2, 3, 5, 3, 24, 4, 1000},
 };
 static int clamp(int x, int lo, int hi) { return x < lo ? lo : x > hi ? hi : x; }
 static uint32_t random_next(struct fight_state *s)
@@ -446,12 +463,13 @@ static int throwing(const struct fighter *p)
 {
 	return p->grab == GRAB_FORWARD || p->grab == GRAB_BACK;
 }
-/* Can q be thrown: standing or crouching on the ground (not in a prejump),
- * out of hitstun, blockstun, knockdowns and throws, and past its safe
- * ticks. */
+/* Can q be thrown: standing or crouching on the ground (not in a prejump
+ * or a backdash), out of hitstun, blockstun, knockdowns and throws, and
+ * past its safe ticks. */
 static int throwable(const struct fighter *q)
 {
-	return q->hp && grounded(q) && !q->squat && !q->stun && !q->down && !q->grab && !q->safe;
+	return q->hp && grounded(q) && !q->squat && !q->stun && !q->down && !q->grab && !q->safe &&
+	       q->dash != DASH_BACK;
 }
 /* Body distance: the larger push of the two fighters. */
 static int body(const struct fight_state *s, const struct assets *a)
@@ -464,6 +482,44 @@ static int in_throw_range(const struct fight_state *s, const struct assets *a, i
 {
 	const struct fighter *p = &s->p[i], *q = &s->p[1 - i];
 	return p->hp && throwable(q) && abs(px(q) - px(p)) <= body(s, a) + rule(s, a, i)->range;
+}
+/* ---- run and backdash ---- */
+static const struct dash_rule *dash_rule(const struct fight_state *s, const struct assets *a,
+					 int i)
+{
+	return &a->sys[who(s, a, i)->system].dash;
+}
+static int back_total(const struct dash_rule *d)
+{
+	return d->back_startup + d->back_air + d->back_stop;
+}
+/* A backdash's height after its tick e: a parabola over the airborne
+ * ticks, back on the ground on the last of them. */
+static int back_y(const struct dash_rule *d, int e)
+{
+	int t = e - d->back_startup + 1, n = d->back_air;
+	return t <= 0 || t >= n ? 0 : -(4 * d->back_height * t * (n - t)) / (n * n);
+}
+/* Strikes cannot touch fighter i in the first back_invuln ticks of a
+ * backdash. */
+static int evading(const struct fight_state *s, const struct assets *a, int i)
+{
+	const struct fighter *q = &s->p[i];
+	return q->dash == DASH_BACK && q->elapsed < dash_rule(s, a, i)->back_invuln;
+}
+/* A tap of numpad direction n (6 or 4) now: n this tick, the tick before
+ * without that direction, and n again before it within window ticks
+ * (the in-between ticks without it too). */
+static int tapped(const struct fighter *p, int n, unsigned window)
+{
+	if (numpad(history_at(p, 0), p->face) != n)
+		return 0;
+	for (unsigned k = 1; k <= window && k < HISTORY; k++) {
+		int m = numpad(history_at(p, k), p->face);
+		if (m % 3 == n % 3)
+			return k >= 2 && m == n;
+	}
+	return 0;
 }
 unsigned fight_pose(const struct fight_state *s, const struct assets *a, int i)
 {
@@ -488,6 +544,10 @@ unsigned fight_pose(const struct fight_state *s, const struct assets *a, int i)
 			       &c->action[p->block ? (low ? CROUCH_GUARD : GUARD)
 						   : (low ? CROUCH_HURT : HURT)],
 			       (uint32_t)p->elapsed, 0, NULL);
+	if (p->dash == DASH_BACK)
+		return step_at(a, &c->action[BACKDASH], (uint32_t)p->elapsed, 0, NULL);
+	if (p->dash)
+		return step_at(a, &c->action[RUN], s->tick, 1, NULL);
 	if (p->squat)
 		return step_at(a, &c->action[JUMP], 0, 0, NULL);
 	if (!grounded(p))
@@ -583,6 +643,12 @@ static uint32_t macro(int motion, uint32_t charge, uint32_t t, int face, uint32_
 	uint32_t key = (n <= 3 ? down : 0) | (n % 3 == 0 ? fwd : n % 3 == 1 ? back : 0);
 	return t == 4 ? key | button : key;
 }
+/* The AI's half of a 66 or 44: key now unless the last tick held it, so
+ * held keys turn into taps. */
+static uint32_t tap(const struct fighter *p, uint32_t key)
+{
+	return history_at(p, 0) & (key >> RETRO_DEVICE_ID_JOYPAD_UP) ? 0 : key;
+}
 static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
 {
 	struct fighter *p = &s->p[i];
@@ -630,6 +696,10 @@ static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
 				low = !low;
 			return away | (low ? KEY(DOWN) : 0u);
 		}
+		/* Some swings it does not guard, up close, it backdashes from. */
+		if (h - lv->guard < lv->backdash && dist < 120 && !p->move && !p->stun &&
+		    grounded(p) && !p->dash)
+			return tap(p, away);
 	}
 	for (int k = 0; k < MAX_PROJECTILES; k++) {
 		const struct shot *sh = &s->shot[k];
@@ -716,13 +786,21 @@ static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
 	unsigned window = (s->tick + (unsigned)i * 17) / 29, plan = window * 2654435761u >> 24;
 	int button = (int)(plan & 3), low = (int)(plan >> 2) & 1;
 	const struct move *m = &c->move[strength[button] + (low ? CROUCH_LP : 0)];
-	if (waking < 0 && ((plan >> 3) & 7) < lv->grab) {
+	/* lv->run windows in 8 run in (66, held until the target is near). */
+	int grab = waking < 0 && ((plan >> 3) & 7) < lv->grab,
+	    near = grab ? body(s, a) + rule(s, a, i)->range : m->reach + 20,
+	    run = ((window * 2246822519u) >> 29) < lv->run;
+	if (p->dash == DASH_RUN || p->dash == DASH_COAST)
+		return dist > near + 40 ? toward : 0;
+	if (run && dist > 180 && !p->move && !p->stun && !p->dash && grounded(p))
+		return tap(p, toward);
+	if (grab) {
 		if (!p->move && !p->stun && grounded(p) && in_throw_range(s, a, i))
 			return (plan & 0x40 && plan & 0x80 ? away : toward) |
 			       (plan & 1 ? KEY(A) : KEY(X));
-		return dist > body(s, a) + rule(s, a, i)->range ? toward : 0;
+		return dist > near ? toward : 0;
 	}
-	uint32_t key = dist > m->reach + 20 ? toward : 0;
+	uint32_t key = dist > near ? toward : 0;
 	int press = waking < 0 ? r % lv->press == 0
 			       : s->level != LEVEL_EASY && waking <= m->startup + 1;
 	if (!key && !p->move && !p->stun && press)
@@ -841,7 +919,7 @@ static void start(struct fight_state *s, const struct assets *a, int i, int k)
 	const struct character *c = who(s, a, i);
 	struct fighter *p = &s->p[i];
 	p->move = k + 1;
-	p->elapsed = p->hit = p->block = p->squat = p->walk = p->clock = 0;
+	p->elapsed = p->hit = p->block = p->squat = p->walk = p->clock = p->dash = 0;
 	p->buffer = p->age = 0;
 	p->crouch = k >= CROUCH_LP && k <= CROUCH_HK;
 	if (c->move[k].special)
@@ -879,9 +957,69 @@ static void begin_throw(struct fight_state *s, const struct assets *a, int i, in
 {
 	struct fighter *p = &s->p[i];
 	p->grab = back ? GRAB_BACK : GRAB_FORWARD;
-	p->elapsed = p->hit = p->block = p->squat = p->walk = p->crouch = p->clock = 0;
+	p->elapsed = p->hit = p->block = p->squat = p->walk = p->crouch = p->clock = p->dash = 0;
 	p->buffer = p->age = 0;
 	sound(s, a, SOUND_WHOOSH_HEAVY, i, 0);
+}
+/* Backdash motion of its tick elapsed: back the next share of
+ * back_distance on each airborne tick, up and down the arc; JUMP on the
+ * first of them, LAND on the last. */
+static void back_move(struct fight_state *s, const struct assets *a, int i)
+{
+	struct fighter *p = &s->p[i];
+	const struct dash_rule *d = dash_rule(s, a, i);
+	int j = p->elapsed - d->back_startup, n = d->back_air, far = QUARTER(d->back_distance);
+	if (j < 0 || j >= n)
+		return;
+	p->x -= p->face * (far * (j + 1) / n - far * j / n);
+	p->y = back_y(d, p->elapsed);
+	if (!j)
+		sound(s, a, SOUND_JUMP, i, 0);
+	if (j == n - 1)
+		sound(s, a, SOUND_LAND, i, 0);
+}
+/* One tick of a run or backdash (the tick it began did its own). Returns 1
+ * while it holds the fighter, 0 once it is over or a buffered move or UP
+ * cancels a run (the caller then acts as usual; a run never throws). */
+static int dashing(struct fight_state *s, const struct assets *a, int i, uint32_t keys)
+{
+	struct fighter *p = &s->p[i];
+	const struct dash_rule *d = dash_rule(s, a, i);
+	const struct stats *st = &who(s, a, i)->stats;
+	age(p);
+	if (p->dash == DASH_BACK) {
+		if (p->elapsed >= back_total(d)) {
+			p->dash = p->elapsed = 0;
+			return 0;
+		}
+		back_move(s, a, i);
+		return 1;
+	}
+	if (p->dash != DASH_STOP && (p->buffer || (keys & KEY(UP)))) {
+		if (keys & KEY(UP))
+			p->dash = p->elapsed = 0;
+		return 0;
+	}
+	int fwd = numpad(direction(keys), p->face) % 3 == 0;
+	if (p->dash == DASH_RUN && !fwd && p->elapsed >= d->run_startup + d->run_min) {
+		p->dash = d->run_grace ? DASH_COAST : DASH_STOP;
+		p->elapsed = 0;
+	} else if (p->dash == DASH_COAST && fwd) {
+		p->dash = DASH_RUN;
+		p->elapsed = d->run_startup + d->run_min;
+	} else if (p->dash == DASH_COAST && p->elapsed >= d->run_grace) {
+		p->dash = DASH_STOP;
+		p->elapsed = 0;
+	}
+	if (p->dash == DASH_STOP && p->elapsed >= d->run_stop) {
+		p->dash = p->elapsed = 0;
+		return 0;
+	}
+	int v = p->dash == DASH_STOP ? st->run * (d->run_stop - p->elapsed) / (d->run_stop + 1)
+		: p->dash == DASH_RUN && p->elapsed < d->run_startup ? st->walk
+								     : st->run;
+	p->x += p->face * v;
+	return 1;
 }
 /* One fighter's tick before contacts; returns 1 if it was frozen. reach:
  * the opponent was in throw range and throwable as the tick began. */
@@ -945,22 +1083,36 @@ static int update(struct fight_state *s, const struct assets *a, int i, uint32_t
 	}
 	if (p->slide)
 		slide(s, a, p, q);
-	if (!grounded(p) && !p->move)
+	if (!grounded(p) && !p->move && p->dash != DASH_BACK)
 		fall(s, a, i);
 	p->walk = 0;
-	if (!p->move && !p->stun) {
+	if (!p->move && !p->stun && p->dash && dashing(s, a, i, keys)) {
+		/* Running, skidding or backdashing: nothing else this tick. */
+	} else if (!p->move && !p->stun) {
 		int ground = grounded(p);
 		if (ground)
 			p->face = q->x >= p->x ? 1 : -1;
 		p->crouch = ground && !p->squat && (keys & KEY(DOWN));
 		/* Forward or back with HP or HK near a throwable opponent
-		 * throws (on this first tick); otherwise it is the normal. */
+		 * throws (on this first tick, never out of a run); otherwise it
+		 * is the normal. 66 runs, 44 backdashes. */
 		int n = numpad(direction(keys), p->face);
-		if (p->buffer && ground && reach && (n == 4 || n == 6) &&
+		const struct dash_rule *d = dash_rule(s, a, i);
+		if (p->buffer && ground && reach && !p->dash && (n == 4 || n == 6) &&
 		    (p->buffer - 1 == STAND_HP || p->buffer - 1 == STAND_HK)) {
 			begin_throw(s, a, i, n == 4);
 		} else if (p->buffer && ground) {
 			start(s, a, i, p->buffer - 1);
+		} else if (ground && !p->squat && tapped(p, 6, d->window)) {
+			p->dash = DASH_RUN;
+			p->elapsed = p->block = 0;
+			s->runs++;
+			p->x += p->face * c->stats.walk;
+		} else if (ground && !p->squat && tapped(p, 4, d->window)) {
+			p->dash = DASH_BACK;
+			p->elapsed = p->block = 0;
+			s->backdashes++;
+			back_move(s, a, i);
 		} else if (p->squat) {
 			if (!--p->squat) {
 				p->vy = c->stats.jump.vy;
@@ -1012,7 +1164,7 @@ static int update(struct fight_state *s, const struct assets *a, int i, uint32_t
 static int contact(const struct fight_state *s, const struct assets *a, int i, int at[2])
 {
 	const struct fighter *p = &s->p[i], *q = &s->p[1 - i];
-	if (!p->move || !q->hp || q->grab)
+	if (!p->move || !q->hp || q->grab || evading(s, a, 1 - i))
 		return 0;
 	/* A fighter knocked down is out of reach, except lying for OTG moves. */
 	if (q->down && !(lying(q, who(s, a, 1 - i)) &&
@@ -1038,7 +1190,7 @@ static int shot_hits_body(const struct fight_state *s, const struct assets *a,
 			  const struct shot *sh, int i, int at[2])
 {
 	const struct fighter *q = &s->p[i];
-	if (q->down || q->grab)
+	if (q->down || q->grab || evading(s, a, i))
 		return 0;
 	const struct step *hit = &a->step[shot_step(s, a, sh)],
 			  *body = &a->step[fight_pose(s, a, i)];
@@ -1068,7 +1220,7 @@ static int shots_clash(const struct fight_state *s, const struct assets *a,
 /* Can the defender block this hit with these keys? */
 static int blocks(const struct fighter *q, uint32_t keys, const struct hit *h)
 {
-	if (q->move || q->down || (q->stun && q->block != 1) || !grounded(q) ||
+	if (q->move || q->down || q->dash || (q->stun && q->block != 1) || !grounded(q) ||
 	    !(keys & back_key(q)))
 		return 0;
 	int low = (keys & KEY(DOWN)) != 0;
@@ -1092,7 +1244,7 @@ static void struck(struct fight_state *s, struct fighter *p, struct fighter *q,
 	if (scale != 1000)
 		v = permille(v, scale);
 	q->hp = clamp(q->hp - permille(v, qc->stats.defense), 0, qc->stats.life);
-	q->move = q->hit = q->squat = 0;
+	q->move = q->hit = q->squat = q->dash = 0;
 	q->stun = guarded ? h->blockstun : h->hitstun;
 	q->block = guarded;
 	q->elapsed = 0;
@@ -1182,6 +1334,7 @@ static void seize(struct fight_state *s, const struct assets *a, int i)
 	struct fighter *p = &s->p[i], *q = &s->p[1 - i];
 	q->grab = GRAB_HELD;
 	q->elapsed = q->move = q->hit = q->stun = q->block = q->squat = q->walk = q->crouch = 0;
+	q->dash = p->dash = 0;
 	q->buffer = q->age = q->clock = q->freeze = q->slide = q->corner = q->y = q->vy = 0;
 	p->freeze = p->slide = p->corner = 0;
 	q->face = -p->face;
@@ -1195,7 +1348,7 @@ static void tech(struct fight_state *s, const struct assets *a, int i)
 	for (int j = 0; j < 2; j++) {
 		struct fighter *f = &s->p[j];
 		f->grab = GRAB_NONE;
-		f->move = f->hit = f->squat = f->walk = f->crouch = f->buffer = f->age = 0;
+		f->move = f->hit = f->squat = f->walk = f->crouch = f->buffer = f->age = f->dash = 0;
 		f->stun = t->tech_stun;
 		f->block = 1;
 		f->elapsed = 0;
@@ -1524,8 +1677,8 @@ void fight_step(struct fight_state *s, const struct assets *a, uint32_t input,
 		 * plays; nothing hits. */
 		for (int i = 0; i < 2; i++) {
 			struct fighter *p = &s->p[i];
-			if (p->move)
-				p->move = p->elapsed = p->hit = 0;
+			if (p->move || p->dash)
+				p->move = p->elapsed = p->hit = p->dash = 0;
 			if (p->down)
 				knocked(s, a, i);
 			else if (!grounded(p))
@@ -2126,7 +2279,7 @@ hud:
 		pause_panel(out, s, a);
 }
 /* ---- state words ---- */
-#define FIGHTER_WORDS 30
+#define FIGHTER_WORDS 31
 #define SHOT_WORDS 6
 #define GLOBAL_WORDS 19
 #define SHOTS_AT (GLOBAL_WORDS + 2 * FIGHTER_WORDS)
@@ -2139,12 +2292,13 @@ hud:
 #define SPARKS_AT (EXTRA_AT + 4)
 #define SOUNDS_AT (SPARKS_AT + SPARK_SLOTS * SPARK_WORDS)
 /* Then combo, shown, show and best per side, the select list flag, the
- * difficulty and the throw and tech counts. */
+ * difficulty, the throw and tech counts and the run and backdash counts. */
 #define COMBO_AT (SOUNDS_AT + 1 + MAX_SOUND_EVENTS)
 #define LIST_AT (COMBO_AT + 8)
 #define LEVEL_AT (LIST_AT + 1)
 #define THROWS_AT (LEVEL_AT + 1)
-#define USED_WORDS (THROWS_AT + 2)
+#define DASHES_AT (THROWS_AT + 2)
+#define USED_WORDS (DASHES_AT + 2)
 static void fighter_fields(struct fighter *p, int32_t *v[FIGHTER_WORDS])
 {
 	int32_t *f[] = {&p->x,	   &p->y,     &p->vy,	     &p->hp,	&p->face,  &p->walk,
@@ -2157,6 +2311,7 @@ static void fighter_fields(struct fighter *p, int32_t *v[FIGHTER_WORDS])
 	v[25] = (int32_t *)(void *)&p->charge;
 	for (int k = 0; k < HISTORY / 8; k++)
 		v[26 + k] = (int32_t *)(void *)&p->history[k];
+	v[26 + HISTORY / 8] = &p->dash;
 }
 static void global_fields(struct fight_state *s, uint32_t *v[GLOBAL_WORDS])
 {
@@ -2221,6 +2376,8 @@ void fight_encode(const struct fight_state *s, uint32_t w[STATE_WORDS])
 	w[LEVEL_AT] = t.level;
 	w[THROWS_AT] = t.throws;
 	w[THROWS_AT + 1] = t.techs;
+	w[DASHES_AT] = t.runs;
+	w[DASHES_AT + 1] = t.backdashes;
 }
 /* Bounds come from the fighter's own character (life, jump velocities,
  * prejump, buffer, charge and grace) and the walls of the state's camera. */
@@ -2265,6 +2422,18 @@ static int valid(const struct fight_state *s, const struct fighter *p, const str
 	    (p->grab && (p->move || p->stun || p->block || p->crouch || p->squat || p->walk ||
 			 p->down || !grounded(p) || p->freeze || p->buffer || p->slide)) ||
 	    (throwing(p) && p->elapsed >= c->action[THROW].total))
+		return 0;
+	/* Running, skidding or backdashing: nothing else going on; a run on
+	 * the ground within its phase, a backdash on its arc. */
+	const struct dash_rule *d = &a->sys[c->system].dash;
+	if (p->dash < DASH_NONE || p->dash >= DASH_PHASES ||
+	    (p->dash && (p->move || p->stun || p->block || p->crouch || p->squat || p->walk ||
+			 p->down || p->grab || p->vy)) ||
+	    (p->dash == DASH_BACK &&
+	     (p->elapsed >= back_total(d) || p->y != back_y(d, p->elapsed))) ||
+	    (p->dash && p->dash != DASH_BACK && p->y) ||
+	    (p->dash == DASH_COAST && p->elapsed >= d->run_grace) ||
+	    (p->dash == DASH_STOP && p->elapsed >= d->run_stop))
 		return 0;
 	if (p->move) {
 		const struct move *m = &c->move[p->move - 1];
@@ -2352,6 +2521,8 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 	t.level = w[LEVEL_AT];
 	t.throws = w[THROWS_AT];
 	t.techs = w[THROWS_AT + 1];
+	t.runs = w[DASHES_AT];
+	t.backdashes = w[DASHES_AT + 1];
 	if (t.list > 1 || t.level >= LEVELS)
 		return 0;
 	unsigned n = a->characters;
@@ -2412,7 +2583,7 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 	}
 	/* Nothing moves during the versus card and READY. */
 	for (int i = 0; t.mode == MODE_FIGHT && t.timer < ROUND_TICKS && i < 2; i++)
-		if (t.p[i].move || t.p[i].stun || t.p[i].down || t.p[i].grab || t.p[i].buffer ||
+		if (t.p[i].move || t.p[i].stun || t.p[i].down || t.p[i].grab || t.p[i].buffer || t.p[i].dash ||
 		    owned[i])
 			return 0;
 	*s = t;

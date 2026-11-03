@@ -10,7 +10,9 @@
  * Lee's Tatsuo Kyaku branches by held direction), the arcade ladder (the
  * versus card and READY freezing the rules, held buttons no press at FIGHT,
  * the banner, select, opponents, loss, clear, Auto rotation, replay), state
- * round-trip and rejection, the AI's use of every move, the difficulty
+ * round-trip and rejection, run and backdash (taps, phases, speeds, the
+ * arc, cancels, throw and strike invulnerability, samsho5sp's coast), the
+ * AI's use of every move (and of runs and backdashes), the difficulty
  * (R on the select screen, Easy damage, guards, specials and Hard's cancels per level), and
  * the stats: each character's system and resolved stats, walk speeds, jump
  * arcs and prejump, life, defense, weight, push distance, guard range, input
@@ -135,7 +137,7 @@ static uint32_t get_word(const uint8_t *p, int k)
 /* ---- rules on exact ticks; expected numbers come from terry.json ---- */
 #define K(k) (1u << RETRO_DEVICE_ID_JOYPAD_##k)
 /* Words per fighter in a saved state, mirroring FIGHTER_WORDS in fighter.c. */
-#define FIGHTER_WORDS_T 30
+#define FIGHTER_WORDS_T 31
 static struct assets pack;
 static unsigned terry;
 enum { POWER_WAVE = MOVES, BURN_KNUCKLE, RISING_TACKLE };
@@ -1022,7 +1024,7 @@ static void round_start(void)
 }
 /* The combo words in a saved state (COMBO_AT in fighter.c): combo, shown,
  * show and best, two each. */
-#define COMBO_W 171
+#define COMBO_W (19 + 2 * FIGHTER_WORDS_T + 6 * MAX_PROJECTILES + 7 + 4 + 5 * SPARK_SLOTS + 1 + MAX_SOUND_EVENTS)
 #define LIST_W (COMBO_W + 8)
 #define LEVEL_W (LIST_W + 1)
 #define THROWS_W (LEVEL_W + 1)
@@ -2142,6 +2144,197 @@ static void stat_tests(void)
  * window breaks it, two at once break each other; nobody in blockstun, a
  * prejump or its safe ticks is thrown (the press is the normal then); no
  * tech on the samsho5sp system; the AI throws and techs. */
+/* Run and backdash (KOF 2002 for Terry, Samurai Shodown for Haohmaru):
+ * 66 runs at walk speed for run_startup ticks then at run speed, holds
+ * through run_min, skids run_stop ticks with a falling speed once forward
+ * is let go; attacks and UP cancel a run and a run never throws. 44
+ * waits back_startup ticks, flies back_air ticks back exactly
+ * back_distance pixels on its arc and lands for back_stop; it cannot be
+ * thrown, guard is impossible and a strike knocks it out of the air;
+ * samsho5sp coasts run_grace ticks and evades strikes for back_invuln
+ * ticks. Mid-run and mid-backdash states round-trip, bad ones are
+ * rejected. */
+static void dashes(void)
+{
+	const struct character *t = &pack.chr[terry];
+	const struct dash_rule *d = &pack.sys[t->system].dash;
+	const struct stats *st = &t->stats;
+	struct fight_state s, u;
+	uint32_t w[STATE_WORDS], v[STATE_WORDS];
+	assert(st->run == (st->walk * d->run_scale + 500) / 1000 && st->run > st->walk);
+	assert(t->action[RUN].count && t->action[BACKDASH].count);
+	/* A tap needs a release in between and both taps within the window. */
+	duel(&s, 100, 400);
+	step2(&s, K(RIGHT), 0);
+	step2(&s, K(RIGHT), 0);
+	assert(!s.p[0].dash && s.p[0].walk == 1);
+	duel(&s, 100, 400);
+	step2(&s, K(RIGHT), 0);
+	for (unsigned n = 0; n < d->window; n++)
+		step2(&s, 0, 0);
+	step2(&s, K(RIGHT), 0);
+	assert(!s.p[0].dash && !s.runs);
+	/* 6, 5, 6: running from the third tick. */
+	duel(&s, 100, 400);
+	step2(&s, K(RIGHT), 0);
+	step2(&s, 0, 0);
+	int x = s.p[0].x;
+	step2(&s, K(RIGHT), 0);
+	assert(s.p[0].dash == DASH_RUN && !s.p[0].elapsed && s.runs == 1 &&
+	       s.p[0].x == x + st->walk && in_action(&s, 0, RUN) && !s.p[0].walk);
+	for (int n = 1; n < 30; n++) {
+		x = s.p[0].x;
+		/* Let go before run_startup + run_min: it keeps running. */
+		step2(&s, n == 5 ? 0 : K(RIGHT), 0);
+		assert(s.p[0].dash == DASH_RUN && s.p[0].elapsed == n &&
+		       s.p[0].x - x == (n < d->run_startup ? st->walk : st->run));
+	}
+	fight_encode(&s, w);
+	assert(fight_decode(&u, &pack, w));
+	fight_encode(&u, v);
+	assert(!memcmp(w, v, sizeof(w)));
+	/* Let go: the skid slows down, then the fighter is free. */
+	for (int n = 0; n < d->run_stop; n++) {
+		x = s.p[0].x;
+		step2(&s, 0, 0);
+		assert(s.p[0].dash == DASH_STOP && s.p[0].elapsed == n &&
+		       s.p[0].x - x == st->run * (d->run_stop - n) / (d->run_stop + 1));
+	}
+	x = s.p[0].x;
+	step2(&s, 0, 0);
+	assert(!s.p[0].dash && s.p[0].x == x);
+	/* An attack cancels the run; so does UP (into a jump). */
+	duel(&s, 100, 400);
+	step2(&s, K(RIGHT), 0);
+	step2(&s, 0, 0);
+	for (int n = 0; n < 8; n++)
+		step2(&s, K(RIGHT), 0);
+	step2(&s, K(RIGHT) | K(Y), 0);
+	assert(!s.p[0].dash && s.p[0].move == STAND_LP + 1);
+	duel(&s, 100, 400);
+	step2(&s, K(RIGHT), 0);
+	step2(&s, 0, 0);
+	step2(&s, K(RIGHT), 0);
+	step2(&s, K(RIGHT) | K(UP), 0);
+	assert(!s.p[0].dash && s.p[0].squat);
+	/* Running into a throwable opponent with forward + HP is the normal. */
+	const int body = st->push;
+	duel(&s, 200, 200 + body);
+	s.p[0].dash = DASH_RUN;
+	s.p[0].elapsed = 20;
+	step2(&s, K(RIGHT) | K(X), 0);
+	assert(!s.p[0].grab && !s.p[1].grab && s.p[0].move == STAND_HP + 1);
+	/* 4, 5, 4: the backdash, from its start tick to landing. */
+	duel(&s, 200, 400);
+	step2(&s, K(LEFT), 0);
+	step2(&s, 0, 0);
+	x = s.p[0].x;
+	int total = d->back_startup + d->back_air + d->back_stop, air = 0;
+	for (int n = 0; n < total; n++) {
+		step2(&s, n ? 0 : K(LEFT), 0);
+		int j = n - d->back_startup;
+		assert(s.p[0].dash == DASH_BACK && s.p[0].elapsed == n && in_action(&s, 0, BACKDASH));
+		assert(heard(&s, SOUND_JUMP, 0) == (j == 0) && heard(&s, SOUND_LAND, 0) == (j == d->back_air - 1));
+		if (j >= 0 && j < d->back_air - 1) {
+			assert(s.p[0].y < 0 || (j == 0 && s.p[0].y == 0));
+			air++;
+		} else
+			assert(!s.p[0].y);
+		if (n == d->back_startup + 6) {
+			fight_encode(&s, w);
+			assert(fight_decode(&u, &pack, w));
+			fight_encode(&u, v);
+			assert(!memcmp(w, v, sizeof(w)));
+		}
+	}
+	assert(air == d->back_air - 1 && s.p[0].x == x - QX(d->back_distance) && s.backdashes == 1);
+	step2(&s, 0, 0);
+	assert(!s.p[0].dash && !s.p[0].y && !s.p[0].vy);
+	/* Bad dash words: past the phases, a skid too long, a backdash off its
+	 * arc, running in the air, KOF has no coast. */
+	{
+		const int P = 19, D = 30, Y = 1, E = 9;
+		static const struct {
+			int field;
+			uint32_t value;
+		} bad[] = {{D, DASH_PHASES}, {D, (uint32_t)-1}, {E, 255}, {Y, (uint32_t)-1},
+			   {D, DASH_COAST}};
+		fight_decode(&u, &pack, w);
+		for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+			memcpy(v, w, sizeof(v));
+			v[P + bad[i].field] = bad[i].value;
+			struct fight_state keep = u;
+			assert(!fight_decode(&u, &pack, v) && !memcmp(&keep, &u, sizeof(u)));
+		}
+		memcpy(v, w, sizeof(v));
+		v[P + D] = DASH_STOP;
+		v[P + E] = d->run_stop;
+		v[P + Y] = 0;
+		assert(!fight_decode(&u, &pack, v));
+	}
+	/* A backdash cannot be thrown, even on the ground in its startup, and
+	 * cannot guard; a strike knocks it out of the air. */
+	duel(&s, 200, 200 + body);
+	step2(&s, 0, K(RIGHT));
+	step2(&s, 0, 0);
+	step2(&s, 0, K(RIGHT));
+	step2(&s, K(RIGHT) | K(X), 0);
+	assert(s.p[1].dash == DASH_BACK && s.p[1].elapsed == 1 && !s.p[0].grab &&
+	       s.p[0].move == STAND_HP + 1);
+	int airborne_hit = 0;
+	for (int gap = body; gap < body + 60 && !airborne_hit; gap += 4)
+		for (int press = 1; press < 12 && !airborne_hit; press++) {
+			duel(&s, 200, 200 + gap);
+			for (int n = 1; n < 40 && !s.hits; n++) {
+				int y = s.p[1].y;
+				step2(&s, n == press ? K(X) : 0, n == 1 || n == 3 ? K(RIGHT) : 0);
+				if (s.hits && y < 0) {
+					assert(!s.guards && !s.p[1].dash && s.p[1].stun);
+					airborne_hit = 1;
+				}
+			}
+		}
+	assert(airborne_hit);
+	for (int n = 0; n < 60 && s.p[1].y; n++)
+		step2(&s, 0, 0);
+	assert(!s.p[1].y && !s.p[1].vy);
+	/* samsho5sp: a held dash coasts run_grace ticks and forward again keeps
+	 * it running; the first back_invuln backdash ticks evade strikes. */
+	const struct dash_rule *ds = &pack.sys[pack.chr[haohmaru].system].dash;
+	assert(ds->run_grace && ds->back_invuln && !ds->back_startup);
+	match(&s, haohmaru, haohmaru, 100, 400);
+	step2(&s, K(RIGHT), 0);
+	step2(&s, 0, 0);
+	for (int n = 0; n < 12; n++)
+		step2(&s, K(RIGHT), 0);
+	step2(&s, 0, 0);
+	assert(s.p[0].dash == DASH_COAST);
+	step2(&s, K(RIGHT), 0);
+	assert(s.p[0].dash == DASH_RUN);
+	for (int n = 0; n <= ds->run_grace; n++)
+		step2(&s, 0, 0);
+	assert(s.p[0].dash == DASH_STOP);
+	/* Haohmaru's stand LP from 90 px lands on its first active tick; a
+	 * backdash begun on that tick is not hit then or on the next. */
+	const struct move *lp = &pack.chr[haohmaru].move[STAND_LP];
+	int gap = 0;
+	for (; gap < 200; gap++) {
+		match(&s, haohmaru, haohmaru, 200, 200 + gap);
+		for (int n = 0; n <= lp->startup && !s.hits; n++)
+			step2(&s, n ? 0 : K(Y), 0);
+		if (!s.hits)
+			break;
+	}
+	assert(gap > 0 && lp->startup >= 2);
+	match(&s, haohmaru, haohmaru, 200, 200 + gap - 1);
+	for (int n = 0; n <= lp->startup + 1; n++) {
+		uint32_t back = n == lp->startup - 2 || n == lp->startup ? K(RIGHT) : 0;
+		step2(&s, n ? 0 : K(Y), back);
+		if (n == lp->startup)
+			assert(s.p[1].dash == DASH_BACK && !s.p[1].elapsed);
+		assert(!s.hits);
+	}
+}
 static void throws(void)
 {
 	const struct character *t = &pack.chr[terry];
@@ -2336,6 +2529,10 @@ static void ai_coverage(void)
 		throwers += pack.chr[c].projectiles > 0;
 	assert(blocks > 20 && hits > 20 && crouch_blocks > 5 && crouch_hits > 5 && s.round > 3 &&
 	       s.run > 0 && (shots > 0 || !throwers) && s.specials > 20);
+	/* The AI runs in from afar and backdashes from swings it does not
+	 * guard. */
+	printf("ai: %u runs and %u backdashes\n", s.runs, s.backdashes);
+	assert(s.runs > 20 && s.backdashes > 20);
 	/* Every stage hosted fights; the common sound events and both effect
 	 * sets (KOF hits and guards, Samurai Shodown slashes and blood) were
 	 * seen. */
@@ -2515,6 +2712,7 @@ static void logic_tests(const uint8_t *data, size_t len)
 	difficulty();
 	knockdowns();
 	throws();
+	dashes();
 	state_words();
 	stat_tests();
 	pack.stages = stages;
@@ -2629,6 +2827,9 @@ int main(int argc, char **argv)
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
 	memcpy(copy, "FGSTAT12", 8); /* before throws */
+	assert(!retro_unserialize(copy, n));
+	memcpy(copy, end, n);
+	memcpy(copy, "FGSTAT13", 8); /* before run and backdash */
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
 	memset(copy + 16 + 8 * 4, 0xff, 4);
@@ -2766,7 +2967,7 @@ int main(int argc, char **argv)
 	     "effect budget, camera and walls, sparks, sound events, content, "
 	     "RGB565/XRGB8888, audio, ports, replay, pause, state validation, frame "
 	     "data, hit/block/hitstop ticks, pushback and corner, guard heights, "
-	     "trades, combos, knockdowns, throws, move lists, difficulty, commands, buffer, prejump, cancels, follow-ups, projectiles and clash, "
+	     "trades, combos, knockdowns, throws, run and backdash, move lists, difficulty, commands, buffer, prejump, cancels, follow-ups, projectiles and clash, "
 	     "specials, ladder, systems and stats, AI coverage and stress cycle "
 	     "passed");
 	return 0;

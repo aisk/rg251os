@@ -1,14 +1,14 @@
-/* FIGHTP10 pack decoder, render cache and clipped RGB565 software
+/* FIGHTP11 pack decoder, render cache and clipped RGB565 software
  * draw-command backend. The decoder checks every count, offset and index
  * against the file length and the resident limits in fighter.h (palettes
- * and frames per sheet, system profiles with walls, effect sets and throw
- * rules, stats,
+ * and frames per sheet, system profiles with walls, effect sets, throw and
+ * run/backdash rules, stats,
  * character and move names, box bounds and counts, move, special, projectile and step motion
  * data, spark animations, stages with their layers, edge rules and anims),
  * keeps the whole roster's rule data and palette-index frames and every
  * stage's palette-index layers resident, resolves each character's stats
  * (its system's defaults plus its overrides, with the jump's peak and fall
- * speed derived and bounded), fills hitstun/blockstun/hitstop a move takes
+ * speed and the run speed derived and bounded), fills hitstun/blockstun/hitstop a move takes
  * from its class and scales damage and chip by the system's damage scale,
  * derives hit groups, startup/active/recovery, reach and the weapon flag per
  * move, checks follow-up links and windows, and expands the effects and
@@ -206,6 +206,13 @@ static int stats_ok(struct stats *st)
 	arc(&st->jump);
 	return st->jump.peak <= MAX_HEIGHT;
 }
+/* The run speed: walk times the run scale, rounded, at most MAX_RUN. */
+static int run_speed(struct stats *st, const struct dash_rule *d)
+{
+	int v = (st->walk * d->run_scale + 500) / 1000;
+	st->run = (int16_t)v;
+	return v <= MAX_RUN;
+}
 static int system_name_char(unsigned c)
 {
 	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
@@ -289,7 +296,21 @@ static int read_system(struct reader *r, struct system *sy, unsigned sparks)
 					(struct hit){(uint16_t)(t[1] && !damage ? 1 : damage), 0, 1, 1,
 						     (uint16_t)t[3], (uint16_t)t[2], 0, GUARD_HIGH,
 						     CLASS_THROW, FLAG_KNOCKDOWN}};
-	return 1;
+	/* Run and backdash: window, run scale, run startup, min, grace, stop;
+	 * backdash startup, air, stop, distance, height, invulnerable ticks. */
+	unsigned d[12];
+	for (int k = 0; k < 12; k++)
+		d[k] = u16(r);
+	if (!r->ok || d[0] < 2 || d[0] >= HISTORY || d[1] < 1000 || d[1] > MAX_PERMILLE ||
+	    d[2] > MAX_PREJUMP || d[3] > MAX_DASH_TICKS || d[4] > MAX_PREJUMP ||
+	    d[5] > MAX_PREJUMP || d[6] > MAX_PREJUMP || !d[7] || d[7] > MAX_DASH_TICKS ||
+	    d[8] > MAX_DASH_TICKS || d[9] > MAX_BACKDASH || d[10] > MAX_HEIGHT / 4 ||
+	    d[11] > d[6] + d[7] + d[8])
+		return 0;
+	sy->dash = (struct dash_rule){(uint8_t)d[0], (uint8_t)d[2], (uint8_t)d[3], (uint8_t)d[4],
+				      (uint8_t)d[5], (uint8_t)d[6], (uint8_t)d[7], (uint8_t)d[8],
+				      (uint8_t)d[9], (uint8_t)d[10], (uint8_t)d[11], (uint16_t)d[1]};
+	return run_speed(&sy->stats, &sy->dash);
 }
 /* A character's stats: its system's, then each override in the mask. */
 static int read_stats(struct reader *r, const struct assets *a, struct character *c)
@@ -309,7 +330,7 @@ static int read_stats(struct reader *r, const struct assets *a, struct character
 		if (!set_stat(&c->stats, k, v))
 			return 0;
 	}
-	return r->ok && stats_ok(&c->stats);
+	return r->ok && stats_ok(&c->stats) && run_speed(&c->stats, &a->sys[system].dash);
 }
 /* damage .. block_pushback, then (after the caller's fields) class and
  * defaults: a default bit takes that field from the class row, whose value
@@ -862,7 +883,7 @@ static int read_stages(struct reader *r, struct assets *a, unsigned n)
 int fight_assets(struct assets *a, const void *data, size_t size, int *automatic)
 {
 	struct reader r = {data, 0, size, 1};
-	if (!data || size < 48 || memcmp(data, "FIGHTP10", 8))
+	if (!data || size < 48 || memcmp(data, "FIGHTP11", 8))
 		return 0;
 	r.at = 8;
 	uint32_t length = u32(&r), hash = u32(&r), flags = u32(&r);
