@@ -17,7 +17,7 @@
  * largest character), so only two characters' and one stage's RGB565 pixels
  * are ever resident and the loader proves any pair plus any stage fits.
  * fight_want only names what the state shows (the select screen wants side
- * 0 alone) and empties a region whose owner changed; frames are expanded
+ * 0 alone, both sides while picking a practice dummy) and empties a region whose owner changed; frames are expanded
  * by fight_prefetch within a pixel budget per call (the stage row by row,
  * resuming where it stopped, then side 0, then side 1), by fight_demand for
  * exactly what a scene missed, or all at once by fight_cast. A stage layer
@@ -1006,16 +1006,16 @@ static void reset_stage(struct assets *a, int stage)
 }
 unsigned fight_want(struct assets *a, const struct fight_state *s)
 {
-	int fight = s->mode == MODE_FIGHT;
+	int fight = s->mode == MODE_FIGHT, sides = fight || s->picking ? 2 : 1;
 	unsigned changed = 0;
-	for (int i = 0; i < (fight ? 2 : 1); i++) {
+	for (int i = 0; i < sides; i++) {
 		int chr = (int)(s->chr[i] < a->characters ? s->chr[i] : 0), pal = s->pal[i] ? 1 : 0;
 		if (a->cast[i][0] != chr || a->cast[i][1] != pal) {
 			reset_side(a, i, chr, pal);
 			changed |= 1u << i;
 		}
 	}
-	a->wanted = fight ? 3u : 1u;
+	a->wanted = sides == 2 ? 3u : 1u;
 	if (fight && a->stages) {
 		int stage = (int)(s->arena < a->stages ? s->arena : 0);
 		if (a->cast_stage != stage) {

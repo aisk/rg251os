@@ -9,7 +9,10 @@
  * the buffer, expiry, contact, the move clock across a state load; May
  * Lee's Tatsuo Kyaku branches by held direction), the arcade ladder (the
  * versus card and READY freezing the rules, held buttons no press at FIGHT,
- * the banner, select, opponents, loss, clear, Auto rotation, replay), state
+ * the banner, select, opponents, loss, clear, Auto rotation, replay), the
+ * survival and practice modes (carried life, heal, streak and record; the
+ * dummy picked and its four behaviours, refilled life, combo damage; B
+ * quitting from a pause), state
  * round-trip and rejection, run and backdash (taps, phases, speeds, the
  * arc, cancels, throw and strike invulnerability, samsho5sp's coast), the
  * AI's use of every move (and of runs and backdashes), the difficulty
@@ -1342,6 +1345,194 @@ static int per_mille(int v, int factor)
 {
 	int r = (v * factor + 500) / 1000;
 	return v && !r ? 1 : r;
+}
+/* The game mode words in a saved state (GAME_AT in fighter.c): game,
+ * picking, dummy, streak, record, carry, damage and last per side. */
+#define GAME_W (COMBO_W + 14)
+/* One tick with port 1 left to the rules (the CPU or the practice dummy). */
+static void solo(struct fight_state *s, uint32_t k) { fight_step(s, &pack, k, 0, 0); }
+/* Game modes. L cycles them on the select screen (the box overlay stays).
+ * Survival: random opponents in a row, never the same twice, P1's life
+ * carried with SURVIVAL_HEAL back per win (capped at full), the streak and
+ * the session record on the result screen and kept across runs. Practice:
+ * P1 and then the dummy picked (both cast), the dummy standing, crouching,
+ * guarding high and low or the CPU (R), the life bar never emptied and
+ * refilled once a combo ends, the last combo's damage shown. B in a pause
+ * quits to select. Each state round-trips and impossible game words are
+ * rejected. */
+static void game_modes(void)
+{
+	static struct scene sc;
+	struct fight_state s, t;
+	uint32_t w[STATE_WORDS], v[STATE_WORDS];
+	const int life = pack.chr[terry].stats.life;
+	fight_reset(&s, 0);
+	for (unsigned k = 1; k <= GAMES; k++) {
+		step2(&s, K(L), 0);
+		step2(&s, 0, 0);
+		assert(s.game == k % GAMES && !s.boxes && s.mode == MODE_SELECT);
+		fight_scene(&s, &pack, &sc);
+	}
+	/* Survival from Terry. */
+	step2(&s, K(L), 0);
+	s.chr[0] = s.chr[1] = terry;
+	step2(&s, K(Y), 0);
+	assert(s.mode == MODE_FIGHT && s.game == GAME_SURVIVAL && !s.streak && !s.record &&
+	       s.carry == (uint32_t)life && s.p[0].hp == life && s.chr[1] != terry &&
+	       s.stage == 1 && !s.beaten && !s.timer);
+	fight_encode(&s, w);
+	assert(fight_decode(&t, &pack, w));
+	fight_encode(&t, v);
+	assert(!memcmp(w, v, sizeof(w)));
+	unsigned previous = s.chr[1];
+	intro(&s);
+	fight_scene(&s, &pack, &sc);
+	s.p[0].hp = 300;
+	win_round(&s, 0);
+	int healed = 300 + life * SURVIVAL_HEAL / 1000;
+	assert(s.mode == MODE_FIGHT && s.streak == 1 && s.record == 1 &&
+	       s.carry == (uint32_t)healed && s.p[0].hp == healed && s.chr[1] != previous &&
+	       s.chr[1] != terry && !s.timer && s.round == 1);
+	fight_encode(&s, w);
+	assert(fight_decode(&t, &pack, w));
+	/* A win at almost full life heals up to full only. */
+	s.p[0].hp = life - 10;
+	win_round(&s, 0);
+	assert(s.streak == 2 && s.carry == (uint32_t)life && s.p[0].hp == life);
+	win_round(&s, 1);
+	assert(s.mode == MODE_RESULT && s.streak == 2 && s.record == 2 && !s.carry);
+	fight_scene(&s, &pack, &sc);
+	for (int n = 1; n <= 21; n++)
+		step2(&s, n == 21 ? K(A) : 0, 0);
+	assert(s.mode == MODE_SELECT && s.game == GAME_SURVIVAL && s.record == 2);
+	step2(&s, K(Y), 0);
+	assert(s.mode == MODE_FIGHT && !s.streak && s.record == 2);
+	/* Bad survival words: carry above P1's life or under its life now,
+	 * a streak past the record. */
+	fight_encode(&s, w);
+	static const struct {
+		int at;
+		uint32_t value;
+	} bad_survival[] = {{5, 5000}, {5, 1}, {3, 3}, {5, 0}};
+	for (size_t i = 0; i < sizeof(bad_survival) / sizeof(bad_survival[0]); i++) {
+		memcpy(v, w, sizeof(v));
+		v[GAME_W + bad_survival[i].at] = bad_survival[i].value;
+		assert(!fight_decode(&t, &pack, v));
+	}
+	/* B in a pause quits to select. */
+	step2(&s, K(START), 0);
+	step2(&s, K(B), 0);
+	assert(s.mode == MODE_SELECT && !s.paused && !s.carry);
+	/* Practice: P1, then the dummy (both sides wanted by the cache). */
+	step2(&s, K(L), 0);
+	assert(s.game == GAME_PRACTICE);
+	s.chr[0] = s.chr[1] = terry;
+	step2(&s, K(Y), 0);
+	assert(s.mode == MODE_SELECT && s.picking &&
+	       s.chr[1] == (terry + 1) % pack.characters && s.chr[0] == terry);
+	fight_want(&pack, &s);
+	assert(pack.wanted == 3);
+	fight_scene(&s, &pack, &sc);
+	fight_encode(&s, w);
+	assert(fight_decode(&t, &pack, w));
+	step2(&s, K(RIGHT), 0);
+	assert(s.chr[1] == (terry + 2) % pack.characters && s.chr[0] == terry);
+	/* L goes back to the arcade and to picking P1. */
+	step2(&s, K(L), 0);
+	assert(!s.picking && s.game == GAME_ARCADE && s.chr[1] == terry);
+	step2(&s, 0, 0);
+	step2(&s, K(L), 0);
+	step2(&s, 0, 0);
+	step2(&s, K(L), 0);
+	step2(&s, K(Y), 0);
+	s.chr[1] = terry;
+	s.pal[1] = 1;
+	step2(&s, 0, 0);
+	step2(&s, K(Y), 0);
+	assert(s.mode == MODE_FIGHT && s.game == GAME_PRACTICE && s.chr[1] == terry &&
+	       s.pal[1] == 1 && !s.picking && s.stage == 1 && s.dummy == DUMMY_STAND);
+	intro(&s);
+	/* A standing dummy takes a jab; the damage shows, the bar refills when
+	 * the combo ends. */
+	s.p[0].x = QX(200);
+	s.p[1].x = QX(250);
+	int n = 0;
+	unsigned hits = s.hits, guards = s.guards;
+	solo(&s, K(Y));
+	while (s.hits == hits && n++ < 30)
+		solo(&s, 0);
+	assert(s.hits == hits + 1 && s.guards == guards && s.p[1].hp < life && s.last[0] == (uint32_t)(life - s.p[1].hp));
+	uint32_t dealt = s.last[0];
+	fight_scene(&s, &pack, &sc);
+	fight_encode(&s, w);
+	assert(fight_decode(&t, &pack, w));
+	while (s.p[1].stun && n++ < 100)
+		solo(&s, 0);
+	assert(s.p[1].hp == life && s.last[0] == dealt && !s.damage[0]);
+	/* Nearly empty: the bar stops at 1 and nothing ends. */
+	s.p[1].hp = 2;
+	solo(&s, K(X));
+	for (n = 0; n < 40 && s.hits < hits + 2; n++)
+		solo(&s, 0);
+	assert(s.hits == hits + 2 && s.p[1].hp >= 1 && !s.ended && s.last[0] > 1);
+	fight_encode(&s, w);
+	memcpy(v, w, sizeof(v));
+	v[19 + FIGHTER_WORDS_T + 3] = 0; /* the dummy's life */
+	assert(!fight_decode(&t, &pack, v));
+	for (n = 0; n < 120; n++)
+		solo(&s, 0);
+	assert(s.p[1].hp == life && s.p[0].hp == life);
+	/* R: crouching. */
+	solo(&s, K(R));
+	solo(&s, 0);
+	assert(s.dummy == DUMMY_CROUCH && s.p[1].crouch);
+	/* R: guarding, standing for a high and crouching for a low. */
+	solo(&s, K(R));
+	assert(s.dummy == DUMMY_GUARD);
+	for (n = 0; n < 30; n++)
+		solo(&s, 0);
+	s.p[0].x = QX(200);
+	s.p[1].x = QX(250);
+	guards = s.guards;
+	solo(&s, K(Y));
+	for (n = 0; n < 30 && s.guards == guards; n++)
+		solo(&s, 0);
+	assert(s.guards == guards + 1 && !s.p[1].crouch && s.p[1].block == 1);
+	for (n = 0; n < 40; n++)
+		solo(&s, 0);
+	s.p[0].x = QX(200);
+	s.p[1].x = QX(250);
+	guards = s.guards;
+	hits = s.hits;
+	solo(&s, K(DOWN) | K(B));
+	for (n = 0; n < 30 && s.guards == guards; n++)
+		solo(&s, K(DOWN));
+	assert(s.guards == guards + 1 && s.hits == hits + 1 && s.p[1].crouch && s.p[1].block == 1);
+	/* R: the CPU fights back; R again: standing. */
+	solo(&s, K(R));
+	assert(s.dummy == DUMMY_CPU);
+	for (n = 0; n < 900; n++) {
+		solo(&s, n % 7 ? 0 : K(Y));
+		assert(s.mode == MODE_FIGHT && s.p[0].hp >= 1 && s.p[1].hp >= 1 && !s.ended);
+	}
+	solo(&s, K(R));
+	assert(s.dummy == DUMMY_STAND);
+	fight_scene(&s, &pack, &sc);
+	/* Bad game words. */
+	fight_encode(&s, w);
+	static const struct {
+		int at;
+		uint32_t value;
+	} bad[] = {{0, GAMES}, {1, 1}, {2, DUMMIES}, {4, MAX_STREAK + 1}, {5, 100}, {6, 5}};
+	for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		memcpy(v, w, sizeof(v));
+		v[GAME_W + bad[i].at] = bad[i].value;
+		struct fight_state keep = t;
+		assert(!fight_decode(&t, &pack, v) && !memcmp(&keep, &t, sizeof(t)));
+	}
+	step2(&s, K(START), 0);
+	step2(&s, K(B), 0);
+	assert(s.mode == MODE_SELECT && s.game == GAME_PRACTICE && !s.picking);
 }
 /* Difficulty: the level round-trips and 3 is rejected; on Easy every CPU
  * strike on an idle P1 deals 3/4 of its damage (human port 1 or Normal:
@@ -2706,6 +2897,7 @@ static void logic_tests(const uint8_t *data, size_t len)
 	rising_tackle();
 	follow_ups();
 	ladder();
+	game_modes();
 	round_start();
 	combos();
 	move_lists();
@@ -2830,6 +3022,9 @@ int main(int argc, char **argv)
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
 	memcpy(copy, "FGSTAT13", 8); /* before run and backdash */
+	assert(!retro_unserialize(copy, n));
+	memcpy(copy, end, n);
+	memcpy(copy, "FGSTAT14", 8); /* before the game modes */
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
 	memset(copy + 16 + 8 * 4, 0xff, 4);
@@ -2967,7 +3162,7 @@ int main(int argc, char **argv)
 	     "effect budget, camera and walls, sparks, sound events, content, "
 	     "RGB565/XRGB8888, audio, ports, replay, pause, state validation, frame "
 	     "data, hit/block/hitstop ticks, pushback and corner, guard heights, "
-	     "trades, combos, knockdowns, throws, run and backdash, move lists, difficulty, commands, buffer, prejump, cancels, follow-ups, projectiles and clash, "
+	     "trades, combos, knockdowns, throws, run and backdash, survival and practice, move lists, difficulty, commands, buffer, prejump, cancels, follow-ups, projectiles and clash, "
 	     "specials, ladder, systems and stats, AI coverage and stress cycle "
 	     "passed");
 	return 0;
