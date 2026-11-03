@@ -1,5 +1,5 @@
 /* Standard libretro fighter core: FIGHTP11 content, input, deterministic
- * FGSTAT15 saves, audio and software frames. Timing below measures work only;
+ * FGSTAT16 saves, audio and software frames. Timing below measures work only;
  * the frontend owns pacing. Logs the system profiles (wake-up, throw, run and
  * backdash rules), the roster with each
  * character's system and resolved stats (run speed included), every move's frame data and class
@@ -19,7 +19,8 @@
  * were drawn of those requested, and the ladder, special/clash, throw/tech,
  * run/backdash and max combo counters with the game mode and wins; each KO
  * logs the round with both lives, max combos, the throw and run/backdash
- * counts and the game mode. Changing the game mode or the practice dummy is
+ * counts and the game mode (and so does a time over, with the bout, the
+ * match score and the clock). Changing the game mode or the practice dummy is
  * logged, and so is each run's end (lost, cleared or quit) with its rounds,
  * wins and the survival best.
  *
@@ -557,10 +558,12 @@ void retro_run(void)
 		       level_names[state.level]);
 	if (!old_ended && state.ended && logger)
 		logger(RETRO_LOG_INFO,
-		       "fight: KO stage %u round %u %s vs %s life %d/%d, max combo %u/%u, "
-		       "throws %u techs %u, runs %u backdashes %u, difficulty %s, %s wins %u, "
-		       "tick %u\n",
-		       state.stage, state.round + 1, assets.chr[state.chr[0]].name,
+		       "fight: %s stage %u round %u (bout %u, %u-%u, clock %u) %s vs %s life %d/%d, "
+		       "max combo %u/%u, throws %u techs %u, runs %u backdashes %u, difficulty %s, "
+		       "%s wins %u, tick %u\n",
+		       state.p[0].hp && state.p[1].hp ? "time over" : "KO", state.stage,
+		       state.round + 1, state.bout, state.wins[0], state.wins[1],
+		       (state.clock + COUNT_TICKS - 1) / COUNT_TICKS, assets.chr[state.chr[0]].name,
 		       assets.chr[state.chr[1]].name, state.p[0].hp, state.p[1].hp, state.best[0],
 		       state.best[1], state.throws, state.techs, state.runs, state.backdashes,
 		       level_names[state.level], game_names[state.game], state.streak,
@@ -643,7 +646,7 @@ bool retro_serialize(void *data, size_t size)
 	uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	fight_encode(&state, w);
-	memcpy(p, "FGSTAT15", 8);
+	memcpy(p, "FGSTAT16", 8);
 	put32(p + 8, assets.hash);
 	put32(p + 12, state.automatic);
 	for (int i = 0; i < STATE_WORDS; i++)
@@ -656,7 +659,7 @@ bool retro_unserialize(const void *data, size_t size)
 	const uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	if (!loaded || !p || size != retro_serialize_size() ||
-	    memcmp(p, "FGSTAT15", 8) || get32(p + 8) != assets.hash ||
+	    memcmp(p, "FGSTAT16", 8) || get32(p + 8) != assets.hash ||
 	    get32(p + 12) != state.automatic)
 		return false;
 	for (int i = 0; i < STATE_WORDS; i++)

@@ -114,8 +114,15 @@
 #define EFFECT_PIXEL_BUDGET 76800u
 /* Direction history in ticks; the input windows (struct stats) fit in it. */
 #define HISTORY 32
-/* Rounds a fighter must win to take a match (1 = single round). */
-#define ROUNDS_TO_WIN 1
+/* Rounds a fighter must win to take an arcade match (best of three);
+ * survival fights are a single round each. */
+#define ROUNDS_TO_WIN 2
+/* The round clock in arcade and survival rounds: CLOCK_COUNTS counts of
+ * COUNT_TICKS each, running from FIGHT until a KO; at 0 the round is over
+ * and the larger share of life wins. Practice and fight_start have none. */
+#define CLOCK_COUNTS 99
+#define COUNT_TICKS 60
+#define CLOCK_TICKS (CLOCK_COUNTS * COUNT_TICKS)
 /* A ladder round opens with the versus card (INTRO_TICKS, while the core
  * fills the render cache), then READY over the frozen stage (READY_TICKS);
  * the rules hold still through both (no input, no AI). The round runs from
@@ -323,7 +330,9 @@ struct sound_event {
  * the current survival run and record the most of this session; carry is
  * P1's life for the next survival fight (0 outside a survival fight).
  * damage is the life an attacking side's running combo took (0 = none),
- * last what its latest combo took (shown in practice). */
+ * last what its latest combo took (shown in practice). clock is the round
+ * clock's ticks left (0 = no clock, or time over once ended), bout the
+ * round of the current match (from 1, 0 outside a fight). */
 struct fight_state {
 	uint32_t tick, rng, previous, paused, stress, boxes, automatic, round;
 	uint32_t mode, timer, beaten, stage, run, wins[2], chr[2], pal[2];
@@ -338,6 +347,7 @@ struct fight_state {
 	uint32_t combo[2], shown[2], show[2], best[2], list, level, throws, techs;
 	uint32_t runs, backdashes;
 	uint32_t game, picking, dummy, streak, record, carry, damage[2], last[2];
+	uint32_t clock, bout;
 };
 /* One opaque run in a frame row; pixels index the frame's data. */
 struct span {

@@ -1642,7 +1642,7 @@ static void incremental_cache(struct assets *full, struct assets *lazy)
 	unsigned intros = 0, moves = 0;
 	for (int automatic = 0; automatic < 2; automatic++) {
 		fight_reset(&st, automatic);
-		for (unsigned n = 0; n < (automatic ? 9000u : 120u); n++) {
+		for (unsigned n = 0; n < (automatic ? 12000u : 120u); n++) {
 			uint32_t keys = !automatic && n % 2 == 0 ? 1u << 7 : 0; /* RIGHT */
 			uint32_t before = st.chr[0];
 			fight_step(&st, lazy, keys, 0, 0);

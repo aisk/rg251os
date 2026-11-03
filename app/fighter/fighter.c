@@ -66,8 +66,9 @@
  * replays and states stay deterministic.
  * Game modes (L on the select screen): Arcade is the ladder. Survival
  * fights random opponents (never the previous one) one round each with
- * P1's life carried over, SURVIVAL_HEAL per mille back per win; the streak
- * ends on a loss and the session's best is kept. Practice picks P1, then
+ * P1's life carried over, SURVIVAL_HEAL per mille back per win, a draw
+ * replaying the fight; the streak ends on a loss and the session's best is
+ * kept. Practice picks P1, then
  * the dummy, which stands, crouches, guards everything (high or low) or
  * fights as the CPU (R in the fight cycles it); life never drops under 1
  * and both bars refill when a combo ends, and each side's last combo damage
@@ -168,7 +169,9 @@
  * Ladder: the select screen picks P1 (d-pad, any attack confirms; R
  * cycles the CPU level, shown top right, since the handheld has no core
  * option rows); each
- * stage is a match of ROUNDS_TO_WIN won rounds against a random character
+ * stage is a match of ROUNDS_TO_WIN won rounds (best of three; a draw
+ * scores for both, two at once is a loss; Auto keeps single rounds) against
+ * a random character
  * not yet beaten in this run (a mirror with the alternate palette only for
  * a one-character roster), fought on that opponent's home stage, or on
  * pack stage (opponent index % stages) when it has none. Every ladder round
@@ -177,7 +180,11 @@
  * stage; nothing moves through both and held keys are only recorded, so a
  * button held over them is no press. The round begins with FIGHT (shown
  * FIGHT_TICKS while the round runs) and ROUND_START (fight_start has
- * neither and sounds it at once). A loss
+ * neither and sounds it at once). Later rounds of a match skip the card
+ * and show ROUND N instead of READY. Arcade and survival rounds run a
+ * CLOCK_COUNTS clock from FIGHT (held in a pause, drawn over the centre
+ * box, red for the last ten); time over ends the round with both standing
+ * and the larger share of its own life wins (equal is a draw). A loss
  * shows the result screen, beating everyone the clear screen; both return
  * to select. Auto skips select and rotates P1 through the roster each run.
  * START pauses a fight (the pause screen dims it under P1's command list);
@@ -314,6 +321,8 @@ static void begin_round(struct fight_state *s, const struct assets *a, unsigned 
 	s->chr[1] = c1;
 	s->pal[0] = 0;
 	s->pal[1] = c0 == c1;
+	s->clock = intro && s->game != GAME_PRACTICE ? CLOCK_TICKS : 0;
+	s->bout = 1;
 	if (!intro)
 		sound(s, a, SOUND_ROUND_START, 0, 0);
 }
@@ -1607,11 +1616,39 @@ static void survive(struct fight_state *s, const struct assets *a)
 	begin_round(s, a, s->chr[0], c, 1);
 	s->p[0].hp = (int32_t)s->carry;
 }
+/* Rounds to win a match in the current game; Auto (the benchmark) keeps
+ * single rounds so its P1 rotation stays quick. */
+static unsigned rounds(const struct fight_state *s)
+{
+	return s->game == GAME_ARCADE && !s->automatic ? ROUNDS_TO_WIN : 1;
+}
+/* A finished round's winner: the side still standing, after time over the
+ * larger share of its own life; -1 for a draw (double KO, equal shares). */
+static int winner(const struct fight_state *s, const struct assets *a)
+{
+	int alive0 = s->p[0].hp > 0, alive1 = s->p[1].hp > 0;
+	if (alive0 != alive1)
+		return alive0 ? 0 : 1;
+	if (!alive0)
+		return -1;
+	int64_t share0 = (int64_t)s->p[0].hp * who(s, a, 1)->stats.life,
+		share1 = (int64_t)s->p[1].hp * who(s, a, 0)->stats.life;
+	return share0 == share1 ? -1 : share0 > share1 ? 0 : 1;
+}
+/* Leave the fight for the result or clear screen. */
+static void match_over(struct fight_state *s, uint32_t mode)
+{
+	place(s);
+	s->mode = mode;
+	s->timer = s->carry = s->clock = s->bout = 0;
+	s->wins[0] = s->wins[1] = 0;
+}
 static void to_select(struct fight_state *s, const struct assets *a)
 {
 	place(s);
 	s->mode = MODE_SELECT;
 	s->timer = s->beaten = s->stage = s->wins[0] = s->wins[1] = 0;
+	s->clock = s->bout = 0;
 	s->run++;
 	s->chr[1] = s->chr[0];
 	s->pal[0] = 0;
@@ -1622,48 +1659,46 @@ static void to_select(struct fight_state *s, const struct assets *a)
 }
 static void round_over(struct fight_state *s, const struct assets *a)
 {
-	int alive0 = s->p[0].hp > 0, alive1 = s->p[1].hp > 0;
+	int w = winner(s, a);
 	s->round++;
-	if (alive0 != alive1)
-		s->wins[alive0 ? 0 : 1]++;
-	if (s->game == GAME_SURVIVAL && s->wins[0] >= ROUNDS_TO_WIN) {
+	if (s->game == GAME_SURVIVAL && w == 0) {
 		/* A survival win: count it, heal a little, on to the next. */
 		int life = who(s, a, 0)->stats.life, hp = s->p[0].hp + life * SURVIVAL_HEAL / 1000;
 		s->streak += s->streak < MAX_STREAK;
 		s->record = s->streak > s->record ? s->streak : s->record;
 		s->carry = (uint32_t)(hp < life ? hp : life);
 		survive(s, a);
-	} else if (s->game == GAME_SURVIVAL && s->wins[1] < ROUNDS_TO_WIN) {
-		/* A double KO: the fight again from the life P1 brought in. */
-		s->wins[0] = s->wins[1] = 0;
+	} else if (s->game == GAME_SURVIVAL && w < 0) {
+		/* A draw: the fight again from the life P1 brought in. */
 		begin_round(s, a, s->chr[0], s->chr[1], 1);
 		s->p[0].hp = (int32_t)s->carry;
 	} else if (s->game == GAME_SURVIVAL) {
-		place(s);
-		s->mode = MODE_RESULT;
-		s->timer = s->carry = 0;
-		s->wins[0] = s->wins[1] = 0;
+		match_over(s, MODE_RESULT);
 	} else if (s->game == GAME_PRACTICE) {
 		/* Practice never takes the last point of life; just in case. */
 		begin_round(s, a, s->chr[0], s->chr[1], 1);
-	} else if (s->wins[0] >= ROUNDS_TO_WIN) {
-		s->beaten |= 1u << s->chr[1];
-		uint32_t all = opponents(a, s->chr[0]);
-		if ((s->beaten & all) == all) {
-			place(s);
-			s->mode = MODE_CLEAR;
-			s->timer = 0;
-			s->wins[0] = s->wins[1] = 0;
-		} else
-			next_stage(s, a);
-	} else if (s->wins[1] >= ROUNDS_TO_WIN) {
-		place(s);
-		s->mode = MODE_RESULT;
-		s->timer = 0;
-		s->wins[0] = s->wins[1] = 0;
 	} else {
-		/* Another round of the same match, both at full life. */
-		begin_round(s, a, s->chr[0], s->chr[1], 1);
+		/* Arcade: the round's winner scores, a draw scores for both. P1
+		 * must take the match outright: two at once is a loss. */
+		for (int i = 0; i < 2; i++)
+			s->wins[i] += w < 0 || w == i;
+		if (s->wins[1] >= ROUNDS_TO_WIN) {
+			match_over(s, MODE_RESULT);
+		} else if (s->wins[0] >= ROUNDS_TO_WIN) {
+			s->beaten |= 1u << s->chr[1];
+			uint32_t all = opponents(a, s->chr[0]);
+			if ((s->beaten & all) == all)
+				match_over(s, MODE_CLEAR);
+			else
+				next_stage(s, a);
+		} else {
+			/* The next round of the match: both at full life, READY
+			 * (ROUND N) without the versus card. */
+			uint32_t bout = s->bout;
+			begin_round(s, a, s->chr[0], s->chr[1], 1);
+			s->bout = bout + 1;
+			s->timer = INTRO_TICKS;
+		}
 	}
 }
 /* The select screen: the cursor is P1 (chr[0], chr[1] follows it), or the
@@ -1821,6 +1856,14 @@ void fight_step(struct fight_state *s, const struct assets *a, uint32_t input,
 		  : s->game == GAME_PRACTICE ? dummy(s, a)
 					     : ai(s, a, 1);
 	combat(s, a, keys, !human && !s->automatic);
+	/* The clock runs out: time over, the loser's KO sound (none on a
+	 * draw) starts the win music. */
+	if (s->clock && !s->ended && !--s->clock) {
+		s->ended = 1;
+		int w = winner(s, a);
+		if (w >= 0)
+			sound(s, a, SOUND_KO, (unsigned)(1 - w), 0);
+	}
 }
 /* ---- drawing ---- */
 static void rect(struct scene *s, int x, int y, int w, int h, uint16_t color, int blend,
@@ -2320,7 +2363,10 @@ static void banner(struct scene *out, const struct fight_state *s)
 	if (s->timer < INTRO_TICKS || s->timer >= BANNER_END)
 		return;
 	int ready = s->timer < ROUND_TICKS;
-	const char *word = ready ? "READY" : "FIGHT";
+	/* An arcade match names its round instead of READY. */
+	char round[12] = "ROUND ";
+	number(round + 6, s->bout);
+	const char *word = !ready ? "FIGHT" : rounds(s) > 1 ? round : "READY";
 	int w = (4 * (int)strlen(word) - 1) * BANNER_CELL, x = (FW - w) / 2, y = 96;
 	text_cell(out, x + 4, y + 4, word, 0x0000, BANNER_CELL);
 	text_cell(out, x, y, word, ready ? 0xffe0 : 0xfa00, BANNER_CELL);
@@ -2450,7 +2496,9 @@ hud:
 				continue;
 			char damage[24] = "DAMAGE ";
 			number(damage + 7, s->last[i]);
-			text(out, i ? 464 - text_width(damage) : 16, 76, damage, 0xffff);
+			int x = i ? 464 - text_width(damage) : 16;
+			text(out, x + 1, 77, damage, 0x0000);
+			text(out, x, 76, damage, 0xffff);
 		}
 	} else {
 		number(line, s->stage);
@@ -2473,11 +2521,33 @@ hud:
 		text_cell(out, x + 2, 52, hits, 0, 4);
 		text_cell(out, x, 50, hits, 0xffe0, 4);
 	}
-	if (s->ended && !s->paused)
-		text(out, 232, 80, "KO", 0xffff);
+	if (s->ended && !s->paused) {
+		/* Both standing means the clock ran out. */
+		const char *end = s->p[0].hp && s->p[1].hp ? "TIME UP" : "KO";
+		text(out, 240 - text_width(end) / 2, 80, end, 0xffff);
+	}
+	/* Round wins as squares between the names and the centre label,
+	 * filled when won. */
+	for (int i = 0; rounds(s) > 1 && i < 2; i++)
+		for (unsigned k = 0; k < rounds(s); k++) {
+			int x = i ? 280 + (int)k * 12 : 192 - (int)k * 12;
+			if (k < s->wins[i])
+				rect(out, x, 33, 8, 8, 0xffe0, OPAQUE, 255);
+			else
+				outline(out, (struct area){x, 33, 8, 8}, 0x8410, 0, 1);
+		}
 	/* Mode indicators don't depend on the text command budget. */
 	rect(out, 220, 16, 40, 13, (uint16_t)(0x001f + s->stress * 0x3800), OPAQUE,
 	     255);
+	/* The clock's count over it, red for the last ten. */
+	if (s->clock || (s->ended && s->p[0].hp && s->p[1].hp)) {
+		char clock[4];
+		unsigned left = (s->clock + COUNT_TICKS - 1) / COUNT_TICKS;
+		number(clock, left);
+		int w = (4 * (int)strlen(clock) - 1) * 2, x = 240 - w / 2;
+		text_cell(out, x + 1, 18, clock, 0x0000, 2);
+		text_cell(out, x, 17, clock, left > 10 ? 0xffff : 0xf800, 2);
+	}
 	banner(out, s);
 	if (s->paused)
 		pause_panel(out, s, a);
@@ -2502,10 +2572,10 @@ hud:
 #define LEVEL_AT (LIST_AT + 1)
 #define THROWS_AT (LEVEL_AT + 1)
 #define DASHES_AT (THROWS_AT + 2)
-/* Then game, picking, dummy, streak, record, carry and damage and last per
- * side. */
+/* Then game, picking, dummy, streak, record, carry, damage and last per
+ * side, the clock and the bout. */
 #define GAME_AT (DASHES_AT + 2)
-#define GAME_WORDS 10
+#define GAME_WORDS 12
 #define USED_WORDS (GAME_AT + GAME_WORDS)
 static void fighter_fields(struct fighter *p, int32_t *v[FIGHTER_WORDS])
 {
@@ -2539,7 +2609,7 @@ static void game_fields(struct fight_state *s, uint32_t *v[GAME_WORDS])
 {
 	uint32_t *f[GAME_WORDS] = {&s->game,	&s->picking, &s->dummy, &s->streak, &s->record,
 				   &s->carry,	&s->damage[0], &s->damage[1], &s->last[0],
-				   &s->last[1]};
+				   &s->last[1], &s->clock, &s->bout};
 	memcpy(v, f, sizeof(f));
 }
 void fight_encode(const struct fight_state *s, uint32_t w[STATE_WORDS])
@@ -2765,14 +2835,20 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 	unsigned n = a->characters;
 	uint32_t all = n >= 32 ? 0xffffffffu : (1u << n) - 1u;
 	if (t.paused > 1 || t.stress > 3 || t.boxes > 1 || t.automatic > 1 || t.mode >= MODES ||
-	    t.timer > 255 || (t.beaten & ~all) || t.stage > n || t.wins[0] >= ROUNDS_TO_WIN ||
-	    t.wins[1] >= ROUNDS_TO_WIN || t.chr[0] >= n || t.chr[1] >= n || t.pal[0] > 1 ||
+	    t.timer > 255 || (t.beaten & ~all) || t.stage > n || t.wins[0] >= rounds(&t) ||
+	    t.wins[1] >= rounds(&t) || t.chr[0] >= n || t.chr[1] >= n || t.pal[0] > 1 ||
 	    t.pal[1] > 1 || t.tone > 2400 || t.phase >= 48000 || t.ended > KO_TICKS ||
 	    (t.ended && t.mode != MODE_FIGHT))
 		return 0;
 	if (t.mode == MODE_FIGHT) {
 		uint32_t opp = opponents(a, t.chr[0]);
 		if (t.timer > BANNER_END || (t.timer < ROUND_TICKS && (t.ended || t.shake || t.flash)))
+			return 0;
+		/* The clock: none in practice, full until FIGHT, out only once
+		 * ended; a match's rounds so far bound its wins. */
+		if (t.clock > CLOCK_TICKS || (t.game == GAME_PRACTICE && t.clock) ||
+		    (t.timer < ROUND_TICKS && t.clock && t.clock != CLOCK_TICKS) || !t.bout ||
+		    t.bout > 2 * rounds(&t) - 1 || t.wins[0] >= t.bout || t.wins[1] >= t.bout)
 			return 0;
 		/* A mirror is always a valid fight (tests and versus set one up);
 		 * practice takes any dummy, only the ladder beats anyone. */
@@ -2783,7 +2859,8 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 						     t.stage != count(t.beaten) + 1
 					   : t.beaten || t.stage != 1))
 			return 0;
-	}
+	} else if (t.clock || t.bout)
+		return 0;
 	for (int i = 0; i < 2; i++) {
 		int32_t *v[FIGHTER_WORDS];
 		fighter_fields(&t.p[i], v);
