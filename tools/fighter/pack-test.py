@@ -7,7 +7,8 @@ Terry's manifest as it was before convert-stats.py ran (no sheet decoding):
 the real files load, every malformed variant is refused with ValueError,
 stats resolve from the system plus overrides, class defaults and the damage
 scale give the expected numbers, follow-ups pack their parent, window and
-contact flag, and the conversion keeps every loaded
+contact flag, a half circle behind the quarter circle it completes is
+refused, and the conversion keeps every loaded
 value and is idempotent. It also checks that every roster manifest is
 already converted."""
 import copy
@@ -130,6 +131,11 @@ def main():
     assert c.moves[k][16:] == (c.move_names.index('power_wave') + 1, 3, 9, 1)
     assert c.moves[k - 1][16:] == (0, 0, 0, 0)
     assert character(follow(after='stand_hp', window=[0, 0])).moves[k][16:19] == (2, 0, 0)
+    # Half circles and 421 pack as motions 11..13; a half circle may follow
+    # its quarter circle only without a shared button.
+    for index, motion in enumerate(['41236', '63214', '421'], 11):
+        assert character(follow(motion=motion, buttons='K')).moves[k][1] == index
+    assert character(follow(motion='63214')).moves[k][1] == 12
 
     # Malformed systems.json.
     bad_systems = [
@@ -207,6 +213,7 @@ def main():
         ('contact not a bool', follow(after='power_wave', window=[0, 1], contact=1)),
         ('a held direction on its own', follow(motion='6')),
         ('any on its own', follow(motion='any')),
+        ('a 41236+P behind the 236+P Power Wave', follow(motion='41236')),
     ]
     for what, m in bad_terry:
         refused(f'terry with {what}', lambda mm=m: character(mm))

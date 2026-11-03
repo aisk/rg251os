@@ -422,6 +422,31 @@ static void commands(void)
 	assert(!fight_motion(&p, st, MOTION_623));
 	set_history(&p, "655555555555555555" "23");
 	assert(fight_motion(&p, st, MOTION_623));
+	/* Half circles within 20 ticks: 41236 also completes 236, a plain 236
+	 * is no 41236; 63214 likewise with 214. 421 is not a 214, nor the
+	 * other way round. All follow facing. */
+	set_history(&p, "41236");
+	assert(fight_motion(&p, st, MOTION_41236) && fight_motion(&p, st, MOTION_236) &&
+	       !fight_motion(&p, st, MOTION_63214));
+	set_history(&p, "4555555555555555555" "26");
+	assert(!fight_motion(&p, st, MOTION_41236));
+	set_history(&p, "455555555555555555" "26");
+	assert(fight_motion(&p, st, MOTION_41236));
+	set_history(&p, "5236");
+	assert(!fight_motion(&p, st, MOTION_41236));
+	set_history(&p, "63214");
+	assert(fight_motion(&p, st, MOTION_63214) && fight_motion(&p, st, MOTION_214) &&
+	       !fight_motion(&p, st, MOTION_41236) && !fight_motion(&p, st, MOTION_421));
+	set_history(&p, "421");
+	assert(fight_motion(&p, st, MOTION_421) && !fight_motion(&p, st, MOTION_214));
+	set_history(&p, "214");
+	assert(!fight_motion(&p, st, MOTION_421));
+	p.face = -1;
+	set_history(&p, "63214");
+	assert(fight_motion(&p, st, MOTION_41236) && !fight_motion(&p, st, MOTION_63214));
+	set_history(&p, "623");
+	assert(fight_motion(&p, st, MOTION_421));
+	p.face = 1;
 	/* Charges: back held 30 (byte 0) or released within the grace (byte 1). */
 	set_history(&p, "6");
 	p.charge = 29;
