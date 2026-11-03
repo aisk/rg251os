@@ -667,6 +667,16 @@ static uint32_t tap(const struct fighter *p, uint32_t key)
 {
 	return history_at(p, 0) & (key >> RETRO_DEVICE_ID_JOYPAD_UP) ? 0 : key;
 }
+/* Would holding numpad 4 now complete a 44 (see tapped)? */
+static int would_tap(const struct fighter *p, unsigned window)
+{
+	for (unsigned k = 0; k < window && k + 1 < HISTORY; k++) {
+		int m = numpad(history_at(p, k), p->face);
+		if (m % 3 == 1)
+			return k >= 1 && m == 4;
+	}
+	return 0;
+}
 static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
 {
 	struct fighter *p = &s->p[i];
@@ -712,6 +722,11 @@ static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
 			int low = m->hit.guard == GUARD_LOW;
 			if (h < lv->wrong)
 				low = !low;
+			/* Back again soon after the last standing guard would
+			 * backdash: guard crouching unless that loses to it. */
+			if (!low && m->hit.guard == GUARD_HIGH &&
+			    would_tap(p, dash_rule(s, a, i)->window))
+				low = 1;
 			return away | (low ? KEY(DOWN) : 0u);
 		}
 		/* Some swings it does not guard, up close, it backdashes from. */

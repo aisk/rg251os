@@ -1581,6 +1581,37 @@ static void guard_dummy(void)
 				}
 			}
 }
+/* A Hard CPU that guards a swing (the AI's per-swing roll, 28 of 32)
+ * never backdashes from it, however soon its last guard let go of back. */
+static void cpu_guard(void)
+{
+	struct fight_state s;
+	unsigned bad = 0, dashes = 0;
+	for (unsigned c = 0; c < pack.characters; c++)
+		for (int period = 8; period < 32; period += 4) {
+			match(&s, c, c, 200, 250);
+			s.level = LEVEL_HARD;
+			for (int n = 0; n < 400; n++) {
+				struct fight_state before = s;
+				if (n % period == 0 && !s.p[0].move && !s.p[1].stun) {
+					s.p[0].x = QX(200);
+					s.p[1].x = QX(250);
+				}
+				fight_step(&s, &pack, n % period ? 0 : K(Y), 0, 0);
+				const struct fighter *q = &before.p[0];
+				if (s.p[1].dash != DASH_BACK || before.p[1].dash == DASH_BACK || !q->move)
+					continue;
+				dashes++;
+				uint32_t h = ((before.tick + 1 - (uint32_t)q->elapsed) * 2654435761u + 1u) >> 27;
+				bad += abs(q->x / 4 - before.p[1].x / 4) < pack.chr[c].stats.guard_range &&
+				       h < 28;
+			}
+		}
+	if (bad) {
+		fprintf(stderr, "cpu guard: %u of %u backdashes from guarded swings\n", bad, dashes);
+		abort();
+	}
+}
 /* Difficulty: the level round-trips and 3 is rejected; on Easy every CPU
  * strike on an idle P1 deals 3/4 of its damage (human port 1 or Normal:
  * full); AI vs AI runs per level guard more and start more specials from
@@ -3169,6 +3200,7 @@ static void logic_tests(const uint8_t *data, size_t len)
 	ladder();
 	game_modes();
 	guard_dummy();
+	cpu_guard();
 	round_clock();
 	round_start();
 	combos();
