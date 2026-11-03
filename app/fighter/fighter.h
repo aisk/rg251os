@@ -1,4 +1,4 @@
-/* Portable fighter state, FIGHTP08 content (system profiles with walls and
+/* Portable fighter state, FIGHTP09 content (system profiles with walls and
  * effect sets, a roster of characters with stats, frames, per-step boxes and
  * motion, normals, named specials and projectiles, spark animations and parallax
  * stages), bounded draw commands, the per-tick sound events and the RGB565
@@ -132,9 +132,11 @@
 #define MAX_COMBO 99
 /* Cast frames a scene can report missing (see struct scene). */
 #define SCENE_MISSES 16
+/* FALL, DOWN and GETUP are the knockdown (see fighter.c): knocked off the
+ * feet until landing, lying, getting up. */
 enum action {
 	IDLE, WALK_FORWARD, WALK_BACK, JUMP, GUARD, HURT, KO, CROUCH, CROUCH_GUARD,
-	CROUCH_HURT, ACTIONS
+	CROUCH_HURT, FALL, DOWN, GETUP, ACTIONS
 };
 /* Normals; specials follow them in the move table. */
 enum trigger {
@@ -162,6 +164,12 @@ enum move_class {
 	CLASS_NONE, CLASS_LIGHT, CLASS_HEAVY, CLASS_COMMAND, CLASS_SPECIAL, CLASS_SUPER,
 	CLASS_THROW, CLASSES
 };
+/* Hit flags: an unguarded hit (a move's last hit group) knocks down; the
+ * move also hits a lying fighter. */
+enum hit_flag { FLAG_KNOCKDOWN = 1, FLAG_OTG = 2, FLAG_MASK = 3 };
+/* Knockdown phases (struct fighter down). */
+enum down_phase { UP, FALLING, LYING, DOWN_PHASES };
+#define MAX_WAKEUP 120
 /* Bits of a packed move's defaults: the field comes from its class. */
 enum hit_default { DEFAULT_HITSTUN = 1, DEFAULT_BLOCKSTUN = 2, DEFAULT_HITSTOP = 4 };
 /* Standing hurt height group, for the AI and tools only. */
@@ -196,10 +204,13 @@ enum mode { MODE_SELECT, MODE_FIGHT, MODE_RESULT, MODE_CLEAR, MODES };
  * byte each; history holds the last HISTORY raw directions (4 bits each,
  * newest in the low bits of history[0]). plan/plan_tick drive the AI's
  * special inputs. clock counts every tick (frozen ones too, at most 255)
- * since the current move started: a follow-up's motion must lie within it. */
+ * since the current move started: a follow-up's motion must lie within it.
+ * down is the knockdown phase (enum down_phase; elapsed counts its ticks):
+ * FALLING until the fall animation is over and the fighter is on the
+ * ground, then LYING through lying and getting up. */
 struct fighter {
 	int32_t x, y, vy, hp, face, walk, block, crouch, move, elapsed, hit, stun,
-	    freeze, slide, keys, corner, squat, buffer, age, plan, plan_tick, clock;
+	    freeze, slide, keys, corner, squat, buffer, age, plan, plan_tick, clock, down;
 	uint32_t charge, history[HISTORY / 8];
 };
 /* A live projectile: kind is the owner's projectile index + 1 (0 = free). */
@@ -321,10 +332,10 @@ struct anim {
 };
 /* The hit fields shared by moves and projectiles; damage and chip are
  * already scaled by the owner's system (life points before the defender's
- * defense). */
+ * defense). flags: enum hit_flag (projectiles only knock down). */
 struct hit {
 	uint16_t damage, chip, hitstun, blockstun, hitstop, pushback, block_pushback;
-	uint8_t guard, cls;
+	uint8_t guard, cls, flags;
 };
 /* Startup, active, recovery and reach are derived from the steps at load.
  * Specials have a motion and button bits; spawn is the projectile + 1 the
@@ -362,10 +373,11 @@ struct jump {
  * quarter pixels per tick; height is an enum height_class. From the system
  * only: push, the body distance in pixels (closer than push - 1 is pushed
  * out to push), guard_range in pixels, and the input windows buffer,
- * quarter, dragon, charge, grace and release in ticks (see fighter.c). */
+ * quarter, dragon, charge, grace and release in ticks (see fighter.c), and
+ * wakeup, the ticks from landing in a knockdown to acting again. */
 struct stats {
 	int16_t life, defense, walk, walk_back, weight, push, guard_range;
-	uint8_t height, buffer, quarter, dragon, charge, grace, release;
+	uint8_t height, buffer, quarter, dragon, charge, grace, release, wakeup;
 	struct jump jump;
 };
 /* Default hitstun/blockstun/hitstop of a move class; has bit 0 stun, bit 1

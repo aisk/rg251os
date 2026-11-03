@@ -1,4 +1,4 @@
-/* FIGHTP08 pack decoder, render cache and clipped RGB565 software
+/* FIGHTP09 pack decoder, render cache and clipped RGB565 software
  * draw-command backend. The decoder checks every count, offset and index
  * against the file length and the resident limits in fighter.h (palettes
  * and frames per sheet, system profiles with walls and effect sets, stats,
@@ -269,6 +269,10 @@ static int read_system(struct reader *r, struct system *sy, unsigned sparks)
 			return 0;
 		sy->effect[k] = (uint16_t)e;
 	}
+	unsigned wakeup = u16(r);
+	if (!r->ok || !wakeup || wakeup > MAX_WAKEUP)
+		return 0;
+	st->wakeup = (uint8_t)wakeup;
 	return 1;
 }
 /* A character's stats: its system's, then each override in the mask. */
@@ -327,7 +331,7 @@ static int resolve_hit(struct hit *h, unsigned v[7], unsigned cls, unsigned defa
 		v[k] = v[k] && !scaled ? 1 : scaled;
 	}
 	*h = (struct hit){(uint16_t)v[0], (uint16_t)v[1], (uint16_t)v[2], (uint16_t)v[3],
-			  (uint16_t)v[4], (uint16_t)v[5], (uint16_t)v[6], 0, (uint8_t)cls};
+			  (uint16_t)v[4], (uint16_t)v[5], (uint16_t)v[6], 0, (uint8_t)cls, 0};
 	return 1;
 }
 static int anim(struct anim *an, unsigned first, unsigned count, unsigned steps,
@@ -435,7 +439,8 @@ static int character(struct reader *r, struct assets *a, struct character *c, un
 		if (!hit_fields(r, v))
 			return 0;
 		unsigned guard = u16(r), cancel = u16(r), cls = u16(r), defaults = u16(r);
-		unsigned after = u16(r), open = u16(r), close = u16(r), contact = u16(r);
+		unsigned after = u16(r), open = u16(r), close = u16(r), contact = u16(r),
+			 flags = u16(r);
 		/* Specials have a name, normals none. */
 		unsigned name_len = u8(r);
 		if (!r->ok || name_len > MAX_MOVE_NAME || !name_len != !kind)
@@ -456,8 +461,9 @@ static int character(struct reader *r, struct assets *a, struct character *c, un
 		    !anim(&m->anim, first, count, steps, base) || after > moves || after == k + 1 ||
 		    (after && !kind) || (!after && trigger >= MOTION_ANY && kind) ||
 		    (!after && (open || close || contact)) || open > close ||
-		    close >= MAX_MOVE_TICKS || contact > 1)
+		    close >= MAX_MOVE_TICKS || contact > 1 || (flags & ~(unsigned)FLAG_MASK))
 			return 0;
+		m->hit.flags = (uint8_t)flags;
 		m->after = (uint8_t)after;
 		m->open = (uint8_t)open;
 		m->close = (uint8_t)close;
@@ -475,13 +481,15 @@ static int character(struct reader *r, struct assets *a, struct character *c, un
 		if (!hit_fields(r, v))
 			return 0;
 		unsigned guard = u16(r), blend = u16(r), alpha = u16(r), cls = u16(r),
-			 defaults = u16(r);
+			 defaults = u16(r), flags = u16(r);
 		if (!r->ok || !resolve_hit(&p->hit, v, cls, defaults, sy) ||
 		    !anim(&p->anim, first, count, steps, base) || speed < 1 ||
 		    speed > MAX_VELOCITY || lifetime < 1 || lifetime > MAX_LIFETIME ||
 		    x < -MAX_SIDE || x > MAX_SIDE || y < -MAX_SIDE || y > MAX_SIDE ||
-		    guard >= GUARD_TYPES || blend >= BLENDS || !alpha || alpha > 255)
+		    guard >= GUARD_TYPES || blend >= BLENDS || !alpha || alpha > 255 ||
+		    (flags & ~(unsigned)FLAG_KNOCKDOWN))
 			return 0;
+		p->hit.flags = (uint8_t)flags;
 		p->speed = (int16_t)speed;
 		p->lifetime = (uint16_t)lifetime;
 		p->x = (int16_t)x;
@@ -837,7 +845,7 @@ static int read_stages(struct reader *r, struct assets *a, unsigned n)
 int fight_assets(struct assets *a, const void *data, size_t size, int *automatic)
 {
 	struct reader r = {data, 0, size, 1};
-	if (!data || size < 48 || memcmp(data, "FIGHTP08", 8))
+	if (!data || size < 48 || memcmp(data, "FIGHTP09", 8))
 		return 0;
 	r.at = 8;
 	uint32_t length = u32(&r), hash = u32(&r), flags = u32(&r);

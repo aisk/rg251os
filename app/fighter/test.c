@@ -135,7 +135,7 @@ static uint32_t get_word(const uint8_t *p, int k)
 /* ---- rules on exact ticks; expected numbers come from terry.json ---- */
 #define K(k) (1u << RETRO_DEVICE_ID_JOYPAD_##k)
 /* Words per fighter in a saved state, mirroring FIGHTER_WORDS in fighter.c. */
-#define FIGHTER_WORDS_T 27
+#define FIGHTER_WORDS_T 28
 static struct assets pack;
 static unsigned terry;
 enum { POWER_WAVE = MOVES, BURN_KNUCKLE, RISING_TACKLE };
@@ -635,8 +635,9 @@ static void burn_knuckle(void)
 	duel(&s, 100, 200);
 	for (int n = 1; n <= 18; n++)
 		step2(&s, motion(MOTION_214, n, 5, 1, K(Y)), 0);
-	assert(s.p[1].hp == 910 && s.p[1].stun == 22 && s.p[0].freeze == 10 &&
-	       s.p[0].elapsed == 13 && s.p[0].x == QX(114));
+	/* It knocks down: no hitstun, P1 falls. */
+	assert(s.p[1].hp == 910 && !s.p[1].stun && s.p[1].down == FALLING &&
+	       s.p[0].freeze == 10 && s.p[0].elapsed == 13 && s.p[0].x == QX(114));
 }
 /* Rising Tackle: down held for calls 1..30 charges 30 ticks, up+Y on call
  * 31 starts it. Heights after elapsed 5, 8, 23, 26, 29, 35, 42 follow the
@@ -991,7 +992,7 @@ static void round_start(void)
 }
 /* The combo words in a saved state (COMBO_AT in fighter.c): combo, shown,
  * show and best, two each. */
-#define COMBO_W 165
+#define COMBO_W 167
 #define LIST_W (COMBO_W + 8)
 #define LEVEL_W (LIST_W + 1)
 /* Combos: crouch LP chains keep P1 in hitstun, the count shows from the
@@ -1169,6 +1170,137 @@ static void move_lists(void)
 	step2(&s, K(START), 0);
 	assert(s.paused);
 }
+/* Ticks P1 (side 1) lies and gets up after landing (fighter.c's
+ * lie_ticks + GETUP). */
+static int down_total(const struct character *c)
+{
+	int g = c->action[GETUP].total;
+	return (c->stats.wakeup > g ? c->stats.wakeup : g);
+}
+/* Knockdowns: which moves knock down (pack defaults), Terry's sweep on an
+ * idle P1: FALLING through the fall animation, LYING (the down pose, then
+ * the get-up) for down_total ticks, then up; nothing hits the downed
+ * fighter (strikes, Power Wave), a press in the last get-up ticks comes out
+ * on the first free tick, a mid-knockdown state round-trips and bad ones
+ * are refused; Burn Knuckle knocks down, Power Wave does not, and every
+ * character has its three knockdown actions. */
+static void knockdowns(void)
+{
+	const struct character *t = &pack.chr[terry];
+	assert(t->move[CROUCH_HK].hit.flags & FLAG_KNOCKDOWN);
+	assert(!(t->move[STAND_HK].hit.flags & FLAG_KNOCKDOWN));
+	assert(t->move[BURN_KNUCKLE].hit.flags & FLAG_KNOCKDOWN);
+	assert(t->move[RISING_TACKLE].hit.flags & FLAG_KNOCKDOWN);
+	assert(!(t->move[POWER_WAVE].hit.flags & FLAG_KNOCKDOWN) &&
+	       !(t->projectile[0].hit.flags & FLAG_KNOCKDOWN));
+	unsigned iori = character("IORI");
+	const struct character *io = &pack.chr[iori];
+	unsigned aoi = 0, aoi2 = 0, aoi3 = 0;
+	for (unsigned k = MOVES; k < io->moves; k++)
+		if (!io->move[k].after && io->move[k].motion == MOTION_214)
+			aoi = k;
+	for (unsigned k = MOVES; k < io->moves; k++) {
+		if (io->move[k].after == aoi + 1)
+			aoi2 = k;
+		if (aoi2 && io->move[k].after == aoi2 + 1)
+			aoi3 = k;
+	}
+	assert(aoi2 && aoi3 && !(io->move[aoi].hit.flags & FLAG_KNOCKDOWN) &&
+	       !(io->move[aoi2].hit.flags & FLAG_KNOCKDOWN) &&
+	       (io->move[aoi3].hit.flags & FLAG_KNOCKDOWN));
+	for (unsigned c = 0; c < pack.characters; c++)
+		for (int k = FALL; k <= GETUP; k++)
+			assert(pack.chr[c].action[k].count && pack.chr[c].action[k].total);
+	struct fight_state s, u;
+	uint32_t w[STATE_WORDS];
+	duel(&s, 200, 250);
+	int fall = t->action[FALL].total, total = down_total(t), n = 0;
+	while (!s.p[1].down && n < 40)
+		step2(&s, n++ ? K(DOWN) : K(DOWN) | K(A), 0);
+	assert(s.p[1].down == FALLING && !s.p[1].stun && s.p[1].hp < 1000 && s.hits == 1);
+	int hp = s.p[1].hp, fell = 0, lay = 0, rose = 0;
+	/* Freeze through the hitstop, then fall, lie and get up while P0 jabs
+	 * and throws Power Waves at it. */
+	for (n = 0; s.p[1].down && n < 400; n++) {
+		int x = s.p[1].down;
+		uint32_t k0 = n % 30 == 5 ? K(Y) : n % 60 == 20 ? K(DOWN) : n % 60 == 22 ? K(DOWN) | K(RIGHT)
+		       : n % 60 == 24 ? K(RIGHT) | K(Y) : 0;
+		/* P1 presses LP in the last ticks of its get-up (a reversal). */
+		uint32_t k1 = x == LYING && s.p[1].elapsed == total - 2 ? K(Y) : 0;
+		step2(&s, k0, k1);
+		assert(s.p[1].hp == hp);
+		if (s.p[1].down == FALLING) {
+			fell++;
+			assert(in_action(&s, 1, FALL));
+		} else if (s.p[1].down == LYING) {
+			assert(s.p[1].y == 0 && s.p[1].elapsed < total);
+			if (s.p[1].elapsed < total - t->action[GETUP].total)
+				assert(in_action(&s, 1, DOWN));
+			else
+				assert(in_action(&s, 1, GETUP));
+			lay++;
+			if (lay == 10) {
+				fight_encode(&s, w);
+				assert(fight_decode(&u, &pack, w));
+				uint32_t v[STATE_WORDS];
+				fight_encode(&u, v);
+				assert(!memcmp(w, v, sizeof(w)));
+			}
+		}
+		rose = !s.p[1].down;
+	}
+	assert(rose && fell >= fall && lay == total && s.p[1].move == STAND_LP + 1 &&
+	       s.p[1].elapsed == 0);
+	/* Bad knockdown words: a phase 3, down with stun, lying in the air or
+	 * past its end. */
+	const int D = 19 + FIGHTER_WORDS_T;
+	static const struct {
+		int field;
+		uint32_t value;
+	} bad[] = {{22, 3}, {11, 5}, {1, (uint32_t)-10}, {9, 400}};
+	fight_encode(&u, w);
+	assert(u.p[1].down == LYING);
+	for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		uint32_t v[STATE_WORDS];
+		memcpy(v, w, sizeof(v));
+		v[D + bad[i].field] = bad[i].value;
+		struct fight_state keep = u;
+		assert(!fight_decode(&u, &pack, v) && !memcmp(&keep, &u, sizeof(u)));
+	}
+	/* Burn Knuckle knocks down; a Power Wave only stuns. */
+	duel(&s, 200, 280);
+	for (n = 1; n <= 40 && !s.p[1].down; n++)
+		step2(&s, motion(MOTION_214, n, 5, 1, K(Y)), 0);
+	assert(s.p[1].down == FALLING);
+	duel(&s, 100, 330);
+	for (n = 1; n <= 120 && s.hits == 0; n++)
+		step2(&s, motion(MOTION_236, n, 5, 1, K(Y)), 0);
+	assert(s.hits == 1 && !s.p[1].down && s.p[1].stun);
+	/* AI vs AI on Normal: knockdowns happen, a downed fighter never loses
+	 * life (no OTG moves in the pack) and some hits land within a few
+	 * ticks of a get-up (the AI's meaty). */
+	fight_reset(&s, 1);
+	unsigned downs = 0, meaty = 0, since[2] = {99, 99};
+	for (n = 0; n < 30000; n++) {
+		struct fight_state before = s;
+		fight_step(&s, &pack, 0, 0, 0);
+		if (s.mode != MODE_FIGHT || before.mode != MODE_FIGHT || s.round != before.round)
+			continue;
+		for (int i = 0; i < 2; i++) {
+			downs += s.p[i].down == FALLING && !before.p[i].down;
+			if (before.p[i].down && !s.p[i].down)
+				since[i] = 0;
+			else if (since[i] < 99)
+				since[i]++;
+			if (before.p[i].down && s.p[i].down)
+				assert(s.p[i].hp == before.p[i].hp);
+			meaty += s.p[i].hp < before.p[i].hp && since[i] <= 4;
+		}
+	}
+	printf("knockdowns: %u in 30000 AI ticks, %u hits within 4 ticks of a get-up\n", downs,
+	       meaty);
+	assert(downs > 20 && meaty > 0);
+}
 /* v * factor / 1000 rounded half up, at least 1 when v is nonzero (as
  * fighter.c). */
 static int per_mille(int v, int factor)
@@ -1307,7 +1439,7 @@ static void state_words(void)
 	assert(fight_decode(&t, &pack, w));
 	enum { W_X, W_Y, W_VY, W_HP, W_FACE, W_WALK, W_BLOCK, W_CROUCH, W_MOVE, W_ELAPSED,
 	       W_HIT, W_STUN, W_FREEZE, W_SLIDE, W_KEYS, W_CORNER, W_SQUAT, W_BUFFER, W_AGE,
-	       W_PLAN, W_PLAN_TICK, W_CLOCK, W_CHARGE };
+	       W_PLAN, W_PLAN_TICK, W_CLOCK, W_DOWN, W_CHARGE };
 	enum { G_MODE = 8, G_TIMER, G_BEATEN, G_STAGE, G_RUN, G_WIN0, G_WIN1, G_CHR0, G_CHR1,
 	       G_PAL0, G_PAL1 };
 	const int P = 19, S = 19 + 2 * FIGHTER_WORDS_T;
@@ -2156,6 +2288,17 @@ static void previews(void)
 		step2(&s, K(DOWN) | (n % 2 ? K(Y) : 0), 0);
 	assert(s.shown[0] >= 2);
 	snapshot(&s, "combo");
+	/* Terry's sweep: P1 falling, then lying. */
+	staged(&s, korea, terry, terry, centre - 25, centre + 25);
+	for (int n = 0; n < 60 && s.p[1].down != FALLING; n++)
+		step2(&s, n ? K(DOWN) : K(DOWN) | K(A), 0);
+	for (int n = 0; n < 20; n++)
+		step2(&s, 0, 0);
+	snapshot(&s, "falling");
+	while (s.p[1].down == FALLING)
+		step2(&s, 0, 0);
+	step2(&s, 0, 0);
+	snapshot(&s, "down");
 	s.chr[0] = character("IORI");
 	staged(&s, korea, s.chr[0], terry, centre - 60, centre + 60);
 	step2(&s, K(START), 0);
@@ -2194,6 +2337,7 @@ static void logic_tests(const uint8_t *data, size_t len)
 	combos();
 	move_lists();
 	difficulty();
+	knockdowns();
 	state_words();
 	stat_tests();
 	pack.stages = stages;
@@ -2302,6 +2446,9 @@ int main(int argc, char **argv)
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
 	memcpy(copy, "FGSTAT10", 8); /* before the difficulty */
+	assert(!retro_unserialize(copy, n));
+	memcpy(copy, end, n);
+	memcpy(copy, "FGSTAT11", 8); /* before knockdowns */
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
 	memset(copy + 16 + 8 * 4, 0xff, 4);

@@ -7,7 +7,8 @@ Terry's manifest as it was before convert-stats.py ran (no sheet decoding):
 the real files load, every malformed variant is refused with ValueError,
 stats resolve from the system plus overrides, class defaults and the damage
 scale give the expected numbers, follow-ups pack their parent, window and
-contact flag, specials pack their names (every roster special has one), and the conversion keeps every loaded
+contact flag, specials pack their names (every roster special has one),
+knockdown and OTG flags and the derived knockdown actions and wakeup, and the conversion keeps every loaded
 value and is idempotent. It also checks that every roster manifest is
 already converted."""
 import copy
@@ -127,9 +128,44 @@ def main():
 
     c = character(follow(motion='any', after='power_wave', window=[3, 9], contact=True))
     k = c.move_names.index('burn_knuckle')
-    assert c.moves[k][16:] == (c.move_names.index('power_wave') + 1, 3, 9, 1)
-    assert c.moves[k - 1][16:] == (0, 0, 0, 0)
+    assert c.moves[k][16:20] == (c.move_names.index('power_wave') + 1, 3, 9, 1)
+    assert c.moves[k - 1][16:20] == (0, 0, 0, 0)
     assert character(follow(after='stand_hp', window=[0, 0])).moves[k][16:19] == (2, 0, 0)
+
+    # Knockdown flags (last field): the sweep and a special that launches
+    # nothing and has no follow-ups by default; written values win; a
+    # rekka opener does not; projectiles only when written. Without fall,
+    # down and getup actions they come from ko and crouch.
+    special = with_terry(lambda c, _: [c['moves'][k].update({'class': 'special'})
+                                       for k in ('burn_knuckle', 'power_wave')])
+    c = character(special)
+    flags = {n: c.moves[i][20] for i, n in enumerate(c.move_names)}
+    assert flags['crouch_hk'] == pack.FLAG_KNOCKDOWN and flags['stand_hk'] == 0
+    assert flags['burn_knuckle'] == pack.FLAG_KNOCKDOWN and flags['power_wave'] == 0
+    assert character(TERRY).moves[c.move_names.index('burn_knuckle')][20] == 0  # no class
+    assert c.projectiles[0][-1] == 0
+    c = character(with_terry(lambda c, _: (c['moves']['crouch_hk'].update(knockdown=False),
+                                           c['moves']['stand_lp'].update(otg=True),
+                                           c['projectiles']['power_wave'].update(knockdown=True))))
+    flags = {n: c.moves[i][20] for i, n in enumerate(c.move_names)}
+    assert flags['crouch_hk'] == 0 and flags['stand_lp'] == pack.FLAG_OTG
+    assert c.projectiles[0][-1] == pack.FLAG_KNOCKDOWN
+    m = with_terry(lambda c, _: (c['moves']['rising_tackle']['trigger'].update(
+        motion='any', after='burn_knuckle', window=[3, 9]),
+        c['moves']['burn_knuckle'].update({'class': 'special'})))
+    c = character(m)
+    k = c.move_names.index('burn_knuckle')
+    assert c.moves[k][20] == 0
+    refused('knockdown 1', lambda: character(with_terry(
+        lambda c, _: c['moves']['crouch_hk'].update(knockdown=1))))
+    t = TERRY['characters']['terry']['actions']
+    derived = pack.Character.knockdown_actions(t)
+    assert derived['fall'] == t['ko'][:-1] and derived['down'] == [[t['ko'][-1][0], 1]]
+    assert derived['getup'] == [[t['crouch'][0][0], pack.GETUP_TICKS]]
+    refused('an unknown action', lambda: character(with_terry(
+        lambda c, _: c['actions'].update(roll=c['actions']['idle']))))
+    assert real.profile['kof2002']['wakeup'] == 25
+    refused('wakeup 0', lambda: systems(with_system(['kof2002', 'wakeup'], 0)))
 
     # Move names: a special's "name" upper-cased, else its key; normals none.
     named = with_terry(lambda c, _: c['moves']['power_wave'].update(name='Power-Wave 2'))

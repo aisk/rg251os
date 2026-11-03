@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a FIGHTP08 content pack from ripped sprite sheets and their manifests.
+"""Build a FIGHTP09 content pack from ripped sprite sheets and their manifests.
 
 Each manifest (assets/fighter/<name>.json) describes one sheet and is the
 source of truth for it: every frame is a hand-checked sheet rectangle plus a
@@ -76,6 +76,12 @@ top-level keys such as "notes" are ignored):
               Contiguous steps with hit boxes form one hit (a move may have
               several). A move's vertical motion must never take it below the
               ground and must end back on it.
+              Actions: idle, walk_forward, walk_back, jump, guard, hurt, ko,
+              crouch, crouch_guard, crouch_hurt, and optionally the
+              knockdown's fall (knocked off the feet until landing), down
+              (lying, loops) and getup; without them fall is the ko
+              animation minus its last step, down that last step and getup
+              the first crouch frame for 10 ticks.
               Moves: the eight normals (stand/crouch lp/hp/lk/hk) are fixed by
               name; any other name is a special. A special may have "name",
               shown in the command lists (A-Z, a-z, 0-9, space and "-", at
@@ -112,11 +118,18 @@ top-level keys such as "notes" are ignored):
               rest) to where its value comes from: a "sources" id, estimate,
               sheet (from the sheet's frame counts), measured, design or
               mugen:<pack>; a field without one counts as estimate.
+              Optional "knockdown" (true/false): an unguarded hit of the
+              move's last hit group knocks the defender down. Without it the
+              sweep (crouch_hk) and every special of class special or super
+              with hitboxes that launches no projectile and has no
+              follow-ups knock down. Optional "otg" (true): the move also hits
+              a lying fighter (nothing else does).
               Projectiles: "steps" (looping animation, each step with "hit"
               boxes), "speed" (pixels per tick forward), "lifetime" (ticks),
               "offset" ([forward, down] from the owner's anchor at launch),
               "blend" (opaque, alpha or add), "alpha" and the same hit fields
-              as moves (class and src too). Blended projectiles share the
+              as moves (class, src and knockdown, default false, too).
+              Blended projectiles share the
               effect pixel budget.
   players     two {"character", "palette"} slots: the palette of slot 1 is a
               character's normal palette, slot 2 its mirror-match alternate
@@ -184,12 +197,13 @@ ticks} (classes may be left out; a move of such a class must give the
 values itself), input {buffer, quarter (236/214 window), dragon (623),
 charge, grace, optional release (default 4)}, push_distance (bodies closer
 than this - 1 pixels are pushed apart to it) and guard_range (pixels).
-Optional: defense, weight (1000), height (mid), src, notes. hop, super_jump,
+Optional: defense, weight (1000), height (mid), wakeup (ticks from landing in
+a knockdown until the fighter acts again, default 25), src, notes. hop, super_jump,
 hyper_hop, chip, meters, mechanics, scaling, stun and guard are accepted for
 later steps and not packed.
 
 Pack layout, all little endian (the C loader in app/fighter/render.c checks it):
-  header     "FIGHTP08", u32 size, u32 FNV-1a of bytes 16..size, u32 flags
+  header     "FIGHTP09", u32 size, u32 FNV-1a of bytes 16..size, u32 flags
              (bit 0 automatic), u32 palettes, frames, characters, effects,
              systems, sparks, stages
   palette    u16 sheet, u16 n (1..256), n x u16 RGB565
@@ -206,11 +220,12 @@ Pack layout, all little endian (the C loader in app/fighter/render.c checks it):
              pair, bit 1 hitstop; absent values 0); u16 wall margin, u16
              play width; 11 x u16 spark + 1 (0 none) for hit_light, hit_heavy,
              hit_special, guard, slash_light, slash_heavy, slash_special,
-             slash_guard, blood_light, blood_heavy, blood_special
+             slash_guard, blood_light, blood_heavy, blood_special; u16
+             wakeup (ticks from landing in a knockdown to acting again)
   character  u8 name length, name bytes; u16 normal palette, alternate
              palette; u16 system, u16 override mask (bit per stat), 11 stats
              x u16 as above (0 where the mask bit is clear); u16 steps, boxes,
-             moves, projectiles; 10 actions x (u16 first step, u16 steps);
+             moves, projectiles; 13 actions x (u16 first step, u16 steps);
              moves x 20 u16 (kind 0 normal or 1 special, trigger or motion
              (0 236, 1 214, 2 623, 3 [4]6, 4 [2]8, follow-ups also 5 any,
              6 5, 7 8, 8 2, 9 6, 10 4), buttons, first step, steps, damage,
@@ -218,12 +233,13 @@ Pack layout, all little endian (the C loader in app/fighter/render.c checks it):
              guard, cancel bits, class 0 none or 1 + class, defaults: bit 0
              hitstun, 1 blockstun, 2 hitstop from the class, packed as 0;
              after = parent move index + 1 or 0, window open, close, contact
-             0 or 1, all 0 without a parent), u8 name length and the
+             0 or 1, all 0 without a parent, flags: bit 0 knockdown, bit 1
+             hits a lying fighter), u8 name length and the
              upper-case name (0 for normals, 1..16 for specials): the eight
-             normals, then the specials in priority order; projectiles x 18 u16 (first step,
+             normals, then the specials in priority order; projectiles x 19 u16 (first step,
              steps, speed, lifetime, i16 offset x, i16 offset y, damage, chip,
              hitstun, blockstun, hitstop, pushback, block_pushback, guard,
-             blend, alpha, class, defaults); steps x (u16 frame, u16 ticks,
+             blend, alpha, class, defaults, flags: bit 0 knockdown); steps x (u16 frame, u16 ticks,
              u16 first box, u8 hurt boxes, u8 hit boxes, i8 forward, i8 down,
              u8 spawn = projectile + 1 or 0); boxes x (i16 x, i16 y, u16 w,
              u16 h); u16 slash mask (bit 0..3 lp, hp, lk, hk normals, bit 4
@@ -248,10 +264,18 @@ import struct
 import sys
 import zlib
 
-MAGIC = b'FIGHTP08'
+MAGIC = b'FIGHTP09'
 # Order matters: these are the C enums in app/fighter/fighter.h.
 ACTIONS = ['idle', 'walk_forward', 'walk_back', 'jump', 'guard', 'hurt', 'ko',
-           'crouch', 'crouch_guard', 'crouch_hurt']
+           'crouch', 'crouch_guard', 'crouch_hurt', 'fall', 'down', 'getup']
+# Knockdown actions a manifest may leave out (see Character.knockdown_actions).
+DERIVED_ACTIONS = ['fall', 'down', 'getup']
+# Default get-up length (ticks of the crouch frame) when a character has no
+# getup action.
+GETUP_TICKS = 10
+# Move flags (packed u16): knocks down on its last hit, hits a lying fighter.
+FLAG_KNOCKDOWN, FLAG_OTG = 1, 2
+MAX_WAKEUP = 120
 MOVES = ['stand_lp', 'stand_hp', 'stand_lk', 'stand_hk',
          'crouch_lp', 'crouch_hp', 'crouch_lk', 'crouch_hk']
 MOTIONS = ['236', '214', '623', '[4]6', '[2]8', 'any', '5', '8', '2', '6', '4']
@@ -734,7 +758,7 @@ class Systems:
         need = {'life', 'damage_scale', 'walk', 'walk_back', 'jump', 'stun_table',
                 'hitstop_table', 'input', 'push_distance', 'guard_range'}
         known = need | {'defense', 'weight', 'height', 'src', 'notes', 'wall_margin',
-                        'play_width', 'slash', 'effects'} | LATER_SYSTEM_KEYS
+                        'play_width', 'slash', 'effects', 'wakeup'} | LATER_SYSTEM_KEYS
         if not isinstance(p, dict) or need - set(p) or set(p) - known:
             raise ValueError(f'{what}: needs {sorted(need)}, may have '
                              f'{sorted(known - need)}')
@@ -785,6 +809,7 @@ class Systems:
                                   f'{what}: push_distance'),
                 'guard_range': check_int(p['guard_range'], 0, SCREEN_WIDTH,
                                          f'{what}: guard_range'),
+                'wakeup': check_int(p.get('wakeup', 25), 1, MAX_WAKEUP, f'{what}: wakeup'),
                 'classes': classes}
 
     def of(self, character, written):
@@ -818,6 +843,7 @@ class Systems:
                 if ref is not None and ref not in sparks:
                     raise ValueError(f'systems.json {n}: effect {k} names unknown spark anim {ref}')
                 out += struct.pack('<H', sparks[ref] + 1 if ref is not None else 0)
+            out += struct.pack('<H', p['wakeup'])
         return out
 
 
@@ -843,6 +869,13 @@ def display_name(name):
     if not 1 <= len(text) <= MAX_NAME or not set(text) <= NAME_CHARS:
         raise ValueError(f'{name}: character names must be 1..{MAX_NAME} of A-Z, 0-9, _ and -')
     return text
+
+
+def flag(d, key, default, what):
+    v = d.get(key, default)
+    if not isinstance(v, bool):
+        raise ValueError(f'{what}: {key} is true or false')
+    return int(v)
 
 
 def move_name(name, key, what):
@@ -967,10 +1000,12 @@ class Character:
                 self.boxes += hb + xb
             return first, len(seq)
 
-        if sorted(ch['actions']) != sorted(ACTIONS):
-            raise ValueError(f'{name}: needs exactly the actions {ACTIONS}')
+        given = ch['actions']
+        if not set(ACTIONS) - set(DERIVED_ACTIONS) <= set(given) or set(given) - set(ACTIONS):
+            raise ValueError(f'{name}: needs the actions {ACTIONS} ({DERIVED_ACTIONS} optional)')
+        actions = {**self.knockdown_actions(given), **given}
         for action in ACTIONS:
-            self.actions.append(sequence(ch['actions'][action], f'{name} {action}', 'action'))
+            self.actions.append(sequence(actions[action], f'{name} {action}', 'action'))
         projectiles = ch.get('projectiles', {})
         if len(projectiles) > MAX_PROJECTILE_TYPES:
             raise ValueError(f'{name}: at most {MAX_PROJECTILE_TYPES} projectiles')
@@ -978,7 +1013,7 @@ class Character:
         for pname, pr in projectiles.items():
             what = f'{name} projectile {pname}'
             need = {'steps', 'speed', 'lifetime', 'offset', 'guard', 'blend', 'alpha'}
-            known = need | set(HIT_FIELDS) | {'class', 'src'}
+            known = need | set(HIT_FIELDS) | {'class', 'src', 'knockdown'}
             if not isinstance(pr, dict) or need - set(pr) or set(pr) - known:
                 raise ValueError(f'{what}: fields must be {sorted(need)} plus the hit fields '
                                  f'(class and src optional)')
@@ -997,7 +1032,8 @@ class Character:
                                      check_int(pr['lifetime'], 1, MAX_LIFETIME, f'{what}: lifetime'),
                                      off[0], off[1], *hit.packed,
                                      GUARDS.index(pr['guard']), BLENDS.index(pr['blend']),
-                                     check_int(pr['alpha'], 1, 255, f'{what}: alpha'), *hit.tail()))
+                                     check_int(pr['alpha'], 1, 255, f'{what}: alpha'), *hit.tail(),
+                                     FLAG_KNOCKDOWN * flag(pr, 'knockdown', False, what)))
         moves = ch['moves']
         if not set(MOVES) <= set(moves):
             raise ValueError(f'{name}: needs the moves {MOVES}')
@@ -1008,7 +1044,8 @@ class Character:
             mv = moves[move]
             what = f'{name} {move}'
             special = move not in MOVES
-            known = {'steps', 'guard', 'cancel', 'class', 'src'} | set(HIT_FIELDS) | \
+            known = {'steps', 'guard', 'cancel', 'class', 'src', 'knockdown', 'otg'} | \
+                set(HIT_FIELDS) | \
                 ({'trigger', 'name'} if special else set())
             if set(mv) - known or not {'steps', 'guard', 'cancel'} <= set(mv) or \
                     (special and 'trigger' not in mv):
@@ -1057,7 +1094,7 @@ class Character:
             else:
                 head = (0, MOVES.index(move), 0)
             self.moves.append((*head, first, count, *hit.packed, GUARDS.index(mv['guard']), cancel,
-                               *hit.tail(), 0, 0, 0, 0))
+                               *hit.tail(), 0, 0, 0, 0, FLAG_OTG * flag(mv, 'otg', False, what)))
             self.move_names.append(move)
             self.labels.append(move_name(mv.get('name'), move, what) if special else '')
             self.follow.append(follow)
@@ -1073,7 +1110,30 @@ class Character:
             total = self.frame_data(p)[3]
             check_int(open_, 0, total - 1, f'{what}: window open')
             check_int(close, open_, total - 1, f'{what}: window close (open .. {total - 1})')
-            self.moves[k] = self.moves[k][:16] + (p + 1, open_, close, int(contact))
+            self.moves[k] = self.moves[k][:16] + (p + 1, open_, close, int(contact)) + \
+                self.moves[k][20:]
+        # Knockdown: written, else the sweep (crouch HK) and every special
+        # of class special/super that has hitboxes, launches nothing and is
+        # the last stage of its rekka (nothing follows it).
+        for k, move in enumerate(self.move_names):
+            mv = moves[move]
+            parent = any(f and f[0] == move for f in self.follow)
+            default = move == 'crouch_hk' or (
+                k >= len(MOVES) and mv.get('class') in ('special', 'super') and
+                self.frame_data(k)[4] > 0 and not parent and
+                not any(len(st) > 2 and 'spawn' in st[2] for st in mv['steps']))
+            knock = flag(mv, 'knockdown', default, f'{name} {move}')
+            self.moves[k] = self.moves[k][:20] + (self.moves[k][20] | FLAG_KNOCKDOWN * knock,)
+
+    @staticmethod
+    def knockdown_actions(given):
+        """fall, down and getup when a manifest has none of its own: fall is
+        the KO animation without its last step, down that last step (the
+        lying frame) and getup the first crouch frame for GETUP_TICKS."""
+        ko, crouch = given['ko'], given['crouch']
+        lying = ko[-1][:1] + [1]
+        return {'fall': ko[:-1] or [lying], 'down': [lying],
+                'getup': [[crouch[0][0], GETUP_TICKS]]}
 
     def frames(self):
         return {s[0] for s in self.steps}
@@ -1089,9 +1149,9 @@ class Character:
         for first, count in self.actions:
             out += struct.pack('<HH', first, count)
         for mv, label in zip(self.moves, self.labels):
-            out += struct.pack('<20HB', *mv, len(label)) + label.encode()
+            out += struct.pack('<21HB', *mv, len(label)) + label.encode()
         for pr in self.projectiles:
-            out += struct.pack('<4H2h12H', *pr)
+            out += struct.pack('<4H2h13H', *pr)
         for s in self.steps:
             out += struct.pack('<3H2B2bB', *s)
         for b in self.boxes:

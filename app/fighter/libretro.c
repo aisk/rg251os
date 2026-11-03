@@ -1,5 +1,5 @@
-/* Standard libretro fighter core: FIGHTP08 content, input, deterministic
- * FGSTAT11 saves, audio and software frames. Timing below measures work only;
+/* Standard libretro fighter core: FIGHTP09 content, input, deterministic
+ * FGSTAT12 saves, audio and software frames. Timing below measures work only;
  * the frontend owns pacing. Logs the system profiles, the roster with each
  * character's system and resolved stats, every move's frame data and class
  * (specials with their name)
@@ -350,7 +350,7 @@ bool retro_load_game(const struct retro_game_info *g)
 	if (!g || !fight_assets(&assets, g->data, g->size, &automatic)) {
 		if (logger)
 			logger(RETRO_LOG_ERROR,
-			       "fight: invalid FIGHTP08 package (magic, length, hash, "
+			       "fight: invalid FIGHTP09 package (magic, length, hash, "
 			       "limits, frame, palette, system, stats, character, move, "
 			       "projectile or step data)\n");
 		return false;
@@ -376,7 +376,7 @@ bool retro_load_game(const struct retro_game_info *g)
 	benchmark_runs = 0;
 	if (logger) {
 		logger(RETRO_LOG_INFO,
-		       "fight: FIGHTP08 package %08x, %u characters, %u frames, %u "
+		       "fight: FIGHTP09 package %08x, %u characters, %u frames, %u "
 		       "palettes, %u steps, %u boxes, 480x320 60Hz 48kHz, software %s, %s, "
 		       "difficulty %s; L boxes R stress START pause\n",
 		       assets.hash, assets.characters, assets.frames, assets.palettes,
@@ -595,7 +595,7 @@ bool retro_serialize(void *data, size_t size)
 	uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	fight_encode(&state, w);
-	memcpy(p, "FGSTAT11", 8);
+	memcpy(p, "FGSTAT12", 8);
 	put32(p + 8, assets.hash);
 	put32(p + 12, state.automatic);
 	for (int i = 0; i < STATE_WORDS; i++)
@@ -608,7 +608,7 @@ bool retro_unserialize(const void *data, size_t size)
 	const uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	if (!loaded || !p || size != retro_serialize_size() ||
-	    memcmp(p, "FGSTAT11", 8) || get32(p + 8) != assets.hash ||
+	    memcmp(p, "FGSTAT12", 8) || get32(p + 8) != assets.hash ||
 	    get32(p + 12) != state.automatic)
 		return false;
 	for (int i = 0; i < STATE_WORDS; i++)

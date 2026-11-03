@@ -2,7 +2,8 @@
  * jumps, crouching, data-driven normals and specials with an input buffer,
  * motion and charge commands, cancels, projectiles with clashes, hurt/hit
  * boxes from the pack, hitstop, hitstun, blockstun, high/low/overhead guard,
- * pushback with corner transfer, KO, combo counts, AI (with specials), the
+ * pushback with corner transfer, knockdown and wake-up, KO, combo counts,
+ * AI (with specials), the
  * camera and walls, hit sparks, screen shake, the KO flash, sound events,
  * the select, result and clear screens, the READY/FIGHT round start and the
  * stress scenes, plus the draw-command list (parallax stage or the flat
@@ -100,6 +101,19 @@
  * move requires one), from the buffer like a cancel; a buffered follow-up
  * whose parent is no longer running is dropped. The AI takes a follow-up
  * at most once per move (how often depends on the difficulty).
+ * Knockdowns: an unguarded hit of a knockdown move's last hit group (the
+ * pack flags the sweep, most specials and some projectiles), when the
+ * defender survives it, puts the defender down instead of in hitstun:
+ * FALLING shows the fall animation (still sliding, and falling if airborne)
+ * until it is over on the ground, then LYING shows the down pose for
+ * wakeup - getup ticks and the get-up animation (wakeup and getup the
+ * longer one in all); on the tick LYING has run that long the fighter acts
+ * again. Nothing hits a downed fighter (projectiles pass through) except
+ * OTG moves while it lies before the get-up; presses are buffered as usual,
+ * so one in the last buffer ticks of the get-up is a reversal. The AI does
+ * not attack a downed opponent, walks in and (above Easy) presses its
+ * planned normal to land as the opponent rises. A KO plays the KO
+ * animation instead.
  * Cancels: a normal whose hit connected (hit or block) can be cancelled
  * into a special (cancel "special") or another normal (cancel "chain")
  * while its elapsed is inside startup + active; the buffered move starts on
@@ -381,12 +395,34 @@ static const struct character *who(const struct fight_state *s, const struct ass
 {
 	return &a->chr[s->chr[i] < a->characters ? s->chr[i] : 0];
 }
+/* A knockdown after landing: lying for lie_ticks, then the get-up
+ * animation; the fighter acts again once LYING has run down_ticks. */
+static int lie_ticks(const struct character *c)
+{
+	int g = c->action[GETUP].total;
+	return c->stats.wakeup > g ? c->stats.wakeup - g : 0;
+}
+static int down_ticks(const struct character *c)
+{
+	return lie_ticks(c) + c->action[GETUP].total;
+}
+/* Lying on the ground, before the get-up starts (only OTG moves hit). */
+static int lying(const struct fighter *p, const struct character *c)
+{
+	return p->down == LYING && p->elapsed < lie_ticks(c);
+}
 unsigned fight_pose(const struct fight_state *s, const struct assets *a, int i)
 {
 	const struct fighter *p = &s->p[i];
 	const struct character *c = who(s, a, i);
 	if (!p->hp)
 		return step_at(a, &c->action[KO], s->ended, 0, NULL);
+	if (p->down == FALLING)
+		return step_at(a, &c->action[FALL], (uint32_t)p->elapsed, 0, NULL);
+	if (p->down == LYING)
+		return lying(p, c) ? step_at(a, &c->action[DOWN], (uint32_t)p->elapsed, 1, NULL)
+				   : step_at(a, &c->action[GETUP],
+					     (uint32_t)(p->elapsed - lie_ticks(c)), 0, NULL);
 	if (p->move)
 		return step_at(a, &c->move[p->move - 1].anim, (uint32_t)p->elapsed, 0, NULL);
 	int low = p->crouch && grounded(p);
@@ -500,8 +536,12 @@ static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
 		 away = d > 0 ? KEY(LEFT) : KEY(RIGHT);
 	uint32_t r = random_next(s);
 	const struct level_ai *lv = &levels[s->level];
-	if (p->stun || !q->hp)
+	if (p->stun || p->down || !q->hp)
 		p->plan = p->plan_tick = 0;
+	if (p->down)
+		return 0;
+	/* Ticks until a knocked-down opponent acts again (-1: it is up). */
+	int waking = q->down == LYING ? down_ticks(oc) - q->elapsed : q->down ? 255 : -1;
 	if (p->plan) {
 		const struct move *m = &c->move[p->plan - 1];
 		uint32_t key = macro(m->motion, c->stats.charge, (uint32_t)p->plan_tick, p->face,
@@ -588,7 +628,8 @@ static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
 	for (unsigned k = MOVES; k < c->moves; k++)
 		if (!c->move[k].after)
 			own[specials++] = k;
-	if (specials && !p->move && !p->stun && grounded(p) && (r >> 8) % lv->special == 0) {
+	if (specials && !p->move && !p->stun && grounded(p) && waking < 0 &&
+	    (r >> 8) % lv->special == 0) {
 		unsigned k = own[(r >> 16) % specials];
 		for (unsigned j = 0; dist > 180 && j < specials; j++)
 			if (c->move[own[j]].spawn)
@@ -601,12 +642,16 @@ static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
 		}
 	}
 	/* Each 29-tick window plans one normal: walk in until its hitbox can
-	 * reach the opponent's body, then press it once. */
+	 * reach the opponent's body, then press it once. A knocked-down
+	 * opponent cannot be hit: walk in and wait, and above Easy press so
+	 * the hit lands as it gets up (a meaty). */
 	unsigned window = (s->tick + (unsigned)i * 17) / 29, plan = window * 2654435761u >> 24;
 	int button = (int)(plan & 3), low = (int)(plan >> 2) & 1;
 	const struct move *m = &c->move[strength[button] + (low ? CROUCH_LP : 0)];
 	uint32_t key = dist > m->reach + 20 ? toward : 0;
-	if (!key && !p->move && !p->stun && r % lv->press == 0)
+	int press = waking < 0 ? r % lv->press == 0
+			       : s->level != LEVEL_EASY && waking <= m->startup + 1;
+	if (!key && !p->move && !p->stun && press)
 		key = buttons[button] | (low ? KEY(DOWN) : 0u);
 	if ((r & 255) == 0)
 		key |= KEY(UP);
@@ -643,6 +688,29 @@ static void slide(const struct fight_state *s, const struct assets *a, struct fi
 		q->x = wall(s, a, q->x - dir * rest);
 	if (!p->slide)
 		p->corner = 0;
+}
+/* One unfrozen tick of a knockdown: the slide and the fall go on, FALLING
+ * turns LYING on the tick the fall animation is over on the ground, and
+ * LYING ends down_ticks later. Returns 1 while the fighter is still down
+ * (0: it acts this tick). */
+static int knocked(struct fight_state *s, const struct assets *a, int i)
+{
+	struct fighter *p = &s->p[i];
+	const struct character *c = who(s, a, i);
+	if (p->slide)
+		slide(s, a, p, &s->p[1 - i]);
+	if (!grounded(p))
+		fall(s, a, i);
+	age(p);
+	if (p->down == FALLING && grounded(p) && p->elapsed >= c->action[FALL].total) {
+		p->down = LYING;
+		p->elapsed = 0;
+	} else if (p->down == LYING && p->elapsed >= down_ticks(c)) {
+		p->down = UP;
+		p->elapsed = 0;
+		return 0;
+	}
+	return 1;
 }
 /* The move a press of edge buttons (with keys held) asks for, or -1. */
 static int resolve(const struct fight_state *s, const struct assets *a, int i, uint32_t edge,
@@ -751,6 +819,14 @@ static int update(struct fight_state *s, const struct assets *a, int i, uint32_t
 		p->freeze--;
 		return 1;
 	}
+	/* Knocked down: presses stay buffered (a press in the last buffer
+	 * ticks of the get-up comes out as the fighter rises). */
+	if (p->down && knocked(s, a, i)) {
+		if (p->buffer && ++p->age > c->stats.buffer)
+			p->buffer = p->age = 0;
+		p->x = wall(s, a, p->x);
+		return 0;
+	}
 	if (p->move && p->buffer && cancellable(c, p, p->buffer - 1))
 		start(s, a, i, p->buffer - 1);
 	else if (p->move && ++p->elapsed >= c->move[p->move - 1].anim.total)
@@ -829,6 +905,10 @@ static int contact(const struct fight_state *s, const struct assets *a, int i, i
 	const struct fighter *p = &s->p[i], *q = &s->p[1 - i];
 	if (!p->move || !q->hp)
 		return 0;
+	/* A fighter knocked down is out of reach, except lying for OTG moves. */
+	if (q->down && !(lying(q, who(s, a, 1 - i)) &&
+			 (who(s, a, i)->move[p->move - 1].hit.flags & FLAG_OTG)))
+		return 0;
 	const struct step *hit = &a->step[fight_pose(s, a, i)],
 			  *body = &a->step[fight_pose(s, a, 1 - i)];
 	if (!hit->group || hit->group == p->hit)
@@ -849,6 +929,8 @@ static int shot_hits_body(const struct fight_state *s, const struct assets *a,
 			  const struct shot *sh, int i, int at[2])
 {
 	const struct fighter *q = &s->p[i];
+	if (q->down)
+		return 0;
 	const struct step *hit = &a->step[shot_step(s, a, sh)],
 			  *body = &a->step[fight_pose(s, a, i)];
 	for (unsigned h = 0; h < hit->hit; h++) {
@@ -877,7 +959,8 @@ static int shots_clash(const struct fight_state *s, const struct assets *a,
 /* Can the defender block this hit with these keys? */
 static int blocks(const struct fighter *q, uint32_t keys, const struct hit *h)
 {
-	if (q->move || (q->stun && q->block != 1) || !grounded(q) || !(keys & back_key(q)))
+	if (q->move || q->down || (q->stun && q->block != 1) || !grounded(q) ||
+	    !(keys & back_key(q)))
 		return 0;
 	int low = (keys & KEY(DOWN)) != 0;
 	return h->guard == GUARD_HIGH || (h->guard == GUARD_LOW) == low;
@@ -889,10 +972,12 @@ static int permille(int v, int factor)
 	return v && !r ? 1 : r;
 }
 /* Damage, stun and pushback on fighter q (character qc); a strike also
- * freezes its attacker p (projectiles pass p = NULL). */
+ * freezes its attacker p (projectiles pass p = NULL). knock: an unguarded
+ * knockdown hit that leaves q alive puts it down (FALLING) instead of in
+ * hitstun. */
 static void struck(struct fight_state *s, struct fighter *p, struct fighter *q,
 		   const struct character *qc, const struct hit *h, int guarded, int face,
-		   uint32_t keys, int scale)
+		   uint32_t keys, int scale, int knock)
 {
 	int v = guarded ? h->chip : h->damage;
 	if (scale != 1000)
@@ -906,6 +991,11 @@ static void struck(struct fight_state *s, struct fighter *p, struct fighter *q,
 		q->crouch = (keys & KEY(DOWN)) != 0;
 	if (q->y)
 		q->crouch = 0;
+	q->down = UP;
+	if (knock && !guarded && q->hp) {
+		q->down = FALLING;
+		q->stun = q->block = q->crouch = q->walk = 0;
+	}
 	int push = guarded ? h->block_pushback : h->pushback;
 	q->slide = face * clamp((push * 1000 + qc->stats.weight / 2) / qc->stats.weight, 0,
 				MAX_SLIDE);
@@ -1047,8 +1137,10 @@ static void combat(struct fight_state *s, const struct assets *a, const uint32_t
 			continue;
 		struct fighter *p = &s->p[i];
 		int alive = s->p[1 - i].hp > 0;
+		/* Only a move's last hit group knocks down. */
 		struck(s, p, &s->p[1 - i], who(s, a, 1 - i), &move[i]->hit, guarded[i], p->face,
-		       keys[1 - i], scale[i]);
+		       keys[1 - i], scale[i],
+		       (move[i]->hit.flags & FLAG_KNOCKDOWN) && group[i] == move[i]->groups);
 		if (!guarded[i])
 			count_hit(s, i, stunned[1 - i]);
 		react(s, a, i, &move[i]->hit, p->move, move[i]->slash, guarded[i], at[i], p->face,
@@ -1062,7 +1154,7 @@ static void combat(struct fight_state *s, const struct assets *a, const uint32_t
 			int d = 1 - sh->owner, alive = s->p[d].hp > 0;
 			const struct hit *h = &shot_type(s, a, sh)->hit;
 			struck(s, NULL, &s->p[d], who(s, a, d), h, shot_guard[k], sh->face, keys[d],
-			       scale[sh->owner]);
+			       scale[sh->owner], h->flags & FLAG_KNOCKDOWN);
 			if (!shot_guard[k])
 				count_hit(s, sh->owner, stunned[d]);
 			react(s, a, sh->owner, h, 0, 0, shot_guard[k], shot_at[k], sh->face,
@@ -1254,7 +1346,9 @@ void fight_step(struct fight_state *s, const struct assets *a, uint32_t input,
 			struct fighter *p = &s->p[i];
 			if (p->move)
 				p->move = p->elapsed = p->hit = 0;
-			if (!grounded(p))
+			if (p->down)
+				knocked(s, a, i);
+			else if (!grounded(p))
 				fall(s, a, i);
 			p->walk = 0;
 		}
@@ -1849,7 +1943,7 @@ hud:
 		pause_panel(out, s, a);
 }
 /* ---- state words ---- */
-#define FIGHTER_WORDS 27
+#define FIGHTER_WORDS 28
 #define SHOT_WORDS 6
 #define GLOBAL_WORDS 19
 #define SHOTS_AT (GLOBAL_WORDS + 2 * FIGHTER_WORDS)
@@ -1872,12 +1966,12 @@ static void fighter_fields(struct fighter *p, int32_t *v[FIGHTER_WORDS])
 	int32_t *f[] = {&p->x,	   &p->y,     &p->vy,	     &p->hp,	&p->face,  &p->walk,
 			&p->block, &p->crouch, &p->move,     &p->elapsed, &p->hit,   &p->stun,
 			&p->freeze, &p->slide, &p->keys,     &p->corner, &p->squat, &p->buffer,
-			&p->age,   &p->plan,   &p->plan_tick, &p->clock};
-	for (int k = 0; k < 22; k++)
+			&p->age,   &p->plan,   &p->plan_tick, &p->clock, &p->down};
+	for (int k = 0; k < 23; k++)
 		v[k] = f[k];
-	v[22] = (int32_t *)(void *)&p->charge;
+	v[23] = (int32_t *)(void *)&p->charge;
 	for (int k = 0; k < HISTORY / 8; k++)
-		v[23 + k] = (int32_t *)(void *)&p->history[k];
+		v[24 + k] = (int32_t *)(void *)&p->history[k];
 }
 static void global_fields(struct fight_state *s, uint32_t *v[GLOBAL_WORDS])
 {
@@ -1971,6 +2065,11 @@ static int valid(const struct fight_state *s, const struct fighter *p, const str
 			return 0;
 	}
 	if (p->squat && (!grounded(p) || p->move || p->stun))
+		return 0;
+	/* Down: nothing else going on; lying ends within down_ticks. */
+	if (p->down < UP || p->down >= DOWN_PHASES ||
+	    (p->down && (p->move || p->stun || p->block || p->crouch || p->squat || p->walk)) ||
+	    (p->down == LYING && (!grounded(p) || p->elapsed >= down_ticks(c))))
 		return 0;
 	if (p->move) {
 		const struct move *m = &c->move[p->move - 1];
@@ -2110,7 +2209,7 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 	}
 	/* Nothing moves during the versus card and READY. */
 	for (int i = 0; t.mode == MODE_FIGHT && t.timer < ROUND_TICKS && i < 2; i++)
-		if (t.p[i].move || t.p[i].stun || t.p[i].buffer || owned[i])
+		if (t.p[i].move || t.p[i].stun || t.p[i].down || t.p[i].buffer || owned[i])
 			return 0;
 	*s = t;
 	return 1;

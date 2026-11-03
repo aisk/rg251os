@@ -1,5 +1,5 @@
 /* Renderer and pack-decoder regression for the fighter core, linked into the
- * callback harness (test.c). It writes its own FIGHTP08 packs from known
+ * callback harness (test.c). It writes its own FIGHTP09 packs from known
  * bitmaps, two system profiles, two spark anims and a three-layer stage,
  * checks that malformed or truncated packs (including bad systems, stats,
  * classes, class defaults, sparks, walls, effect sets, slash and home
@@ -259,7 +259,7 @@ enum field {
 	F_FOLLOW_AFTER, F_FOLLOW_OPEN, F_FOLLOW_CLOSE, F_FOLLOW_CONTACT, F_PROJ_FIRST, F_PROJ_COUNT, F_PROJ_SPEED, F_PROJ_LIFETIME,
 	F_PROJ_X, F_PROJ_Y, F_PROJ_DAMAGE, F_PROJ_CHIP, F_PROJ_HITSTUN, F_PROJ_BLOCKSTUN,
 	F_PROJ_HITSTOP, F_PROJ_PUSHBACK, F_PROJ_BLOCK_PUSH, F_PROJ_GUARD, F_PROJ_BLEND,
-	F_PROJ_ALPHA, F_PROJ_CLASS, F_PROJ_DEFAULTS, F_STEP_FRAME, F_STEP_TICKS, F_STEP_BOX, F_STEP_HURT, F_ACTION_STEP_HIT,
+	F_PROJ_ALPHA, F_PROJ_CLASS, F_PROJ_DEFAULTS, F_PROJ_FLAGS, F_STEP_FRAME, F_STEP_TICKS, F_STEP_BOX, F_STEP_HURT, F_ACTION_STEP_HIT,
 	F_ACTION_STEP_VX, F_ACTION_STEP_SPAWN, F_MOVE_STEP_TICKS, F_RISE_VY, F_LAND_VY,
 	F_RISE_VX, F_RISE_SPAWN, F_PROJ_STEP_HURT, F_PROJ_STEP_HIT, F_PROJ_STEP_VX,
 	F_BOX_X, F_BOX_Y, F_BOX_W, F_BOX_H, F_EFFECT_FRAME, F_EFFECT_PALETTE,
@@ -273,7 +273,7 @@ enum field {
 	F_STAT_WALK, F_STAT_HEIGHT, F_DEF_HITSTUN, F_DEF_CLASS, F_DEF_DEFAULTS,
 	/* Sparks (the first one), walls and effect sets, slash and home. */
 	F_SPARKS, F_STAGES, F_SPARK_BLEND, F_SPARK_ALPHA, F_SPARK_STEPS, F_SPARK_FRAME,
-	F_SPARK_PALETTE, F_SPARK_TICKS, F_SYS_MARGIN, F_SYS_PLAY, F_SYS_EFFECT, F_CHAR_SLASH,
+	F_SPARK_PALETTE, F_SPARK_TICKS, F_SYS_MARGIN, F_SYS_PLAY, F_SYS_EFFECT, F_SYS_WAKEUP, F_MOVE_FLAGS, F_CHAR_SLASH,
 	F_CHAR_HOME,
 	/* The stage, its first layer and that layer's first anim step. */
 	F_STAGE_NAME_LEN, F_STAGE_NAME_CHAR, F_STAGE_WIDTH, F_STAGE_GROUND, F_STAGE_SYSTEM,
@@ -389,6 +389,9 @@ static void systems(struct pack *p)
 				MARK(F_SYS_EFFECT);
 			put(p, syn_fx[k][j], 2);
 		}
+		if (!k)
+			MARK(F_SYS_WAKEUP);
+		put(p, k ? 30 : 25, 2);
 	}
 }
 /* One character "SYN" on system 0 with its own walk 10 and height high:
@@ -502,7 +505,7 @@ static int syn_hurts(unsigned i) { return i < 14; }
 static void build(struct pack *p, int automatic)
 {
 	memset(p, 0, sizeof(*p));
-	memcpy(p->data, "FIGHTP08", 8);
+	memcpy(p->data, "FIGHTP09", 8);
 	p->len = 16;
 	MARK(F_FLAGS);
 	put(p, (unsigned)automatic, 4);
@@ -627,11 +630,13 @@ static void build(struct pack *p, int automatic)
 	for (unsigned t = 0; t <= MOVES + 1; t++) {
 		/* kind, trigger, buttons, first, count, damage, chip, hitstun,
 		 * blockstun, hitstop, pushback, block pushback, guard, cancel,
-		 * class, defaults, after, open, close, contact; crouch HK takes
-		 * its stuns from class heavy. The second special is a follow-up
-		 * of the first (forward + HK during its ticks 1..2, on contact). */
+		 * class, defaults, after, open, close, contact, flags; crouch HK
+		 * takes its stuns from class heavy and knocks down, the special
+		 * knocks down and hits lying fighters. The second special is a
+		 * follow-up of the first (forward + HK during its ticks 1..2, on
+		 * contact). */
 		int heavy = t == CROUCH_HK, follow = t == MOVES + 1;
-		const unsigned v[20] = {t >= MOVES,
+		const unsigned v[21] = {t >= MOVES,
 					follow	    ? HOLD_6
 					: t == MOVES ? MOTION_236
 						     : t,
@@ -643,7 +648,8 @@ static void build(struct pack *p, int automatic)
 					10 + t, t, heavy ? 0 : 5 + t, heavy ? 0 : 3 + t, heavy ? 0 : 2, 6, 8,
 					t % GUARD_TYPES, t & CANCEL_MASK,
 					heavy ? CLASS_HEAVY : t >= MOVES ? CLASS_SPECIAL : CLASS_NONE,
-					heavy ? 7 : 0, follow ? MOVES + 1 : 0, follow, follow * 2, follow};
+					heavy ? 7 : 0, follow ? MOVES + 1 : 0, follow, follow * 2, follow,
+					heavy ? FLAG_KNOCKDOWN : t == MOVES ? FLAG_KNOCKDOWN | FLAG_OTG : 0};
 		if (t == STAND_HK) {
 			for (int j = 0; j < 16; j++)
 				p->at[F_MOVE_KIND + j] = p->len + 2 * (size_t)j;
@@ -661,11 +667,12 @@ static void build(struct pack *p, int automatic)
 				p->at[F_FOLLOW_AFTER + j] = p->len + 32 + 2 * (size_t)j;
 		}
 		if (heavy) {
+			p->at[F_MOVE_FLAGS] = p->len + 40;
 			p->at[F_DEF_HITSTUN] = p->len + 14;
 			p->at[F_DEF_CLASS] = p->len + 28;
 			p->at[F_DEF_DEFAULTS] = p->len + 30;
 		}
-		for (int j = 0; j < 20; j++)
+		for (int j = 0; j < 21; j++)
 			put(p, v[j], 2);
 		/* Names: none for normals, "SP-1" and "FU 2" for the specials. */
 		if (t == STAND_HK)
@@ -681,10 +688,10 @@ static void build(struct pack *p, int automatic)
 	}
 	/* first, count, speed, lifetime, x, y, damage, chip, hitstun,
 	 * blockstun, hitstop (from class special), pushback, block pushback,
-	 * guard, blend, alpha, class, defaults */
-	const unsigned proj[18] = {14, 2, 5, 50, 10, (uint16_t)-5, 40, 9, 12, 9, 0, 10, 12,
-				   GUARD_LOW, ALPHA, 200, CLASS_SPECIAL, DEFAULT_HITSTOP};
-	for (int j = 0; j < 18; j++) {
+	 * guard, blend, alpha, class, defaults, flags (knocks down) */
+	const unsigned proj[19] = {14, 2, 5, 50, 10, (uint16_t)-5, 40, 9, 12, 9, 0, 10, 12,
+				   GUARD_LOW, ALPHA, 200, CLASS_SPECIAL, DEFAULT_HITSTOP, FLAG_KNOCKDOWN};
+	for (int j = 0; j < 19; j++) {
 		p->at[F_PROJ_FIRST + j] = p->len;
 		put(p, proj[j], 2);
 	}
@@ -893,6 +900,8 @@ static void malformed(void)
 	    {F_SPARK_TICKS, 256, 2},	    {F_SYS_MARGIN, MIN_MARGIN - 1, 2},
 	    {F_SYS_MARGIN, MAX_MARGIN + 1, 2}, {F_SYS_PLAY, MIN_PLAY_WIDTH - 1, 2},
 	    {F_SYS_PLAY, FW + 1, 2},	    {F_SYS_EFFECT, 3, 2},
+	    {F_SYS_WAKEUP, 0, 2},	    {F_SYS_WAKEUP, MAX_WAKEUP + 1, 2},
+	    {F_MOVE_FLAGS, FLAG_MASK + 1, 2}, {F_PROJ_FLAGS, FLAG_OTG, 2},
 	    {F_CHAR_SLASH, 32, 2},	    {F_CHAR_HOME, 2, 2},
 	    /* Stages, layers and stage anims. */
 	    {F_STAGE_NAME_LEN, 0, 1},	    {F_STAGE_NAME_LEN, MAX_NAME + 1, 1},
@@ -937,9 +946,9 @@ static void malformed(void)
 	bad.data[bad.len++] = 0;
 	seal(&bad);
 	assert(!load(&assets_a, &bad));
-	for (char v = '1'; v <= '7'; v++) {
+	for (char v = '1'; v <= '8'; v++) {
 		bad = good;
-		bad.data[7] = (uint8_t)v; /* FIGHTP01..07: retired formats */
+		bad.data[7] = (uint8_t)v; /* FIGHTP01..08: retired formats */
 		assert(!load(&assets_a, &bad));
 	}
 	bad = good;
@@ -1168,7 +1177,9 @@ static void synthetic_moves(struct assets *a)
 	       pr->lifetime == 50 && pr->x == 10 && pr->y == -5 && pr->hit.damage == 40 &&
 	       pr->hit.chip == 9 && pr->hit.hitstun == 12 && pr->hit.hitstop == 10 &&
 	       pr->hit.cls == CLASS_SPECIAL && pr->hit.guard == GUARD_LOW && pr->blend == ALPHA &&
-	       pr->alpha == 200 && !a->step[pr->anim.first].hurt);
+	       pr->alpha == 200 && !a->step[pr->anim.first].hurt && pr->hit.flags == FLAG_KNOCKDOWN);
+	assert(ch->move[CROUCH_HK].hit.flags == FLAG_KNOCKDOWN && !ch->move[STAND_HK].hit.flags &&
+	       ch->move[MOVES].hit.flags == (FLAG_KNOCKDOWN | FLAG_OTG) && ch->stats.wakeup == 25);
 	/* Stats: system "kof" with SYN's own walk 10 and height high; the jump
 	 * -48/3 peaks at 96 px and a fall from MAX_HEIGHT reaches vy 87. */
 	const struct stats *st = &ch->stats;
