@@ -11,6 +11,8 @@ Boxed sheets (kilburto's Spriters Resource exports: every frame in its own
 background box, boxes separated by lines of a "separator" colour, which the
 sprites may use too) have neither; a frame must lie inside one box, with
 background or the box's edge around it.
+A sheet may instead set "boxed" to the separator colour: then every frame
+rectangle is one whole box, its border all separator or all background.
 "mirror": true marks a sheet drawn facing left: frames are flipped as they
 are read, so anchors, hurtboxes and hitboxes describe the right-facing frame
 (the anchor is relative to the flipped rectangle).
@@ -406,7 +408,16 @@ class Sheet:
         self.mirror = self.m.get('mirror', False) is True
         sep = self.m.get('separator')
         self.sep = bytes.fromhex(sep) if sep else None
-        if self.sep:
+        # "boxed" is the stricter form: every frame is one whole box, so its
+        # border is all separator (or all background).
+        self.boxed = bytes.fromhex(self.m['boxed']) if 'boxed' in self.m else None
+        if self.sep and self.boxed:
+            raise ValueError(f'{path}: use either separator or boxed')
+        if self.boxed == self.bg:
+            raise ValueError(f'{path}: the box separator is the background colour')
+        if self.boxed:
+            self.credit, self.underlines = (0, 0), []
+        elif self.sep:
             # Boxed sheet: no credit box and no underlines.
             self.credit, self.underlines = (0, 0), []
             self.boxes = box_rects(self)
@@ -475,7 +486,13 @@ class Sheet:
         # reaches into its neighbour. On a boxed sheet the rectangle must lie
         # in one box and the border is background or that box's edge.
         inbox = lambda xx, yy: True
-        if self.sep:
+        if self.boxed:
+            ring = {self.px(xx, yy) for xx in range(x - 1, x + w + 1) for yy in (y - 1, y + h)}
+            ring |= {self.px(xx, yy) for xx in (x - 1, x + w) for yy in range(y - 1, y + h + 1)}
+            if ring not in ({self.bg}, {self.boxed}):
+                raise ValueError(f'{name}: no background border and not one whole box')
+            inbox = lambda xx, yy: False
+        elif self.sep:
             box = next((b for b in self.boxes if b[0] <= x and b[1] <= y and
                         x + w <= b[0] + b[2] and y + h <= b[1] + b[3]), None)
             if box is None:
