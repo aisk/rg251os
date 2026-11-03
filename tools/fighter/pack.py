@@ -330,8 +330,8 @@ ESTIMATE_WARNING = 50
 
 
 def read_png(path, alpha=False):
-    """Decode an 8-bit, non-interlaced RGB, RGBA or palette PNG to (w, h, RGB
-    rows); with alpha, RGBA rows are returned as they are (RGB and palette rows
+    """Decode a non-interlaced 8-bit RGB or RGBA PNG, or a palette PNG of 1, 2,
+    4 or 8 bits, to (w, h, RGB rows); with alpha, RGBA rows are returned as they are (RGB and palette rows
     get alpha 255; a palette image's tRNS is ignored)."""
     data = pathlib.Path(path).read_bytes()
     if data[:8] != b'\x89PNG\r\n\x1a\n':
@@ -348,10 +348,11 @@ def read_png(path, alpha=False):
             plte = body
         pos += 12 + n
     w, h, depth, color, _, _, interlace = header
-    if depth != 8 or color not in (2, 3, 6) or interlace or (color == 3 and plte is None):
-        raise ValueError(f'{path}: only 8-bit non-interlaced RGB/RGBA/palette is supported')
+    if (depth != 8 and not (color == 3 and depth in (1, 2, 4)) or color not in (2, 3, 6) or
+            interlace or (color == 3 and plte is None)):
+        raise ValueError(f'{path}: only non-interlaced 8-bit RGB/RGBA or 1/2/4/8-bit palette is supported')
     bpp = {2: 3, 3: 1, 6: 4}[color]
-    stride = w * bpp
+    stride = (w * depth + 7) // 8 if color == 3 else w * bpp
     raw = zlib.decompress(b''.join(idat))
     if len(raw) != h * (stride + 1):
         raise ValueError(f'{path}: truncated image data')
@@ -380,6 +381,10 @@ def read_png(path, alpha=False):
             raise ValueError(f'{path}: bad filter {kind} on row {y}')
         prev = line
         if color == 3:
+            if depth < 8:
+                per = 8 // depth
+                line = [b >> (8 - depth * (k + 1)) & (1 << depth) - 1
+                        for b in line for k in range(per)][:w]
             if max(line) * 3 + 3 > len(plte):
                 raise ValueError(f'{path}: palette index out of range on row {y}')
             line = b''.join(plte[i * 3:i * 3 + 3] for i in line)

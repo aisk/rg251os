@@ -39,7 +39,7 @@
 #define MAX_FRAMES 4096
 #define MAX_ROWS (1u << 19)
 #define MAX_SPANS (1u << 20)
-#define MAX_INDICES (1u << 23)
+#define MAX_INDICES (1u << 24)
 #define MAX_IMAGES 1024
 #define MAX_PIXELS (1u << 22)
 #define MAX_STEPS 16384

@@ -45,7 +45,7 @@
 
 资源格式是 FIGHTP07，布局写在 `tools/fighter/pack.py` 开头，清单 schema 写在 `assets/fighter/README.md`。帧按实际内容裁边、尺寸可变、各带脚底锚点，按行存不透明 span 的调色板索引，调色板和帧都带图集编号。规则只给出“动作和已经过的 tick”，`fight_scene` 按包里的动画挑帧，渲染层不知道锚点。旧格式直接拒绝，不迁移。
 
-一个包由 `assets/fighter/roster.json` 列出的多个清单组成，每个清单对应一张图集，也能单独打包测试。整个阵容的调色板索引帧常驻，RGB565 缓存分三个区（舞台按最大舞台、两侧各按最大角色分配），加载时证明任意两人加任意舞台加特效都放得下。上限 32 个角色、4096 帧、每个角色 8 个必杀技和 4 种飞行道具，静态 BSS 约 23 MB（只有用到的页面占内存）。现在 7 个角色时每包约 2.8 MB，常驻内存（帧索引约 2 MiB、span 约 0.9 MiB）写进加载日志。整包打包约 40 秒（纯 Python 解 PNG）。
+一个包由 `assets/fighter/roster.json` 列出的多个清单组成，每个清单对应一张图集，也能单独打包测试。整个阵容的调色板索引帧常驻，RGB565 缓存分三个区（舞台按最大舞台、两侧各按最大角色分配），加载时证明任意两人加任意舞台加特效都放得下。上限 32 个角色、4096 帧、每个角色 8 个必杀技和 4 种飞行道具，帧索引上限 16 MiB（18 人时用了约 8.3 MiB），静态 BSS 约 31 MB（只有用到的页面占内存）。现在 7 个角色时每包约 2.8 MB，常驻内存（帧索引约 2 MiB、span 约 0.9 MiB）写进加载日志。整包打包约 40 秒（纯 Python 解 PNG）。
 
 渲染缓存（boot-0017 卡顿的修复）：`fight_want` 只记下当前画面要谁，换人时清空对应区，不展开；选人、结果和通关画面只要 P1 一侧。每次 run 先用 `fight_prefetch` 展开最多 48K 像素（舞台逐行续做，然后 P1、P2），再建场景，场景里还没展开的帧记为 miss，`fight_demand` 只补这几帧后重建场景。所以选人移一次光标只展开一个角色的当前帧加少量预取，闯关每局开头的 0.75 秒对阵卡（`INTRO_TICKS` 45，显示关卡、双方、名字和舞台名，期间规则不动，按住的键只记录不算按下）足够把整套分片展开完。主机上整套展开约 1 ms（0.49 ns/像素），单次 run 最多约 5.7 万像素，按真机旧数据（约 20 ns/像素）估 1.2 ms，600 MHz 约 1.7 ms。输出与一次性全部展开逐像素相同（`test-render.c` 用选人移光标和 9000 帧 Auto 对比）。缓存不进存档；对战中读档会阻塞地一次展开并记日志。日志：每次填满记 `fight: cast A vs B on 舞台 ready in N runs`（像素、缓存总耗时和单次最大耗时、按需帧数、被取代的次数、各区常驻大小），场景计时多一项 cache。
 
@@ -184,6 +184,7 @@ python3 tools/fighter/report.py /path/to/log/boot-NNNN/
    - Capcom 角色走 SVC Chaos 版：SVC 是 SNK Playmore 在 Neo Geo 上按 KOF 尺度重画的，和现有角色像素比、身高一致，招式也是 KOF 风格，可以直接归入 kof2002 体系。来源首选 Spriters Resource 上 kilburto 的 SVC 全帧索引 PNG（脚本被拒，需用户手动下载），MUGEN 的 SVC 移植包作为帧数据参考。
    - 用户手动下载的图集放在本机 `build/fighter/source/manual/`（不提交）：SVC 的色、Zero、火星人，Waku Waku 7 的 Arina 和 Politank-Z，侍魂 V Special 的莉姆露露，Rage of the Dragons 的 Sonia。
    - 已导入 SVC 的 Zero 和火星人（`zero.json`、`mars_people.json`）。kilburto 图集是索引色、每帧一个 ff00ff 框、朝左，`pack.py` 为此加了 `separator` 和 `mirror`。帧序、锚点和判定框取自 KOF EXUM 的 MUGEN 包，按镜像后的不透明形状与图集框逐一匹配；像素用图集的，`original` 配色映射回 SFF 的 Neo Geo 5 位色。Zero 的 MUGEN 包是洛克人 Zero 改版，必杀技按图集挑选，指令是我们定的；两人站高 87 和 99 px。
+   - 已导入 Waku Waku 7 的 Arina 和 Politank-Z（`arina.json`、`politank.json`，kilburto 的 4 位索引图集，每帧一整个框，用 `boxed`；`read_png` 为此支持了 1/2/4 位调色板 PNG）和 Rage of the Dragons 的 Sonia（`sonia.json`，rgveda99 提取、the shirt ninja 整理）。Arina 的锚点、帧时长和判定框取自 NHK 的 MUGEN 包（按形状对上 596/651 帧），Arina Beam 的星星不在图集里，Arina Crash 的空中追加段也没导入（追加招必须从地面开始）。Politank-Z 没有 MUGEN 参考，锚点按 16 px 网格和头顶信号灯推断，蹲姿是坦克形态，站高 128 px 是阵容里最高的，体力 1100、防御 900、体重 1500、走速 4/3、跳得更低。Sonia 按图集标签取帧，站高 106 px。三人的指令、按键归属和数值都是估计（见各清单 notes），都没有声音来源。
 6. **数值体系**：[数值设计](fighter-stats.md)的第一步已完成。`assets/fighter/systems.json` 定义 `kof2002`（参考尺度，默认）和 `samsho5sp`（伤害按 800 千分比缩放，跳跃 -42/2 而不是设计稿的 -56/2，后者会飞出屏幕），霸王丸通过其中的 `characters` 映射归入侍魂体系。体力、防御倍率、体重、走速、跳跃、prejump、推挤距离、防御显示距离和输入窗口都从 C 常量搬进了数据，由体系默认值加角色覆盖合成；招式有 `class`（light/heavy/special 等），没写的硬直和 hitstop 取体系表；`src` 和顶层 `sources` 记录来源，只在 `pack.py data` 里统计，不进包。`tools/fighter/convert-stats.py` 已经把全部清单补上 system、class 和 src（数值不变，可重复运行）；`--adopt-class` 会让普通技改用体系表的硬直（KOF 2002 轻 11/9、重 19/17，来自 Dream Cancel），会改变帧数据，还没用。KOF 角色走速从 2/2 px 变为 1.75/1.5 px。下一步是护栏和命中效果（与投技、倒地一起）。
 7. **表现层（2026-11-04 完成第一版）**：按[表现层设计](fighter-presentation.md)实现。
    - 镜头和墙：`cam` 在规则状态里，取两人中点夹在舞台范围内；墙是舞台墙加屏幕墙（体系的 `margin` 24、`play_width` 480），两人最远拉开 432 px，墙角推开转移对两种墙都生效，飞行道具出镜头 64 px 消失。

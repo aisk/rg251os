@@ -237,8 +237,50 @@ def main():
         path = ASSETS / name
         text = path.read_text()
         assert convert.convert(text, json.loads(text), real, False, lambda _: None) == text, name
+    low_depth_boxed_sheet()
     print('pack-test: systems.json, stats, class defaults, damage scale, follow-ups, '
-          'src/sources validation and conversion passed')
+          'src/sources validation, conversion and 4-bit boxed sheets passed')
+
+
+def low_depth_boxed_sheet():
+    """A 4-bit palette sheet of two boxes whose lines are also the sprites'
+    outline colour decodes through its palette, a whole box is a frame (the
+    outline colour inside it stays a sprite colour) and a rectangle cutting a
+    sprite is refused."""
+    import hashlib
+    import struct
+    import zlib
+    pal = [(255, 0, 255), (24, 16, 16), (200, 100, 50)]
+    w, h = 13, 7
+    grid = [[1] * w for _ in range(h)]
+    for y in range(1, 6):
+        for x in list(range(1, 6)) + list(range(7, 12)):
+            grid[y][x] = 0
+    grid[3][2:5] = [1, 2, 2]     # an outlined sprite in the left box
+    grid[5][9] = 2               # one touching the bottom line of the right box
+    raw = b''.join(b'\0' + bytes((r[x] << 4) | (r[x + 1] if x + 1 < w else 0)
+                                 for x in range(0, w, 2)) for r in grid)
+
+    def chunk(k, b):
+        return struct.pack('>I', len(b)) + k + b + struct.pack('>I', zlib.crc32(k + b))
+    png = (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 4, 3, 0, 0, 0)) +
+           chunk(b'PLTE', bytes(v for c in pal for v in c)) + chunk(b'IDAT', zlib.compress(raw)) +
+           chunk(b'IEND', b''))
+    with tempfile.TemporaryDirectory() as d:
+        sheet = pathlib.Path(d) / 'boxed.png'
+        sheet.write_bytes(png)
+        rw, rh, rows = pack.read_png(sheet)
+        assert (rw, rh) == (w, h) and rows[3][6:15] == bytes([24, 16, 16, 200, 100, 50, 200, 100, 50])
+        man = pathlib.Path(d) / 'boxed.json'
+        man.write_text(json.dumps({
+            'sheet': 'boxed.png', 'sha256': hashlib.sha256(png).hexdigest(), 'background': 'ff00ff',
+            'boxed': '181010',
+            'frames': {'a': [1, 1, 5, 5, 2, 5], 'b': [7, 1, 5, 5, 2, 5], 'cut': [1, 1, 3, 5, 1, 5]}}))
+        s = pack.Sheet(man)
+        pix, ax, ay = s.frame('a')
+        assert pix == [[b'\x18\x10\x10', b'\xc8\x64\x32', b'\xc8\x64\x32']] and (ax, ay) == (1, 3)
+        assert s.frame('b')[0] == [[b'\xc8\x64\x32']]
+        refused('a rectangle cutting a sprite', lambda: s.frame('cut'))
 
 
 if __name__ == '__main__':
