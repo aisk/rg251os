@@ -3,8 +3,8 @@
  * motion and charge commands, cancels, projectiles with clashes, hurt/hit
  * boxes from the pack, hitstop, hitstun, blockstun, high/low/overhead guard,
  * pushback with corner transfer, KO, AI (with specials), the select, result
- * and clear screens and the stress scenes, plus the draw-command list (L
- * overlays the real boxes). Rules pick an action or move and its elapsed
+ * and clear screens and the stress scenes, plus the draw-command list (the
+ * attacking fighter drawn on top, L overlays the real boxes). Rules pick an action or move and its elapsed
  * ticks; the pack's steps map that onto frames, boxes and motion, so what is
  * drawn is what collides. Coordinates are integer pixels, jumps use
  * quarter-pixel vertical velocity.
@@ -953,6 +953,20 @@ static void number(char *out, unsigned v)
 	*out++ = (char)('0' + v % 10);
 	*out = 0;
 }
+/* Which fighter is drawn on top: the one in a move (the more recent move if
+ * both are), else the one not stunned, else player 2 as before, so an attack is never
+ * hidden behind the defender. Derived from the state, nothing is stored. */
+static int front_fighter(const struct fight_state *s)
+{
+	const struct fighter *p = s->p, *q = s->p + 1;
+	if (p->move && q->move)
+		return q->elapsed < p->elapsed;
+	if (p->move || q->move)
+		return q->move != 0;
+	if (!p->stun != !q->stun)
+		return p->stun != 0;
+	return 1;
+}
 void fight_scene(const struct fight_state *s, const struct assets *a, struct scene *out)
 {
 	out->count = out->effects_requested = out->effects_drawn = 0;
@@ -965,9 +979,12 @@ void fight_scene(const struct fight_state *s, const struct assets *a, struct sce
 		return;
 	}
 	stage(out);
-	for (int i = 0; i < 2; i++) {
+	for (int i = 0; i < 2; i++)
+		rect(out, s->p[i].x - 30, GROUND - 4, 60, 6, 0, ALPHA, 120);
+	int front = front_fighter(s);
+	for (int n = 0; n < 2; n++) {
+		int i = n ? front : !front;
 		const struct fighter *p = &s->p[i];
-		rect(out, p->x - 30, GROUND - 4, 60, 6, 0, ALPHA, 120);
 		/* Sheet art faces right; the foot anchor stands on the ground. */
 		const struct step *st = &a->step[fight_pose(s, a, i)];
 		int im = cast_image(s, a, i, st->frame);

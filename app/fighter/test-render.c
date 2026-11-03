@@ -750,6 +750,28 @@ static void synthetic_moves(struct assets *a)
 /* Every real step's boxes cover the same sprite pixels in both facings.
  * The idle step is pointed at each frame in turn so fight_scene places the
  * sprite itself; opaque pixels are those that match on two backgrounds. */
+/* The attacker is drawn over the defender whichever side it is on. */
+static void attacker_front(struct assets *a)
+{
+	static struct scene s;
+	struct fight_state st;
+	for (int who = 0; who < 2; who++) {
+		fight_reset(&st, 0);
+		fight_start(&st, 0, 0);
+		fight_cast(a, &st);
+		st.p[0].x = 230;
+		st.p[1].x = 250;
+		st.p[who].move = 1;
+		st.p[!who].stun = 10;
+		fight_scene(&st, a, &s);
+		int last = -1;
+		for (unsigned k = 0; k < s.count; k++)
+			if (s.cmd[k].op == SPRITE && s.cmd[k].blend == OPAQUE)
+				last = (int)k;
+		int frame = a->step[fight_pose(&st, a, who)].frame;
+		assert(last >= 0 && s.cmd[last].image == a->look[who][frame]);
+	}
+}
 static void box_flip(struct assets *a)
 {
 	static struct scene s;
@@ -921,6 +943,7 @@ void render_tests(const uint8_t *real, size_t real_len)
 	game_scenes(&assets_a, &dec);
 	release(&dec);
 	box_flip(&assets_a);
+	attacker_front(&assets_a);
 	overlay(&assets_a);
 	effect_cap(&assets_a);
 	if (getenv("FIGHTER_BENCH"))
