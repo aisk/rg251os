@@ -51,7 +51,7 @@ const char *const color_mode_names[COLOR_COUNT] = {
 const char *const color_mode_labels[COLOR_COUNT] = {
 	"Off", "GBA", "GBA light", "SP101", "Auto",
 };
-const char *const core_names[CORE_COUNT] = { "mgba", "gpsp", "video" };
+const char *const core_names[CORE_COUNT] = { "mgba", "gpsp", "video", "fighter" };
 const char *const frameskip_names[FRAMESKIP_COUNT] = {
 	"off", "auto", "1", "2", "3",
 };
@@ -60,7 +60,7 @@ const char *const frameskip_labels[FRAMESKIP_COUNT] = {
 };
 const char *const video_scale_names[VIDEO_SCALE_COUNT] = { "fit", "crop" };
 const char *const video_scale_labels[VIDEO_SCALE_COUNT] = { "Fit", "Crop" };
-const char *const core_labels[CORE_COUNT] = { "mGBA", "gpSP", "Video" };
+const char *const core_labels[CORE_COUNT] = { "mGBA", "gpSP", "Video", "Fighter" };
 
 const struct settings settings_defaults = {
 	.volume = 255,
@@ -340,7 +340,7 @@ void rom_settings_load(const char *rom_name)
 	n = load_file(path, &rom_settings, rom_fields, ARRAY_SIZE(rom_fields),
 		      &rom_in_file);
 	/* A video uses only cpu_start: the GBA settings stay out of its line. */
-	if (romdb_is_video(rom_name))
+	if (romdb_is_video(rom_name) || romdb_is_fighter(rom_name))
 		snprintf(line, sizeof(line), "cpu_start=%d",
 			 rom_settings.cpu_start);
 	else

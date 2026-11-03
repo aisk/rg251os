@@ -1,6 +1,6 @@
 # SD card image assembled with genimage from the kernel, dtb, bootloader
 # blob and rootfs. The GBA partition is filled from the genimage root path,
-# which holds the empty roms/ and saves/ directories (the frontend creates
+# which holds the POC .fight content in roms/ and an empty saves/ directory (the frontend creates
 # the rest on first boot). Needs genimage, mtools and dosfstools on the
 # host.
 
@@ -17,7 +17,7 @@ GENIMAGE ?= genimage
 IMAGE_PATH := /usr/sbin:/sbin:$(PATH)
 
 $(SDCARD_IMG): $(LINUX_IMAGE) $(LINUX_DTB) $(BOOT_BLOB) $(BOOT_BLOB_STAMP) $(ROOTFS_IMG) \
-		$(GENIMAGE_CFG) $(EXTLINUX_CONF) $(BOOT_INI) $(TOP)/mk/image.mk
+		$(GENIMAGE_CFG) $(EXTLINUX_CONF) $(BOOT_INI) $(TOP)/mk/image.mk $(FIGHTER_CONTENT)
 	@missing=; \
 	for t in $(GENIMAGE):genimage mcopy:mtools mmd:mtools mkdosfs:dosfstools; do \
 		PATH=$(IMAGE_PATH) command -v $${t%%:*} >/dev/null 2>&1 || missing="$$missing $${t#*:}"; \
@@ -29,6 +29,7 @@ $(SDCARD_IMG): $(LINUX_IMAGE) $(LINUX_DTB) $(BOOT_BLOB) $(BOOT_BLOB_STAMP) $(ROO
 	fi
 	rm -rf $(IMAGES_DIR) $(GENIMAGE_TMP)
 	mkdir -p $(IMAGES_DIR)/extlinux $(GENIMAGE_TMP)/root/roms $(GENIMAGE_TMP)/root/saves
+	cp $(FIGHTER_CONTENT) $(GENIMAGE_TMP)/root/roms/
 	cp $(LINUX_IMAGE) $(IMAGES_DIR)/Image
 	cp $(LINUX_DTB) $(IMAGES_DIR)/rk3326-anbernic-rg351p.dtb
 	cp $(EXTLINUX_CONF) $(IMAGES_DIR)/extlinux/extlinux.conf

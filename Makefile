@@ -19,6 +19,7 @@ include mk/mgba.mk
 include mk/gpsp.mk
 include mk/tinyalsa.mk
 include mk/romdb.mk
+include mk/fighter.mk
 include mk/frontend.mk
 include mk/rootfs.mk
 include mk/image.mk

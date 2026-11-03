@@ -117,6 +117,7 @@
 #include "audio.h"
 #include "battery.h"
 #include "cpuctl.h"
+#include "core.h"
 #include "fe.h"
 #include "settings.h"
 
@@ -981,8 +982,10 @@ static size_t emit(char *buf, size_t size, const char *when, const char *qrom,
 		     a->work_max, a->missed, a->missed_cpu, a->underruns,
 		     opp < 0 ? c.s.changes : a->entered, a->bat_n, bat,
 		     a->seconds > 0 ? a->bl_sum / a->seconds : settings.brightness,
-		     settings.grid, settings.grid_dim, settings.grid_boost,
-		     color_mode_names[rom_settings_color()], ks, kt, st, le,
+		     core_info()->core < CORE_GBA_COUNT && settings.grid,
+		     settings.grid_dim, settings.grid_boost,
+		     color_mode_names[core_info()->core < CORE_GBA_COUNT ?
+				      rom_settings_color() : COLOR_OFF], ks, kt, st, le,
 		     (unsigned long long)a->skipped, au);
 	log_msg("perf summary: %s %s: %llu frames (%llu skipped) %.1f s, work "
 		"avg/p50/p99/max %.2f/%.2f/%.2f/%.2f ms, missed %u (cpu %u), "
@@ -1066,9 +1069,12 @@ int cpuctl_game_end(void)
 	csv_quote(qrom, sizeof(qrom), c.s.rom);
 	log_msg("perf summary: %s, %s, grid %s dim %d%% boost %d%%, color %s, "
 		"frameskip %s, start %d MHz, learned %d MHz", c.s.rom, when,
-		settings.grid ? "on" : "off", settings.grid_dim,
-		settings.grid_boost, color_mode_names[rom_settings_color()],
-		frameskip_names[rom_settings.frameskip >= 0 &&
+		core_info()->core < CORE_GBA_COUNT && settings.grid ? "on" : "off",
+		settings.grid_dim,
+		settings.grid_boost, color_mode_names[core_info()->core < CORE_GBA_COUNT ?
+					     rom_settings_color() : COLOR_OFF],
+		frameskip_names[core_info()->core < CORE_GBA_COUNT &&
+				rom_settings.frameskip >= 0 &&
 				rom_settings.frameskip < FRAMESKIP_COUNT ?
 				rom_settings.frameskip : 0],
 		c.s.start_mhz, learned);

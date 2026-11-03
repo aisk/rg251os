@@ -1069,6 +1069,12 @@ static const struct row *const ig_video_rows[] = {
 };
 _Static_assert(ARRAY_SIZE(ig_video_rows) <= IG_ROWS, "IG_ROWS in menu.h");
 
+/* Native games share system controls, without GBA or video settings. */
+static const struct row *const ig_fighter_rows[] = {
+	&row_resume, &row_reset, &row_volume, &row_brightness, &row_cpu,
+	&row_sysinfo, &row_quit, &row_poweroff,
+};
+
 static struct {
 	struct menu menu;
 	char name[ROMDB_NAME_MAX + 2];
@@ -1084,7 +1090,10 @@ static void ingame_menu_enter(const char *from, int64_t now)
 {
 	(void)from;
 	(void)now;
-	if (core_loaded() && core_info()->core == CORE_VIDEO)
+	if (core_loaded() && core_info()->core == CORE_FIGHTER)
+		menu_open(&ig.menu, ig_fighter_rows, ARRAY_SIZE(ig_fighter_rows),
+			  UI_ACT(UI_RESUME));
+	else if (core_loaded() && core_info()->core == CORE_VIDEO)
 		menu_open(&ig.menu, ig_video_rows, ARRAY_SIZE(ig_video_rows),
 			  UI_ACT(UI_RESUME));
 	else

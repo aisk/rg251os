@@ -2,7 +2,9 @@
  * The core tables. Built once per binary (see mk/frontend.mk) with
  * HAVE_CORE_MGBA / HAVE_CORE_GPSP for the cores linked in, or with
  * neither for the stub build, where every GBA core id runs the stub core.
- * The video player (video_core.c, CORE_VIDEO) is in every build; its
+ * The fighter (app/fighter, CORE_FIGHTER) is in every build, with renamed
+ * libretro entry points. The video player (video_core.c, CORE_VIDEO) is
+ * also in every build; its
  * entry points are named video_retro_* in the source, no renaming.
  */
 #include <stdbool.h>
@@ -57,6 +59,9 @@
 	.save_size = save, \
 }
 
+CORE_PROTOS(fighter)
+static const struct core_api fighter = CORE_TABLE(fighter, "fighter", NULL);
+
 CORE_PROTOS(video)
 static const struct core_api video = CORE_TABLE(video, "video", NULL);
 
@@ -109,6 +114,8 @@ const struct core_api *core_api_get(int id)
 #endif
 	case CORE_VIDEO:
 		return &video;
+	case CORE_FIGHTER:
+		return &fighter;
 	default:
 		return NULL;
 	}
@@ -123,6 +130,8 @@ const struct core_api *core_api_get(int id)
 {
 	if (id == CORE_VIDEO)
 		return &video;
+	if (id == CORE_FIGHTER)
+		return &fighter;
 	return id >= 0 && id < CORE_GBA_COUNT ? &stub : NULL;
 }
 

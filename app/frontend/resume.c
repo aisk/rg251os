@@ -2,7 +2,7 @@
  * Resume on boot: powering off in game works like sleep. When the device
  * is powered off while a game runs (in-game menu, the power key held)
  * and its resume state was written, main.c writes config/resume.txt
- * (rom=<path relative to roms/>, core=<mgba|gpsp|video>, why=<how>), atomically
+ * (rom=<path relative to roms/>, core=<mgba|gpsp|video|fighter>, why=<how>), atomically
  * like the settings. The next boot reads it after the settings and input
  * (main.c) and starts that game through the normal start, which loads
  * the state; the ROM list is set to the ROM's folder and the ROM, so

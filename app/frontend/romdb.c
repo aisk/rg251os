@@ -18,8 +18,8 @@
  * ROMs whose code is not in the table can still be found by CRC among the
  * entries without a code (homebrew, cheat devices) when one of them has
  * the same size; anything else shows its file name. Videos (*.mpg, see
- * video_core.c) are not looked up at all: no header read, no CRC, shown
- * by their file name without ".mpg".
+ * video_core.c) and native *.fight games are not looked up: no header
+ * read, no CRC, shown by their file name without the content extension.
  *
  * Automatic color correction (color=auto, the per game default), from the
  * first release year of the title (the generator takes the earliest year
@@ -145,6 +145,12 @@ int romdb_stem_len(const char *file)
 	if (n > 4 && !strcasecmp(file + n - 4, ".gba"))
 		n -= 4;
 	return (int)n;
+}
+
+int romdb_is_fighter(const char *file)
+{
+	size_t n = strlen(file);
+	return n > 6 && !strcasecmp(file + n - 6, ".fight");
 }
 
 int romdb_is_video(const char *file)
@@ -528,7 +534,7 @@ int romdb_identify(const char *path, int allow_crc, struct rom_id *id)
 	ssize_t n = -1;
 
 	memset(id, 0, sizeof(*id));
-	if (romdb_is_video(file)) {
+	if (romdb_is_video(file) || romdb_is_fighter(file)) {
 		/* Nothing to identify: the file name without ".mpg". */
 		if (fd >= 0) {
 			if (fstat(fd, &st) == 0) {
@@ -539,7 +545,7 @@ int romdb_identify(const char *path, int allow_crc, struct rom_id *id)
 		}
 		id->how = ROMDB_UNKNOWN;
 		snprintf(id->title, sizeof(id->title), "%.*s",
-			 (int)strlen(file) - 4, file);
+			 (int)strlen(file) - (romdb_is_fighter(file) ? 6 : 4), file);
 		return fd >= 0 ? 0 : -1;
 	}
 	if (fd >= 0) {

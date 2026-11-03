@@ -75,6 +75,8 @@ void romdb_match(const char *file, const struct gba_header *h, uint64_t size,
 int romdb_stem_len(const char *file);
 /* A video for video_core.c: the name ends in ".mpg" (any case). */
 int romdb_is_video(const char *file);
+/* Native fighter content; retains .fight in save/settings file names. */
+int romdb_is_fighter(const char *file);
 
 /* Header (and the cache when the CRC is needed) for path; computes the
  * CRC when allow_crc and still needed, and caches it. Fills id->title.

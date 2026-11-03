@@ -30,6 +30,7 @@ enum core_id {
 	CORE_GPSP,  /* gpSP, ARM64 dynarec: much faster, less accurate */
 	CORE_GBA_COUNT,
 	CORE_VIDEO = CORE_GBA_COUNT,
+	CORE_FIGHTER, /* native .fight libretro core */
 	CORE_COUNT
 };
 extern const char *const core_names[CORE_COUNT];   /* in files */

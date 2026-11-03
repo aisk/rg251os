@@ -3,7 +3,8 @@
  * file has startup, the main loop and the game's lifecycle; the work is
  * in the modules (sys.c mounts and system helpers, display.c KMS, input.c
  * evdev and the power key timing, audio.c ALSA, core.c the libretro
- * cores, video_core.c the player for *.mpg videos, ui.c the page stack,
+ * cores (including the native *.fight POC), video_core.c the player for
+ * *.mpg videos, ui.c the page stack,
  * menu.c the ROM list and menus, settings.c, sleep.c, cpuctl.c, sdgrow.c,
  * clock.c, sysinfo.c).
  *
@@ -18,7 +19,7 @@
  * previous frame is on screen, the page stack runs (frame()); in game that
  * is one retro_run with the frame scaled (by the largest integer that
  * fits, 2x for the GBA, centered with black bars) and rotated straight
- * into the back buffer (a video without the grid and color effects,
+ * into the back buffer (videos and fighters without grid or color effects,
  * with its OSD from osd.c over the rows of its two strips when shown),
  * so emulation runs at the panel's 60.02 Hz and audio is resampled to
  * match (audio.c). A video decodes in video_core.c's own thread, so its
@@ -95,6 +96,7 @@
  *   frontend --sdgrow IMG DIR HOOK     the first boot's partition grow on
  *                                      a card image (see sdgrow.h)
  */
+#include <sys/resource.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -413,8 +415,12 @@ static void identify_game(const char *path)
 	int color;
 
 	romdb_identify(path, 1, &m.rom_id);
+	if (romdb_is_fighter(m.rom_name)) {
+		log_msg("romdb: %s is fighter content", m.rom_name);
+		return;
+	}
 	if (romdb_is_video(m.rom_name)) {
-		/* No color correction, no database: see video_core.c. */
+		/* Non-cartridge content has no GBA database or color correction. */
 		log_msg("romdb: %s is a video, shown as \"%s\"", m.rom_name,
 			m.rom_id.title);
 		return;
@@ -453,6 +459,10 @@ static void start_game(const char *path)
 	}
 	audio_init();
 	audio_set_source(core_info()->sample_rate, core_info()->fps, hz);
+	if (core == CORE_FIGHTER)
+		log_msg("fight: pacing one tick per vblank, core %.4f Hz, display %.4f Hz, "
+			"speed %.4f%%; audio follows display with dynamic resampling",
+			core_info()->fps, hz, 100.0 * hz / core_info()->fps);
 	m.games++;
 	m.game_frames = 0;
 	fx_update();
@@ -762,7 +772,7 @@ static void perf_report(void)
 	audio_take_stats(&as);
 	m.xrun_total += as.xruns;
 	m.last_as = as;
-	if (!log_debug()) {
+	if (!log_debug() && core_info()->core != CORE_FIGHTER) {
 		perf_reset(&m.p_run);
 		perf_reset(&m.p_blit);
 		perf_reset(&m.p_audio);
@@ -789,6 +799,11 @@ static void perf_report(void)
 		as.xruns, as.overflows, as.fill_min, as.fill_max, as.adj,
 		as.hw_rate, khz > 0 ? khz / 1000 : -1, cpu, temp, bat,
 		settings.brightness);
+	if (core_info()->core == CORE_FIGHTER) {
+		struct rusage usage;
+		if (!getrusage(RUSAGE_SELF, &usage))
+			log_msg("fight: frontend peak RSS %ld KiB", usage.ru_maxrss);
+	}
 	m.perf_frames = 0;
 	m.perf_skipped = 0;
 	m.missed = 0;
@@ -826,11 +841,11 @@ static void blit_canvas(void)
 	display_present();
 }
 
-/* The effects for the game picture: none for a video (grid and color
+/* The effects for the game picture: none for a native core (grid and color
  * correction are made for the GBA's 2x pixels and palettes). */
 static const struct blit_fx *game_fx(void)
 {
-	return core_info()->core == CORE_VIDEO ? NULL : fx_current();
+	return core_info()->core >= CORE_GBA_COUNT ? NULL : fx_current();
 }
 
 /* The largest integer scale of a w x h frame on the logical screen. */

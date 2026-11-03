@@ -138,6 +138,8 @@ static struct {
 
 /* ----------------------------------------------------------- callbacks */
 
+/* The native POC emits bounded ten-second diagnostics even without Debug log;
+ * emulator logs remain gated and limited to avoid flooding storage. */
 static void core_log(enum retro_log_level level, const char *fmt, ...)
 {
 	char buf[400];
@@ -146,10 +148,10 @@ static void core_log(enum retro_log_level level, const char *fmt, ...)
 
 	if (level < RETRO_LOG_INFO)
 		return;
-	if (level == RETRO_LOG_INFO && !log_debug())
+	if (level == RETRO_LOG_INFO && !log_debug() && c.info.core != CORE_FIGHTER)
 		return;
 	if (level == RETRO_LOG_INFO ?
-	    c.in_game && c.info_lines++ >= MAX_INFO_LINES :
+	    c.in_game && c.info.core != CORE_FIGHTER && c.info_lines++ >= MAX_INFO_LINES :
 	    c.warn_lines++ >= MAX_WARN_LINES) {
 		c.dropped_lines++;
 		return;
@@ -160,7 +162,7 @@ static void core_log(enum retro_log_level level, const char *fmt, ...)
 	n = strlen(buf);
 	while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
 		buf[--n] = 0;
-	if (level >= RETRO_LOG_WARN)
+	if (level >= RETRO_LOG_WARN || c.info.core == CORE_FIGHTER)
 		log_msg("core: %s", buf);
 	else
 		log_verbose("core: %s", buf);
@@ -315,7 +317,7 @@ static void log_rom_options(void)
 
 	/* The game settings are the GBA cores'; the video player has the
 	 * global video_scale (core_option_value). */
-	if (c.info.core == CORE_VIDEO)
+	if (c.info.core >= CORE_GBA_COUNT)
 		return;
 	line[0] = 0;
 	for (size_t i = 0; i < ARRAY_SIZE(rom_options); i++) {
@@ -1049,8 +1051,8 @@ int core_load(const char *rom_path, int core, char *err, size_t errlen)
 		"%.0f Hz audio%s%s", si.library_name, si.library_version,
 		base, size >> 10, (long long)((now_ns() - t0) / 1000000),
 		av.geometry.base_width, av.geometry.base_height, c.info.fps,
-		c.info.sample_rate, c.info.core == CORE_VIDEO ? "" : ", BIOS ",
-		c.info.core == CORE_VIDEO ? "" : c.have_bios ? bios :
+		c.info.sample_rate, c.info.core >= CORE_GBA_COUNT ? "" : ", BIOS ",
+		c.info.core >= CORE_GBA_COUNT ? "" : c.have_bios ? bios :
 		"HLE (built in)");
 	if (c.options[0])
 		log_msg("core: options %s", c.options);
@@ -1072,7 +1074,7 @@ void core_unload(void)
 	c.api->deinit();
 	c.api = NULL;
 	c.audio_status = NULL;
-	if (c.loaded && c.info.core != CORE_VIDEO &&
+	if (c.loaded && c.info.core < CORE_GBA_COUNT &&
 	    (c.skipped || rom_settings.frameskip != FRAMESKIP_OFF)) {
 		char st[96] = "no buffer status reported";
 
@@ -1106,6 +1108,8 @@ int core_for_rom(const char *rom_name)
 {
 	const char *base = strrchr(rom_name, '/');
 
+	if (romdb_is_fighter(base ? base + 1 : rom_name))
+		return CORE_FIGHTER;
 	return romdb_is_video(base ? base + 1 : rom_name) ? CORE_VIDEO :
 	       rom_settings.core;
 }

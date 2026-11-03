@@ -6,7 +6,8 @@
 # forces the stub, FRONTEND_CORE=mgba or gpsp links only that core. The
 # stub build (every core id runs the stub) is also available as
 # frontend-stub for tests. The video player (video_core.c, pl_mpeg from
-# external/pl_mpeg compiled once in plm.c) is in every build.
+# external/pl_mpeg compiled once in plm.c) and the native fighter core
+# (mk/fighter.mk) are in every build.
 #
 #   make frontend          build/frontend/frontend (stripped, installed)
 #   make frontend-test     selftest and headless runs under qemu-aarch64,
@@ -78,15 +79,15 @@ $(FRONTEND_STUB_LIB): $(FRONTEND_STUB_OBJ) $(TOP)/mk/core-archive.sh
 	$(FRONTEND_CORES_OBJ:.o=.d) $(FRONTEND_STUB_CORES_OBJ:.o=.d)
 
 $(FRONTEND_ELF): $(FRONTEND_OBJS) $(FRONTEND_CORES_OBJ) $(FRONTEND_CORE_LIBS) \
-		$(TINYALSA_LIB) $(FRONTEND_CORE_STAMP)
+		$(TINYALSA_LIB) $(FIGHTER_LIB) $(FRONTEND_CORE_STAMP)
 	$(CROSS_COMPILE)gcc $(FRONTEND_LDFLAGS) -o $@ $(FRONTEND_OBJS) \
-		$(FRONTEND_CORES_OBJ) $(FRONTEND_CORE_LIBS) $(TINYALSA_LIB) \
+		$(FRONTEND_CORES_OBJ) $(FRONTEND_CORE_LIBS) $(FIGHTER_LIB) $(TINYALSA_LIB) \
 		$(FRONTEND_CORE_LDLIBS) -lm
 
 $(FRONTEND_STUB_ELF): $(FRONTEND_OBJS) $(FRONTEND_STUB_CORES_OBJ) \
-		$(FRONTEND_STUB_LIB) $(TINYALSA_LIB)
+		$(FRONTEND_STUB_LIB) $(FIGHTER_LIB) $(TINYALSA_LIB)
 	$(CROSS_COMPILE)gcc $(FRONTEND_LDFLAGS) -o $@ $(FRONTEND_OBJS) \
-		$(FRONTEND_STUB_CORES_OBJ) $(FRONTEND_STUB_LIB) $(TINYALSA_LIB) -lm
+		$(FRONTEND_STUB_CORES_OBJ) $(FRONTEND_STUB_LIB) $(FIGHTER_LIB) $(TINYALSA_LIB) -lm
 
 $(FRONTEND_BIN): $(FRONTEND_ELF)
 	$(CROSS_COMPILE)strip -o $@ $<
@@ -103,9 +104,12 @@ FRONTEND_GPSP_TEST_ROMS ?= $(wildcard $(EXTERNAL)/mgba/cinema/gba/*/*/test.gba)
 frontend: $(FRONTEND_BIN)
 frontend-stub: $(FRONTEND_STUB_ELF)
 
-frontend-test: $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
+frontend-test: fighter-test $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	rm -rf $(FRONTEND_TEST_DIR)
 	mkdir -p $(FRONTEND_TEST_DIR)/stub $(FRONTEND_TEST_DIR)/core
+	sh $(TOP)/tools/fighter/frontend-test.sh $(QEMU_AARCH64) $(FRONTEND_ELF) \
+		$(FIGHTER_BUILD)/Fighter-POC.fight $(FIGHTER_BUILD)/Fighter-Auto.fight \
+		$(FRONTEND_TEST_DIR)/fighter
 	# Test clips for the video player, made from ffmpeg's generators:
 	# 480x270 30 fps stereo 44.1 kHz 30 s, 640x360 25 fps mono 32 kHz
 	# 3 s, 240x160 30 fps without audio 2 s.

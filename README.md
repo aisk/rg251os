@@ -19,6 +19,8 @@ ffmpeg -i in.mp4 -vf scale=480:-2 -r 30 -c:v mpeg1video -q:v 2 -mbd rd -trellis 
 
 While a video plays, A pauses, Left/Right seek 10 s and Down/Up 60 s (hold to keep seeking), L/R go to the previous/next video in the same folder, and B toggles the on-screen display with the name, time and progress. When a video ends the next one in the folder starts by itself. SELECT+START opens the menu as in games, and each video resumes where it was left.
 
+An experimental 480×320 fighting libretro core is also included, with original placeholder art and automatic software-rendering stress scenes. Initial hardware tests reach 60 fps for basic scenes, while heavy blending exceeds the frame budget; see [the POC notes](docs/fighter-poc.md).
+
 ## Build
 
 Host packages: `genimage mtools dosfstools fakeroot cmake ninja-build`, plus `qemu-user` and `ffmpeg` for tests. The toolchain is downloaded automatically.
