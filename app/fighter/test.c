@@ -211,7 +211,7 @@ static void frame_data(void)
 	    CANCEL_CHAIN | CANCEL_SPECIAL, CANCEL_SPECIAL, CANCEL_SPECIAL, 0,
 	    CANCEL_CHAIN | CANCEL_SPECIAL, CANCEL_SPECIAL, CANCEL_CHAIN | CANCEL_SPECIAL, 0};
 	const struct character *c = &pack.chr[terry];
-	assert(!strcmp(c->name, "TERRY") && c->moves == MOVES + 3 && c->projectiles == 1);
+	assert(!strcmp(c->name, "TERRY") && c->moves == MOVES + 5 && c->projectiles == 1);
 	for (int k = 0; k < MOVES; k++) {
 		const struct move *m = &c->move[k];
 		const int *w = want[k];
@@ -804,17 +804,17 @@ static void follow_ups(void)
 	assert(aoi_run(iori, x1, hit_at, K(Y), hit_at, a2, &s) == hit_at);
 	c->move[a2].contact = 0;
 	/* May Lee: Tatsuo Kyaku (236+K on call 5), then K on call 6 + open
-	 * with up, down or any other direction (none included) picks its
-	 * branch; outside the window it does nothing. */
+	 * with up, down, forward or any other direction (none included) picks
+	 * its branch; outside the window it does nothing. */
 	const struct character *ml = &pack.chr[maylee];
 	unsigned tk = MOVES;
 	while (ml->move[tk].motion != MOTION_236 || ml->move[tk].after)
 		assert(++tk < ml->moves);
 	unsigned up = child(ml, tk, HOLD_8), down = child(ml, tk, HOLD_2),
-		 any = child(ml, tk, MOTION_ANY);
+		 fwd = child(ml, tk, HOLD_6), any = child(ml, tk, MOTION_ANY);
 	static const uint32_t dir[5] = {K(UP), K(DOWN), 0, K(RIGHT), K(LEFT)};
 	for (int d = 0; d < 5; d++) {
-		unsigned want = d == 0 ? up : d == 1 ? down : any;
+		unsigned want = d == 0 ? up : d == 1 ? down : d == 3 ? fwd : any;
 		int at = 6 + ml->move[want].open;
 		assert(ml->move[want].open == ml->move[any].open);
 		for (int late = 0; late < 2; late++) {
@@ -1103,7 +1103,7 @@ static void combos(void)
 	fight_start(&s, &pack, terry, terry);
 	assert(!s.best[0] && !s.combo[0] && !s.shown[0] && !s.show[0]);
 }
-/* Command lists from the pack: Terry's three specials, Iori's Aoi Hana
+/* Command lists from the pack: Terry's five specials, Iori's Aoi Hana
  * stages nested under each other, Haohmaru's slash buttons; every
  * character's list names every special once, in characters the HUD font
  * has, and its pause and select screens fit the command budget. START
@@ -1114,11 +1114,12 @@ static void move_lists(void)
 	static struct scene sc;
 	char name[LIST_LINES][MAX_MOVE_NAME + 1], text[LIST_LINES][LIST_TEXT];
 	uint8_t depth[LIST_LINES];
-	assert(fight_move_list(&pack.chr[terry], name, text, depth) == 3);
+	assert(fight_move_list(&pack.chr[terry], name, text, depth) == 5);
 	assert(!strcmp(text[0], "\2\3\6 + P  PROJECTILE") && !strcmp(text[1], "\2\1\4 + P") &&
 	       !strcmp(text[2], "[\2]\10 + P") && !depth[0] && !depth[1] && !depth[2]);
 	assert(!strcmp(name[0], "POWER WAVE") && !strcmp(name[1], "BURN KNUCKLE") &&
-	       !strcmp(name[2], "RISING TACKLE"));
+	       !strcmp(name[2], "RISING TACKLE") && !strcmp(name[3], "CRACK SHOOT") &&
+	       !strcmp(name[4], "POWER DUNK"));
 	unsigned iori = character("IORI");
 	assert(fight_move_list(&pack.chr[iori], name, text, depth) == 5);
 	assert(!strcmp(text[1], "\2\1\4 + P") && !depth[1] && !strcmp(text[2], "\2\1\4 + P") &&
@@ -1481,7 +1482,7 @@ static void state_words(void)
 		int at, who, field;
 		uint32_t value;
 	} cases[] = {
-	    {0, 1, W_MOVE, MOVES + 4},	   {0, 1, W_MOVE, 1},	       {0, 1, W_FREEZE, MAX_HITSTOP + 1},
+	    {0, 1, W_MOVE, MOVES + 6},	   {0, 1, W_MOVE, 1},	       {0, 1, W_FREEZE, MAX_HITSTOP + 1},
 	    {0, 1, W_STUN, MAX_STUN + 1},  {0, 1, W_SLIDE, (uint32_t)-MAX_SLIDE - 1},
 	    {0, 1, W_SLIDE, MAX_SLIDE + 1},  {0, 1, W_KEYS, 0x10000},	   {0, 1, W_CROUCH, 2},	       {0, 1, W_BLOCK, 3},
 	    {0, 0, W_ELAPSED, 100},	   {0, 0, W_HIT, 2},	       {0, 0, W_STUN, 5},
@@ -1490,8 +1491,8 @@ static void state_words(void)
 	    {0, 1, W_X, QX(FW - 24) + 1},
 	    {0, 0, W_WALK, 2},		   {0, 1, W_VY, 61},	       {0, 0, W_Y, (uint32_t)-30},
 	    {0, 0, W_VY, 3},		   {0, 1, W_CORNER, 1},	       {0, 1, W_SQUAT, 3 + 1},
-	    {0, 0, W_SQUAT, 1},	   {0, 0, W_BUFFER, MOVES + 4}, {0, 0, W_AGE, 4 + 1},
-	    {0, 1, W_AGE, 1},		   {0, 1, W_PLAN, STAND_HK + 1}, {0, 1, W_PLAN, MOVES + 4},
+	    {0, 0, W_SQUAT, 1},	   {0, 0, W_BUFFER, MOVES + 6}, {0, 0, W_AGE, 4 + 1},
+	    {0, 1, W_AGE, 1},		   {0, 1, W_PLAN, STAND_HK + 1}, {0, 1, W_PLAN, MOVES + 6},
 	    {0, 1, W_PLAN_TICK, 1},	   {0, 1, W_CHARGE, (10 + 1) << 8},
 	    {0, 1, W_CHARGE, 1 | 1 << 8}, {0, 0, W_CLOCK, 256},
 	    {0, 0, W_GRAB, GRAB_TECH},	   {0, 0, W_GRAB, GRAB_HELD},  {0, 1, W_GRAB, GRAB_FORWARD},
@@ -2468,7 +2469,7 @@ static void previews(void)
 		step2(&s, 0, 0);
 	step2(&s, 0, 0);
 	snapshot(&s, "down");
-	/* Terry throws Terry: held halfway through the generic grab. */
+	/* Terry throws Terry: held partway through Grasping Upper. */
 	staged(&s, korea, terry, terry, centre - 23, centre + 23);
 	step2(&s, K(RIGHT) | K(X), 0);
 	assert(s.p[0].grab == GRAB_FORWARD);
