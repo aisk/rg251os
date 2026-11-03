@@ -50,6 +50,12 @@
  * by its button (LP/LK light, HP/HK heavy, specials and projectiles
  * special). Sound events (enum sound_id) are appended to the state as the
  * rules act.
+ * CPU difficulty (the state's level): the levels table sets the AI's guard
+ * rate, wrong-height guards and guard reaction, how often it starts
+ * specials and normals, its follow-ups, Hard's cancels of connected
+ * normals into motion specials, and on Easy the ladder CPU's damage (75%).
+ * Normal is the original AI. Everything reads the state's rng and tick, so
+ * replays and states stay deterministic.
  * Combos: an unguarded hit (strike or projectile) on a defender still in
  * hitstun as the tick's contacts land continues the attacker's combo,
  * any other starts it at 1; the combo ends at the end of the first tick
@@ -91,7 +97,7 @@
  * the parent shows an elapsed inside open..close (with a contact when the
  * move requires one), from the buffer like a cancel; a buffered follow-up
  * whose parent is no longer running is dropped. The AI takes a follow-up
- * once per move, always after a contact and on every other whiff.
+ * at most once per move (how often depends on the difficulty).
  * Cancels: a normal whose hit connected (hit or block) can be cancelled
  * into a special (cancel "special") or another normal (cancel "chain")
  * while its elapsed is inside startup + active; the buffered move starts on
@@ -132,6 +138,22 @@ static const unsigned button_bit[4] = {BUTTON_HK, BUTTON_HP, BUTTON_LK, BUTTON_L
 #define SCREEN_TICKS 180
 #define AUTO_SCREEN 60
 #define SCREEN_SKIP 20
+/* The CPU per difficulty (Normal is the original AI): of 32 swings it
+ * guards guard, at the wrong height wrong of those, once the swing (or a
+ * projectile) has been out react ticks; an idle tick starts a special one
+ * time in special and a tick in range presses its normal one time in press;
+ * a follow-up comes after a contact one time in hit_follow and after a
+ * whiff one time in whiff_follow (0 = never); a normal that connects is
+ * cancelled into a motion special cancel times in 4; its hits deal damage
+ * per mille (the ladder's CPU only). */
+static const struct level_ai {
+	uint8_t guard, wrong, react, hit_follow, whiff_follow, cancel;
+	uint16_t special, press, damage;
+} levels[LEVELS] = {
+    {14, 6, 4, 2, 4, 0, 128, 16, 750},
+    {22, 4, 0, 1, 2, 0, 64, 8, 1000},
+    {28, 1, 0, 1, 0, 3, 24, 4, 1000},
+};
 static int clamp(int x, int lo, int hi) { return x < lo ? lo : x > hi ? hi : x; }
 static uint32_t random_next(struct fight_state *s)
 {
@@ -200,6 +222,7 @@ void fight_reset(struct fight_state *s, int automatic)
 	memset(s, 0, sizeof(*s));
 	s->rng = 0x351f123u;
 	s->automatic = (uint32_t)automatic;
+	s->level = LEVEL_NORMAL;
 	s->mode = MODE_SELECT;
 	s->pal[1] = 1;
 	place(s);
@@ -472,6 +495,7 @@ static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
 	uint32_t toward = d > 0 ? KEY(RIGHT) : KEY(LEFT),
 		 away = d > 0 ? KEY(LEFT) : KEY(RIGHT);
 	uint32_t r = random_next(s);
+	const struct level_ai *lv = &levels[s->level];
 	if (p->stun || !q->hp)
 		p->plan = p->plan_tick = 0;
 	if (p->plan) {
@@ -483,15 +507,16 @@ static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
 		if (key)
 			return key;
 	}
-	/* Guard about two swings in three, at the wrong height one time in
-	 * five; the choice is fixed for the whole swing. Projectiles in range
-	 * are guarded the same way. */
-	if (q->move && dist < range) {
+	/* Guard lv->guard swings of 32 (Normal about two in three), at the
+	 * wrong height lv->wrong of 32 (Normal one time in five), once the
+	 * swing has been out lv->react ticks; the choice is fixed for the whole
+	 * swing. Projectiles in range are guarded the same way. */
+	if (q->move && dist < range && q->elapsed >= lv->react) {
 		const struct move *m = &oc->move[q->move - 1];
 		uint32_t h = ((s->tick - (uint32_t)q->elapsed) * 2654435761u + (unsigned)i) >> 27;
-		if (h < 22) {
+		if (h < lv->guard) {
 			int low = m->hit.guard == GUARD_LOW;
-			if (h < 4)
+			if (h < lv->wrong)
 				low = !low;
 			return away | (low ? KEY(DOWN) : 0u);
 		}
@@ -499,13 +524,15 @@ static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
 	for (int k = 0; k < MAX_PROJECTILES; k++) {
 		const struct shot *sh = &s->shot[k];
 		if (sh->kind && sh->owner != i && abs(sh->x - px(p)) < range &&
-		    (px(p) - sh->x) * sh->face > 0 &&
-		    (((s->tick - (uint32_t)sh->age) * 2654435761u + (unsigned)i) >> 27) < 22)
+		    (px(p) - sh->x) * sh->face > 0 && sh->age >= lv->react &&
+		    (((s->tick - (uint32_t)sh->age) * 2654435761u + (unsigned)i) >> 27) < lv->guard)
 			return away;
 	}
-	/* In a move with follow-ups: once per move, go on always after a hit or
-	 * a guard, every other time after a whiff (never without the contact a
-	 * follow-up needs), timed so the press lands in its window. */
+	/* In a move with follow-ups: once per move, go on after a hit or a
+	 * guard one time in lv->hit_follow (Normal always), after a whiff one
+	 * time in lv->whiff_follow (Normal every other time, Hard never; never
+	 * without the contact a follow-up needs), timed so the press lands in
+	 * its window. */
 	if (p->move && !p->plan && !p->buffer) {
 		unsigned parent = (unsigned)p->move, options = 0, pick = 0;
 		uint32_t h = (s->tick - (uint32_t)p->clock) * 2654435761u + (unsigned)i * 977u;
@@ -519,11 +546,36 @@ static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
 				pick = k;
 			options += p->elapsed >= from && p->elapsed <= to;
 		}
-		if (options && (p->hit || (h >> 16) & 1)) {
+		uint32_t roll = h >> 16;
+		if (options && (p->hit ? roll % lv->hit_follow == 0
+				       : lv->whiff_follow && (roll & 1) &&
+					     (roll >> 1) % (lv->whiff_follow / 2u) == 0)) {
 			const struct move *m = &c->move[pick];
 			p->plan = (int32_t)pick + 1;
 			p->plan_tick = 1;
 			return macro(m->motion, c->stats.charge, 0, p->face, button_key(m->buttons));
+		}
+	}
+	/* Hard: a connected normal that allows it is cancelled into a motion
+	 * special lv->cancel times in 4, decided once per move and entered
+	 * while the hitstop holds both fighters (the press is buffered). */
+	if (lv->cancel && p->move && p->move <= MOVES && p->hit && p->freeze && !p->plan &&
+	    !p->buffer) {
+		const struct move *n = &c->move[p->move - 1];
+		uint32_t h = ((s->tick - (uint32_t)p->clock) * 2654435761u + (unsigned)i * 977u) >> 20;
+		unsigned pick[MAX_SPECIALS], count = 0;
+		for (unsigned k = MOVES; k < c->moves; k++) {
+			const struct move *m = &c->move[k];
+			if (!m->after && m->motion < CHARGE_46 && !(m->spawn && owns_shot(s, i)))
+				pick[count++] = k;
+		}
+		if (count && (n->cancel & CANCEL_SPECIAL) && p->elapsed < (int)n->startup + n->active &&
+		    h % 4 < lv->cancel) {
+			unsigned k = pick[(h >> 2) % count];
+			p->plan = (int32_t)k + 1;
+			p->plan_tick = 1;
+			return macro(c->move[k].motion, c->stats.charge, 0, p->face,
+				     button_key(c->move[k].buttons));
 		}
 	}
 	/* Now and then a special that starts on its own: the projectile from
@@ -532,7 +584,7 @@ static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
 	for (unsigned k = MOVES; k < c->moves; k++)
 		if (!c->move[k].after)
 			own[specials++] = k;
-	if (specials && !p->move && !p->stun && grounded(p) && !((r >> 8) & 63)) {
+	if (specials && !p->move && !p->stun && grounded(p) && (r >> 8) % lv->special == 0) {
 		unsigned k = own[(r >> 16) % specials];
 		for (unsigned j = 0; dist > 180 && j < specials; j++)
 			if (c->move[own[j]].spawn)
@@ -550,7 +602,7 @@ static uint32_t ai(struct fight_state *s, const struct assets *a, int i)
 	int button = (int)(plan & 3), low = (int)(plan >> 2) & 1;
 	const struct move *m = &c->move[strength[button] + (low ? CROUCH_LP : 0)];
 	uint32_t key = dist > m->reach + 20 ? toward : 0;
-	if (!key && !p->move && !p->stun && !(r & 7))
+	if (!key && !p->move && !p->stun && r % lv->press == 0)
 		key = buttons[button] | (low ? KEY(DOWN) : 0u);
 	if ((r & 255) == 0)
 		key |= KEY(UP);
@@ -836,10 +888,12 @@ static int permille(int v, int factor)
  * freezes its attacker p (projectiles pass p = NULL). */
 static void struck(struct fight_state *s, struct fighter *p, struct fighter *q,
 		   const struct character *qc, const struct hit *h, int guarded, int face,
-		   uint32_t keys)
+		   uint32_t keys, int scale)
 {
-	q->hp = clamp(q->hp - permille(guarded ? h->chip : h->damage, qc->stats.defense), 0,
-		      qc->stats.life);
+	int v = guarded ? h->chip : h->damage;
+	if (scale != 1000)
+		v = permille(v, scale);
+	q->hp = clamp(q->hp - permille(v, qc->stats.defense), 0, qc->stats.life);
 	q->move = q->hit = q->squat = 0;
 	q->stun = guarded ? h->blockstun : h->hitstun;
 	q->block = guarded;
@@ -932,8 +986,10 @@ static void shots_move(struct fight_state *s, const struct assets *a)
 			memset(sh, 0, sizeof(*sh));
 	}
 }
-static void combat(struct fight_state *s, const struct assets *a, const uint32_t keys[2])
+/* cpu: side 1 is the ladder's CPU opponent (its hits scale by the level). */
+static void combat(struct fight_state *s, const struct assets *a, const uint32_t keys[2], int cpu)
 {
+	const int scale[2] = {1000, cpu ? levels[s->level].damage : 1000};
 	int threat[2], frozen[2];
 	/* Both fighters see the other's state from the start of the tick. */
 	for (int i = 0; i < 2; i++) {
@@ -988,7 +1044,7 @@ static void combat(struct fight_state *s, const struct assets *a, const uint32_t
 		struct fighter *p = &s->p[i];
 		int alive = s->p[1 - i].hp > 0;
 		struck(s, p, &s->p[1 - i], who(s, a, 1 - i), &move[i]->hit, guarded[i], p->face,
-		       keys[1 - i]);
+		       keys[1 - i], scale[i]);
 		if (!guarded[i])
 			count_hit(s, i, stunned[1 - i]);
 		react(s, a, i, &move[i]->hit, p->move, move[i]->slash, guarded[i], at[i], p->face,
@@ -1001,7 +1057,8 @@ static void combat(struct fight_state *s, const struct assets *a, const uint32_t
 		if (landed[k]) {
 			int d = 1 - sh->owner, alive = s->p[d].hp > 0;
 			const struct hit *h = &shot_type(s, a, sh)->hit;
-			struck(s, NULL, &s->p[d], who(s, a, d), h, shot_guard[k], sh->face, keys[d]);
+			struck(s, NULL, &s->p[d], who(s, a, d), h, shot_guard[k], sh->face, keys[d],
+			       scale[sh->owner]);
 			if (!shot_guard[k])
 				count_hit(s, sh->owner, stunned[d]);
 			react(s, a, sh->owner, h, 0, 0, shot_guard[k], shot_at[k], sh->face,
@@ -1202,7 +1259,7 @@ void fight_step(struct fight_state *s, const struct assets *a, uint32_t input,
 	uint32_t keys[2];
 	keys[0] = s->automatic ? ai(s, a, 0) : input;
 	keys[1] = human ? second : ai(s, a, 1);
-	combat(s, a, keys);
+	combat(s, a, keys, !human && !s->automatic);
 }
 /* ---- drawing ---- */
 static void rect(struct scene *s, int x, int y, int w, int h, uint16_t color, int blend,
@@ -1479,6 +1536,15 @@ static void idle_sprite(struct scene *out, const struct fight_state *s, const st
 	if (im >= 0)
 		sprite(out, a, im, x, y, flip, OPAQUE, 255);
 }
+/* The difficulty at the top right of the select screen and on the versus
+ * card. */
+static void difficulty(struct scene *out, const struct fight_state *s, int y)
+{
+	static const char *const names[LEVELS] = {"CPU EASY", "CPU NORMAL", "CPU HARD"};
+	static const uint16_t colors[LEVELS] = {0x07e0, 0xffff, 0xf800};
+	const char *name = names[s->level];
+	text(out, 464 - text_width(name), y, name, colors[s->level]);
+}
 /* The select screen's command list: the highlighted fighter on the left,
  * its list in a panel on the right. */
 static void select_list(const struct fight_state *s, const struct assets *a, struct scene *out)
@@ -1497,6 +1563,7 @@ static void select_scene(const struct fight_state *s, const struct assets *a, st
 {
 	rect(out, 0, 0, FW, FH, 0x0841, OPAQUE, 255);
 	text(out, 240 - text_width("SELECT") / 2, 12, "SELECT", 0xffff);
+	difficulty(out, s, 12);
 	if (s->list) {
 		select_list(s, a, out);
 		return;
@@ -1571,6 +1638,7 @@ static void intro_scene(const struct fight_state *s, const struct assets *a, str
 	line[len++] = '/';
 	number(line + len, count(opponents(a, s->chr[0])));
 	text(out, 240 - text_width(line) / 2, 40, line, 0xffff);
+	difficulty(out, s, 12);
 	rect(out, 0, 262, FW, 2, 0x8c50, OPAQUE, 255);
 	idle_sprite(out, s, a, 0, 140, 262, 0);
 	idle_sprite(out, s, a, 1, 340, 262, 1);
@@ -1758,10 +1826,12 @@ hud:
 #define SPARK_WORDS 5
 #define SPARKS_AT (EXTRA_AT + 4)
 #define SOUNDS_AT (SPARKS_AT + SPARK_SLOTS * SPARK_WORDS)
-/* Then combo, shown, show and best per side, and the select list flag. */
+/* Then combo, shown, show and best per side, the select list flag and the
+ * difficulty. */
 #define COMBO_AT (SOUNDS_AT + 1 + MAX_SOUND_EVENTS)
 #define LIST_AT (COMBO_AT + 8)
-#define USED_WORDS (LIST_AT + 1)
+#define LEVEL_AT (LIST_AT + 1)
+#define USED_WORDS (LEVEL_AT + 1)
 static void fighter_fields(struct fighter *p, int32_t *v[FIGHTER_WORDS])
 {
 	int32_t *f[] = {&p->x,	   &p->y,     &p->vy,	     &p->hp,	&p->face,  &p->walk,
@@ -1834,6 +1904,7 @@ void fight_encode(const struct fight_state *s, uint32_t w[STATE_WORDS])
 		w[COMBO_AT + 6 + i] = t.best[i];
 	}
 	w[LIST_AT] = t.list;
+	w[LEVEL_AT] = t.level;
 }
 /* Bounds come from the fighter's own character (life, jump velocities,
  * prejump, buffer, charge and grace) and the walls of the state's camera. */
@@ -1949,7 +2020,8 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 			return 0;
 	}
 	t.list = w[LIST_AT];
-	if (t.list > 1)
+	t.level = w[LEVEL_AT];
+	if (t.list > 1 || t.level >= LEVELS)
 		return 0;
 	unsigned n = a->characters;
 	uint32_t all = n >= 32 ? 0xffffffffu : (1u << n) - 1u;

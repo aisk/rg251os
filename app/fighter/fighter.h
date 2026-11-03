@@ -176,6 +176,8 @@ enum effect_key {
 	FX_SLASH_SPECIAL, FX_SLASH_GUARD, FX_BLOOD_LIGHT, FX_BLOOD_HEAVY, FX_BLOOD_SPECIAL,
 	FX_KEYS
 };
+/* CPU difficulty (struct fight_state level; see the AI in fighter.c). */
+enum level { LEVEL_EASY, LEVEL_NORMAL, LEVEL_HARD, LEVELS };
 /* Game flow: the arcade ladder (select, fights, loss result, clear). */
 enum mode { MODE_SELECT, MODE_FIGHT, MODE_RESULT, MODE_CLEAR, MODES };
 /* One fighter. x is in quarter pixels (x / 4 is the anchor column), y in
@@ -262,7 +264,9 @@ struct sound_event {
  * left hitstun (0 = none running), shown the count on screen (at least 2,
  * 0 = none) for show more ticks once the combo ended, best the longest
  * combo of this round. list is set while the select screen shows the
- * highlighted character's command list (START toggles it there). */
+ * highlighted character's command list (START toggles it there). level is
+ * the CPU difficulty (enum level, LEVEL_NORMAL after fight_reset; the core
+ * sets it from its option while the select screen shows). */
 struct fight_state {
 	uint32_t tick, rng, previous, paused, stress, boxes, automatic, round;
 	uint32_t mode, timer, beaten, stage, run, wins[2], chr[2], pal[2];
@@ -274,7 +278,7 @@ struct fight_state {
 	/* This tick's sound events (see enum sound_id). */
 	uint32_t sounds;
 	struct sound_event sound[MAX_SOUND_EVENTS];
-	uint32_t combo[2], shown[2], show[2], best[2], list;
+	uint32_t combo[2], shown[2], show[2], best[2], list, level;
 };
 /* One opaque run in a frame row; pixels index the frame's data. */
 struct span {

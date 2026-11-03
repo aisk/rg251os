@@ -223,7 +223,7 @@ DDR blob 在两边是同一个文件，legacy 能启动，说明 DDR 初始化�
 
 2026-10-30 到 11-03 的 14 次开机：视频解码挪进工作线程以后播放不再卡（没有丢帧和 underrun），但功耗没有比玩游戏低。开机恢复、退出时的即时存档、Date & time 写 RTC、从设置关机都在真机上确认了。充电的问题定位到 PMIC 没认到输入（PLUG_IN_STS 一直是 0，CHRG_IN 没被复位），电池其实在慢慢充，只是系统报 Not charging。唤醒后手柄约 2.2 s 不能用是内核 dwc2 重新枚举的问题。细节见 [roadmap.md](roadmap.md)。
 
-原生格斗引擎已接入标准 libretro 软件渲染 POC（原生与 qemu 集成回归通过，已有首轮合成负载真机结果，见 [格斗文档](fighter.md)）；[方案调研](fighting-engine-research.md)：目标是 480×320 的拳皇式传统 1 对 1 跨作品对战，只需背景和共同地面，暂不考虑四人。已接入当前软件显示和音频宿主。2026-11-03 boot-0015：Max 下正常两人核心合成均值 5.49ms，额外 8/24/48 混合精灵分别 9.46/18.74/32.91ms，旋转约 3ms；前两档可约 60fps，后两档约 30/20fps 并有大量音频欠载。峰值 RSS 约 21.4MiB，最高采样温度 47.7°C。保留软件路线。之后已换成 FIGHTP 格式（现为 FIGHTP07）并导入 KOF 2002 Terry（原像素 1:1），渲染改为 span 复制，前端旋转改为分块转置，加了判定框、Hitstop/硬直、普通技、Terry 的必杀技、选人闯关、11 个角色、数值体系第一步，以及舞台、打击效果和声音，boot-0016 真机验证：正常对战核心渲染约 1.4 ms（原 5.49 ms）、旋转 blit 约 1.5 ms（原约 3 ms），零 missed vblank 和 underrun；boot-0017 加上舞台和音乐后对战中仍然没有掉帧，run 均值约 2.5 ms，只有选人移光标和开打时重建缓存会卡 20 到 55 ms（已改为按需分片展开，加了开局对阵卡和追加输入，待上机验证）；完整十分钟验收仍待完成。
+原生格斗引擎已接入标准 libretro 软件渲染 POC（原生与 qemu 集成回归通过，已有首轮合成负载真机结果，见 [格斗文档](fighter.md)）；[方案调研](fighting-engine-research.md)：目标是 480×320 的拳皇式传统 1 对 1 跨作品对战，只需背景和共同地面，暂不考虑四人。已接入当前软件显示和音频宿主。2026-11-03 boot-0015：Max 下正常两人核心合成均值 5.49ms，额外 8/24/48 混合精灵分别 9.46/18.74/32.91ms，旋转约 3ms；前两档可约 60fps，后两档约 30/20fps 并有大量音频欠载。峰值 RSS 约 21.4MiB，最高采样温度 47.7°C。保留软件路线。之后已换成 FIGHTP 格式（现为 FIGHTP07）并导入 KOF 2002 Terry（原像素 1:1），渲染改为 span 复制，前端旋转改为分块转置，加了判定框、Hitstop/硬直、普通技、Terry 的必杀技、选人闯关、11 个角色、数值体系第一步，以及舞台、打击效果和声音，boot-0016 真机验证：正常对战核心渲染约 1.4 ms（原 5.49 ms）、旋转 blit 约 1.5 ms（原约 3 ms），零 missed vblank 和 underrun；boot-0017 加上舞台和音乐后对战中仍然没有掉帧，run 均值约 2.5 ms，只有选人移光标和开打时重建缓存会卡 20 到 55 ms（已改为按需分片展开，加了开局对阵卡和追加输入，待上机验证）。之后又加了 READY/FIGHT、连段计数、出招表和 CPU 难度；完整十分钟验收仍待完成。
 
 ### SD 卡布局
 
@@ -243,7 +243,7 @@ GBA 分区（下面写作 `<data>`）里的文件
 | `roms/*.mpg` | 视频（MPEG-PS，MPEG-1 视频加 MP2 音频），和 ROM 混在一起列出，见下面的默认行为 |
 | `saves/<rom>.sav` | 存档，两个核心通用，只按文件名（不含文件夹）；没有 `.sav` 时会读同名的 RetroArch `.srm`，之后写回 `.sav` |
 | `saves/<rom>.<core>.state` | 即时存档，退出游戏时自动写，下次启动同一个 ROM 用同一个核心时恢复（见下面的默认行为）。和 `.sav` 一样只按文件名，按核心分开（`gpsp`、`mgba`），因为两个核心的格式不通用。mGBA 约 420 到 520KiB（随存档类型变），gpSP 固定约 416KiB |
-| `saves/Fighter.fight.fighter.state` | 格斗 POC 的即时存档，目前为 FGSTATE7 加 FGAUDIO1 声音块，含宿主校验头共 1088 字节；不写 `.sav`，与 GBA 状态独立 |
+| `saves/Fighter.fight.fighter.state` | 格斗 POC 的即时存档，目前为 FGSTAT11 加 FGAUDIO1 声音块，含宿主校验头共 1088 字节；不写 `.sav`，与 GBA 状态独立 |
 | `bios/gba_bios.bin` | 可选的 GBA BIOS。没有的话 gpSP 用内置 BIOS，mGBA 用 HLE |
 | `config/settings.txt` | 全局设置：音量、亮度、LCD 网格、CPU 模式、音频模式、调试日志、开机恢复（`resume`）、视频画面（`video_scale`，fit 或 crop） |
 | `config/resume.txt` | 开机恢复的记录：游戏中关机时写，下次开机用掉就删（见下面的默认行为）。`rom=` 是相对 `roms/` 的路径，`core=` 是写即时存档的核心，`why=` 是怎么关的机，开机开始恢复前加一行 `attempted=1` |

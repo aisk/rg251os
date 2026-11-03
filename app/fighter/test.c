@@ -10,7 +10,8 @@
  * Lee's Tatsuo Kyaku branches by held direction), the arcade ladder (the
  * versus card and READY freezing the rules, held buttons no press at FIGHT,
  * the banner, select, opponents, loss, clear, Auto rotation, replay), state
- * round-trip and rejection, the AI's use of every move, and
+ * round-trip and rejection, the AI's use of every move, the difficulty
+ * (Easy damage, guards, specials and Hard's cancels per level), and
  * the stats: each character's system and resolved stats, walk speeds, jump
  * arcs and prejump, life, defense, weight, push distance, guard range, input
  * windows and the samsho5sp damage scale changing the fight by exact
@@ -42,17 +43,19 @@
 static uint32_t keys[2], image_hash, sound_hash;
 static unsigned video_count, audio_count, formats;
 static bool use32, reject_formats;
-static unsigned benchmark_complete, sound_banks;
+static unsigned benchmark_complete, sound_banks, level_logs;
 static void log_line(enum retro_log_level level, const char *fmt, ...)
 {
 	(void)level;
 	if (strstr(fmt, "fight: sound bank"))
 		sound_banks++;
+	if (strstr(fmt, "fight: difficulty %s"))
+		level_logs++;
 	if (strstr(fmt, "benchmark complete:"))
 		benchmark_complete++;
 }
 static uint16_t last_frame[FW * FH];
-static const char *players = "cpu";
+static const char *players = "cpu", *difficulty_option = "normal";
 static bool environment(unsigned cmd, void *data)
 {
 	switch (cmd) {
@@ -61,9 +64,11 @@ static bool environment(unsigned cmd, void *data)
 		return true;
 	case RETRO_ENVIRONMENT_SET_VARIABLES:
 		return true;
-	case RETRO_ENVIRONMENT_GET_VARIABLE:
-		((struct retro_variable *)data)->value = players;
+	case RETRO_ENVIRONMENT_GET_VARIABLE: {
+		struct retro_variable *v = data;
+		v->value = !strcmp(v->key, "fight_difficulty") ? difficulty_option : players;
 		return true;
+	}
 	case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
 		*(bool *)data = true;
 		return true;
@@ -121,6 +126,12 @@ static uint8_t *read_all(const char *path, size_t *n)
 	return p;
 }
 static void save(void *buf, size_t n) { assert(retro_serialize(buf, n)); }
+/* State word k of a saved state (after the 16-byte header). */
+static uint32_t get_word(const uint8_t *p, int k)
+{
+	p += 16 + 4 * k;
+	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
 /* ---- rules on exact ticks; expected numbers come from terry.json ---- */
 #define K(k) (1u << RETRO_DEVICE_ID_JOYPAD_##k)
 /* Words per fighter in a saved state, mirroring FIGHTER_WORDS in fighter.c. */
@@ -982,6 +993,7 @@ static void round_start(void)
  * show and best, two each. */
 #define COMBO_W 165
 #define LIST_W (COMBO_W + 8)
+#define LEVEL_W (LIST_W + 1)
 /* Combos: crouch LP chains keep P1 in hitstun, the count shows from the
  * second hit and stays COMBO_TICKS after P1 recovers; LP into a Power Wave
  * that lands after the hitstun is two single hits; guarded hits count
@@ -1137,6 +1149,74 @@ static void move_lists(void)
 	assert(s.mode == MODE_FIGHT && s.list && !s.paused);
 	step2(&s, K(START), 0);
 	assert(s.paused);
+}
+/* v * factor / 1000 rounded half up, at least 1 when v is nonzero (as
+ * fighter.c). */
+static int per_mille(int v, int factor)
+{
+	int r = (v * factor + 500) / 1000;
+	return v && !r ? 1 : r;
+}
+/* Difficulty: the level round-trips and 3 is rejected; on Easy every CPU
+ * strike on an idle P1 deals 3/4 of its damage (human port 1 or Normal:
+ * full); AI vs AI runs per level guard more and start more specials from
+ * Easy to Hard, and only Hard cancels its normals into specials. */
+static void difficulty(void)
+{
+	struct fight_state s, t;
+	uint32_t w[STATE_WORDS];
+	fight_reset(&s, 0);
+	assert(s.level == LEVEL_NORMAL);
+	s.level = LEVEL_HARD;
+	fight_encode(&s, w);
+	assert(fight_decode(&t, &pack, w) && t.level == LEVEL_HARD);
+	w[LEVEL_W] = LEVELS;
+	assert(!fight_decode(&t, &pack, w));
+	for (int level = LEVEL_EASY; level <= LEVEL_NORMAL; level++) {
+		unsigned checked = 0;
+		fight_reset(&s, 0);
+		s.level = (uint32_t)level;
+		fight_start(&s, &pack, terry, terry);
+		s.stage = 1;
+		for (int n = 0; n < 6000 && !s.ended && checked < 5; n++) {
+			struct fight_state before = s;
+			fight_step(&s, &pack, 0, 0, 0);
+			if (s.p[0].hp >= before.p[0].hp || live_shots(&before) || live_shots(&s) ||
+			    !s.p[1].move)
+				continue;
+			const struct move *m = &pack.chr[terry].move[s.p[1].move - 1];
+			if (m->spawn) /* a projectile launched and hit this tick */
+				continue;
+			int scale = level == LEVEL_EASY ? 750 : 1000;
+			assert(before.p[0].hp - s.p[0].hp ==
+			       per_mille(per_mille(m->hit.damage, scale), pack.chr[terry].stats.defense));
+			checked++;
+		}
+		assert(checked == 5);
+	}
+	unsigned guards[LEVELS], specials[LEVELS], cancels[LEVELS];
+	for (int level = 0; level < LEVELS; level++) {
+		fight_reset(&s, 1);
+		s.level = (uint32_t)level;
+		cancels[level] = 0;
+		for (int n = 0; n < 30000; n++) {
+			struct fight_state before = s;
+			fight_step(&s, &pack, 0, 0, 0);
+			for (int i = 0; i < 2 && s.mode == MODE_FIGHT && before.mode == MODE_FIGHT; i++)
+				cancels[level] += before.p[i].move && before.p[i].move <= MOVES &&
+						  s.p[i].move > MOVES;
+		}
+		assert(s.level == (uint32_t)level);
+		guards[level] = s.guards;
+		specials[level] = s.specials;
+		printf("difficulty %d: guards %u of %u contacts, specials %u, cancels %u\n", level,
+		       s.guards, s.hits, s.specials, cancels[level]);
+	}
+	assert(guards[LEVEL_EASY] < guards[LEVEL_NORMAL] && guards[LEVEL_NORMAL] < guards[LEVEL_HARD]);
+	assert(specials[LEVEL_EASY] < specials[LEVEL_NORMAL] &&
+	       specials[LEVEL_NORMAL] < specials[LEVEL_HARD]);
+	assert(cancels[LEVEL_HARD] > 0 && cancels[LEVEL_HARD] > cancels[LEVEL_NORMAL] &&
+	       cancels[LEVEL_HARD] > cancels[LEVEL_EASY]);
 }
 /* Mid-hitstop state with a live projectile, a buffered special and a
  * charge round-trips, replays identically and rejects impossible values
@@ -2062,6 +2142,7 @@ static void logic_tests(const uint8_t *data, size_t len)
 	round_start();
 	combos();
 	move_lists();
+	difficulty();
 	state_words();
 	stat_tests();
 	pack.stages = stages;
@@ -2169,6 +2250,9 @@ int main(int argc, char **argv)
 	memcpy(copy, "FGSTATE9", 8); /* before the select command list */
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
+	memcpy(copy, "FGSTAT10", 8); /* before the difficulty */
+	assert(!retro_unserialize(copy, n));
+	memcpy(copy, end, n);
 	memset(copy + 16 + 8 * 4, 0xff, 4);
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
@@ -2246,6 +2330,25 @@ int main(int argc, char **argv)
 	keys[1] = 0;
 	retro_unload_game();
 	players = "cpu";
+	/* The difficulty option: the state takes it at load and on the select
+	 * screen, a running ladder keeps its level, reset applies the option. */
+	difficulty_option = "hard";
+	assert(retro_load_game(&g));
+	retro_run();
+	save(copy, n);
+	assert(get_word(copy, LEVEL_W) == LEVEL_HARD);
+	keys[0] = 1u << RETRO_DEVICE_ID_JOYPAD_Y;
+	retro_run();
+	keys[0] = 0;
+	difficulty_option = "easy";
+	retro_run();
+	save(copy, n);
+	assert(get_word(copy, LEVEL_W) == LEVEL_HARD && !level_logs);
+	retro_reset();
+	save(copy, n);
+	assert(get_word(copy, LEVEL_W) == LEVEL_EASY && level_logs == 1);
+	retro_unload_game();
+	difficulty_option = "normal";
 	free(data);
 	data = read_all(argv[2], &len);
 	g.data = data;
@@ -2272,7 +2375,7 @@ int main(int argc, char **argv)
 	     "effect budget, camera and walls, sparks, sound events, content, "
 	     "RGB565/XRGB8888, audio, ports, replay, pause, state validation, frame "
 	     "data, hit/block/hitstop ticks, pushback and corner, guard heights, "
-	     "trades, combos, move lists, commands, buffer, prejump, cancels, follow-ups, projectiles and clash, "
+	     "trades, combos, move lists, difficulty, commands, buffer, prejump, cancels, follow-ups, projectiles and clash, "
 	     "specials, ladder, systems and stats, AI coverage and stress cycle "
 	     "passed");
 	return 0;
