@@ -204,7 +204,7 @@ DDR blob 在两边是同一个文件，legacy 能启动，说明 DDR 初始化�
 
 ## 待确认
 
-已经确认的：Mali 和 VPU 的电源域在不加载驱动时会断电（genpd 显示 off-0）。按 10mΩ 配的库仑计能读出合理的电量和电压。主线内核上能进入深度睡眠并恢复（2026-10 的日志里两次 `mem (deep)`，427 ms 恢复），dwc2 上的 USB 手柄唤醒后会断开再重新枚举，最长约 2.2 s 按键没反应，其中大部分是前端漏掉了同号的新节点、等 2 秒重扫才打开，已经改成移除后马上重扫（待实机验证，见 roadmap）。
+已经确认的：Mali 和 VPU 的电源域在不加载驱动时会断电（genpd 显示 off-0）。按 10mΩ 配的库仑计能读出合理的电量和电压。主线内核上能进入深度睡眠并恢复（2026-10 的日志里两次 `mem (deep)`，427 ms 恢复），dwc2 上的 USB 手柄唤醒后会断开再重新枚举，约 2.2 s 按键没反应。前端漏掉同号新节点的问题已经修好并在真机上确认，剩下的时间是内核里 dwc2 重新枚举失败两次、给端口重新上电后才成功（见 roadmap 的已知问题）。
 
 还没确认的：
 
@@ -219,7 +219,11 @@ DDR blob 在两边是同一个文件，legacy 能启动，说明 DDR 初始化�
 
 ## 当前状态
 
-2026-10-31 更新。legacy U-Boot 加主线 6.18 内核，前端（`app/frontend`）作为 PID 1 直接启动，内置 gpSP 和 mGBA 两个核心，另外有一个播放 `.mpg` 视频的核心。
+2026-11-03 更新。legacy U-Boot 加主线 6.18 内核，前端（`app/frontend`）作为 PID 1 直接启动，内置 gpSP 和 mGBA 两个核心，另外有播放 `.mpg` 视频和运行 `.fight` 格斗 POC 的核心。
+
+2026-10-30 到 11-03 的 14 次开机：视频解码挪进工作线程以后播放不再卡（没有丢帧和 underrun），但功耗没有比玩游戏低。开机恢复、退出时的即时存档、Date & time 写 RTC、从设置关机都在真机上确认了。充电的问题定位到 PMIC 没认到输入（PLUG_IN_STS 一直是 0，CHRG_IN 没被复位），电池其实在慢慢充，只是系统报 Not charging。唤醒后手柄约 2.2 s 不能用是内核 dwc2 重新枚举的问题。细节见 [roadmap.md](roadmap.md)。
+
+原生格斗引擎已接入标准 libretro 软件渲染 POC（原生与 qemu 集成回归通过，已有首轮合成负载真机结果，见 [POC 文档](fighter-poc.md)）；[方案调研](fighting-engine-research.md)：目标是 480×320 的拳皇式传统 1 对 1 跨作品对战，只需背景和共同地面，暂不考虑四人。已接入当前软件显示和音频宿主。2026-11-03 boot-0015：Max 下正常两人核心合成均值 5.49ms，额外 8/24/48 混合精灵分别 9.46/18.74/32.91ms，旋转约 3ms；前两档可约 60fps，后两档约 30/20fps 并有大量音频欠载。峰值 RSS 约 21.4MiB，最高采样温度 47.7°C。保留软件路线，先优化合成；完整十分钟和原作素材验收仍待完成。
 
 ### SD 卡布局
 
@@ -235,9 +239,11 @@ GBA 分区（下面写作 `<data>`）里的文件
 | 路径 | 用途 |
 |---|---|
 | `roms/*.gba` | ROM，可以放在任意深度的子文件夹里 |
+| `roms/*.fight` | 格斗 POC 内容包，自动选择 fighter 核心；实现和测试见 [POC 文档](fighter-poc.md)，后续任务见 [handover](fighter-handover.md) |
 | `roms/*.mpg` | 视频（MPEG-PS，MPEG-1 视频加 MP2 音频），和 ROM 混在一起列出，见下面的默认行为 |
 | `saves/<rom>.sav` | 存档，两个核心通用，只按文件名（不含文件夹）；没有 `.sav` 时会读同名的 RetroArch `.srm`，之后写回 `.sav` |
 | `saves/<rom>.<core>.state` | 即时存档，退出游戏时自动写，下次启动同一个 ROM 用同一个核心时恢复（见下面的默认行为）。和 `.sav` 一样只按文件名，按核心分开（`gpsp`、`mgba`），因为两个核心的格式不通用。mGBA 约 420 到 520KiB（随存档类型变），gpSP 固定约 416KiB |
+| `saves/<文件名含.fight>.fighter.state` | 格斗 POC 的即时存档，目前含宿主校验头共 184 字节；不写 `.sav`，与 GBA 状态独立 |
 | `bios/gba_bios.bin` | 可选的 GBA BIOS。没有的话 gpSP 用内置 BIOS，mGBA 用 HLE |
 | `config/settings.txt` | 全局设置：音量、亮度、LCD 网格、CPU 模式、音频模式、调试日志、开机恢复（`resume`）、视频画面（`video_scale`，fit 或 crop） |
 | `config/resume.txt` | 开机恢复的记录：游戏中关机时写，下次开机用掉就删（见下面的默认行为）。`rom=` 是相对 `roms/` 的路径，`core=` 是写即时存档的核心，`why=` 是怎么关的机，开机开始恢复前加一行 `attempted=1` |
@@ -296,3 +302,5 @@ GBA 分区（下面写作 `<data>`）里的文件
 - [ROCKNIX RG351P/M/V 设备页](https://rocknix.org/devices/anbernic/rg351pmv/)
 - [RetroGameCorps：RG351P 加装 WiFi 指南](https://retrogamecorps.com/2020/11/16/guide-install-your-own-wi-fi-chip-inside-the-rg351p/)
 - [CNX Software：RK3326 datasheet](https://www.cnx-software.com/2018/07/23/rockchip-rk3308-rk3326-datasheet/)
+
+2026-11-03 格斗方案补充：明确采用标准 libretro core（本机静态、桌面动态），通过统一绘制指令保留软件/GPU 后端扩展空间；先实现软件路径并用真实规模素材测量。MUGEN 行为兼容不作为目标。详见 [方案补充](fighting-engine-research.md#补充决定标准-libretro-core-与可替换渲染器)。
