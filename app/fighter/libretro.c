@@ -355,7 +355,7 @@ bool retro_load_game(const struct retro_game_info *g)
 	if (!g || !fight_assets(&assets, g->data, g->size, &automatic)) {
 		if (logger)
 			logger(RETRO_LOG_ERROR,
-			       "fight: invalid FIGHTP09 package (magic, length, hash, "
+			       "fight: invalid FIGHTP10 package (magic, length, hash, "
 			       "limits, frame, palette, system, stats, character, move, "
 			       "projectile or step data)\n");
 		return false;
@@ -381,7 +381,7 @@ bool retro_load_game(const struct retro_game_info *g)
 	benchmark_runs = 0;
 	if (logger) {
 		logger(RETRO_LOG_INFO,
-		       "fight: FIGHTP09 package %08x, %u characters, %u frames, %u "
+		       "fight: FIGHTP10 package %08x, %u characters, %u frames, %u "
 		       "palettes, %u steps, %u boxes, 480x320 60Hz 48kHz, software %s, %s, "
 		       "difficulty %s; L boxes R stress START pause\n",
 		       assets.hash, assets.characters, assets.frames, assets.palettes,
