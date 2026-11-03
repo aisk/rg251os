@@ -1,5 +1,5 @@
 /* Standard libretro fighter core: FIGHTP07 content, input, deterministic
- * FGSTATE7 saves, audio and software frames. Timing below measures work only;
+ * FGSTAT11 saves, audio and software frames. Timing below measures work only;
  * the frontend owns pacing. Logs the system profiles, the roster with each
  * character's system and resolved stats, every move's frame data and class
  * (follow-ups with their parent and window) and the resident memory at
@@ -14,8 +14,8 @@
  * each scene (0 = two fighters, 1-3 = +8, +24, +48 requested alpha/additive
  * effects, capped by the per-frame effect pixel budget) every 600 runs,
  * also with debug off: logic/render/audio/cache times, how many effects
- * were drawn of those requested, and the ladder and special/clash
- * counters.
+ * were drawn of those requested, and the ladder, special/clash and max
+ * combo counters; each KO logs the round with both lives and max combos.
  *
  * Sound comes from the bank next to the content (<pack>.fightsnd, found
  * from retro_game_info's path; audio.c): after each unpaused tick the rule
@@ -26,6 +26,9 @@
  * track; every 600 runs the voices started and stolen, the peak, the music
  * position and loops and the MP2 frames, seeks and decode time. Options
  * fight_volume, fight_music_volume and fight_sfx_volume set the levels.
+ * fight_difficulty (easy, normal, hard) sets the CPU (fighter.c): the state
+ * takes it at load, reset and on the select screen (logged when it
+ * changes), the load line, each KO and the 600-run summary name it.
  *
  * Buttons (RetroPad ids; the RG351P shell labels match, SNES layout):
  * Y (left) light punch, X (top) heavy punch, B (bottom) light kick,
@@ -34,8 +37,9 @@
  * then up Rising Tackle; Iori's 214 Aoi Hana takes 214+P twice more as
  * it hits). Back guards (down-back guards low), UP jumps, L
  * toggles the hurt/hit box overlay, R cycles the stress scene, START
- * pauses; A or B skips the KO screen. In the select screen the d-pad moves
- * and any attack button picks. The desktop option fight_players=two lets
+ * pauses (showing P1's command list); A or B skips the KO screen. In the
+ * select screen the d-pad moves, any attack button picks and START shows
+ * or hides the highlighted character's command list. The desktop option fight_players=two lets
  * port 1 drive the ladder's opponent; the device only has port 0. */
 #include "libretro.h"
 #include "audio.h"
@@ -62,6 +66,11 @@ static int16_t audio[1600];
 static struct audio sound;
 static char sound_path[4096];
 static int loaded, format32, two_players;
+/* The fight_difficulty option (enum level); the state takes it on the
+ * select screen and at load or reset, so a ladder run keeps the level it
+ * started with and a state loaded mid-run keeps its own. */
+static unsigned level = LEVEL_NORMAL;
+static const char *const level_names[LEVELS] = {"easy", "normal", "hard"};
 static unsigned devices[2] = {RETRO_DEVICE_JOYPAD, RETRO_DEVICE_JOYPAD};
 static unsigned benchmark_runs;
 static uint64_t samples[4][600];
@@ -175,11 +184,13 @@ static void report(void)
 		       state.cam, sample_count);
 		logger(RETRO_LOG_INFO,
 		       "fight: tick %u round %u hits %u guards %u specials %u clashes %u "
-		       "mode %u run %u stage %u beaten %08x %s vs %s; frontend perf "
-		       "measures rotate/present/audio output\n",
+		       "max combo %u/%u difficulty %s mode %u run %u stage %u beaten %08x %s vs "
+		       "%s; frontend perf measures rotate/present/audio output\n",
 		       state.tick, state.round, state.hits, state.guards, state.specials,
-		       state.clashes, state.mode, state.run, state.stage, state.beaten,
-		       assets.chr[state.chr[0]].name, assets.chr[state.chr[1]].name);
+		       state.clashes, state.best[0], state.best[1], level_names[state.level],
+		       state.mode, state.run,
+		       state.stage, state.beaten, assets.chr[state.chr[0]].name,
+		       assets.chr[state.chr[1]].name);
 	}
 	if (logger && sound.bank) {
 		const struct audio_stats *st = &sound.stats;
@@ -204,6 +215,7 @@ void retro_set_environment(retro_environment_t cb)
 	env = cb;
 	static const struct retro_variable vars[] = {
 	    {"fight_players", "Players; cpu|two"},
+	    {"fight_difficulty", "CPU difficulty; normal|easy|hard"},
 	    {"fight_volume", "Master volume; 100|90|80|70|60|50|40|30|20|10|0"},
 	    {"fight_music_volume", "Music volume; 60|70|80|90|100|0|10|20|30|40|50"},
 	    {"fight_sfx_volume", "Effects volume; 100|90|80|70|60|50|40|30|20|10|0"},
@@ -263,6 +275,22 @@ static void options(void)
 	sound.master = volume("fight_volume", 100);
 	sound.music_level = volume("fight_music_volume", 60);
 	sound.sfx_level = volume("fight_sfx_volume", 100);
+	struct retro_variable d = {"fight_difficulty", NULL};
+	level = LEVEL_NORMAL;
+	if (env && env(RETRO_ENVIRONMENT_GET_VARIABLE, &d) && d.value)
+		for (unsigned k = 0; k < LEVELS; k++)
+			if (!strcmp(d.value, level_names[k]))
+				level = k;
+}
+/* Hand the option to the state (on the select screen, or always with
+ * force) and log a change. */
+static void apply_level(int force)
+{
+	if ((force || state.mode == MODE_SELECT) && state.level != level) {
+		state.level = level;
+		if (logger)
+			logger(RETRO_LOG_INFO, "fight: difficulty %s\n", level_names[level]);
+	}
 }
 /* Load the sound bank next to the content; without it the game is silent. */
 static void open_sound(const struct retro_game_info *g)
@@ -327,6 +355,7 @@ bool retro_load_game(const struct retro_game_info *g)
 	}
 	fight_reset(&state, automatic);
 	options();
+	state.level = level;
 	open_sound(g);
 	sample_count = 0;
 	effects_requested = effects_drawn = 0;
@@ -337,11 +366,12 @@ bool retro_load_game(const struct retro_game_info *g)
 	if (logger) {
 		logger(RETRO_LOG_INFO,
 		       "fight: FIGHTP07 package %08x, %u characters, %u frames, %u "
-		       "palettes, %u steps, %u boxes, 480x320 60Hz 48kHz, software %s, %s; "
-		       "L boxes R stress START pause\n",
+		       "palettes, %u steps, %u boxes, 480x320 60Hz 48kHz, software %s, %s, "
+		       "difficulty %s; L boxes R stress START pause\n",
 		       assets.hash, assets.characters, assets.frames, assets.palettes,
 		       assets.steps, assets.boxes, format32 ? "XRGB8888" : "RGB565",
-		       automatic ? "automatic ladder, 4-scene cycle" : "arcade ladder vs CPU");
+		       automatic ? "automatic ladder, 4-scene cycle" : "arcade ladder vs CPU",
+		       level_names[level]);
 		/* Resident bytes in use (the static limits are larger). */
 		unsigned rules = (unsigned)(assets.steps * sizeof(struct step) +
 					    assets.boxes * sizeof(struct box) +
@@ -440,6 +470,7 @@ void retro_reset(void)
 {
 	report();
 	fight_reset(&state, state.automatic);
+	apply_level(1);
 	audio_reset(&sound);
 	want();
 	benchmark_runs = 0;
@@ -460,10 +491,18 @@ void retro_run(void)
 			     devices[p] == RETRO_DEVICE_JOYPAD && k < 16; k++)
 				if (input(p, RETRO_DEVICE_JOYPAD, 0, k))
 					keys[p] |= 1u << k;
-	uint32_t old_tick = state.tick;
+	apply_level(0);
+	uint32_t old_tick = state.tick, old_ended = state.ended;
 	uint64_t t0 = tick_us();
 	fight_step(&state, &assets, keys[0], keys[1], two_players);
 	uint64_t t1 = tick_us();
+	if (!old_ended && state.ended && logger)
+		logger(RETRO_LOG_INFO,
+		       "fight: KO stage %u round %u %s vs %s life %d/%d, max combo %u/%u, "
+		       "difficulty %s, tick %u\n",
+		       state.stage, state.round + 1, assets.chr[state.chr[0]].name,
+		       assets.chr[state.chr[1]].name, state.p[0].hp, state.p[1].hp, state.best[0],
+		       state.best[1], level_names[state.level], state.tick);
 	if (state.automatic && state.tick != old_tick && ++benchmark_runs == 36000 &&
 	    logger)
 		logger(
@@ -542,7 +581,7 @@ bool retro_serialize(void *data, size_t size)
 	uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	fight_encode(&state, w);
-	memcpy(p, "FGSTATE7", 8);
+	memcpy(p, "FGSTAT11", 8);
 	put32(p + 8, assets.hash);
 	put32(p + 12, state.automatic);
 	for (int i = 0; i < STATE_WORDS; i++)
@@ -555,7 +594,7 @@ bool retro_unserialize(const void *data, size_t size)
 	const uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	if (!loaded || !p || size != retro_serialize_size() ||
-	    memcmp(p, "FGSTATE7", 8) || get32(p + 8) != assets.hash ||
+	    memcmp(p, "FGSTAT11", 8) || get32(p + 8) != assets.hash ||
 	    get32(p + 12) != state.automatic)
 		return false;
 	for (int i = 0; i < STATE_WORDS; i++)

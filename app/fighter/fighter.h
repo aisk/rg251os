@@ -4,7 +4,8 @@
  * stages), bounded draw commands, the per-tick sound events and the RGB565
  * software renderer interface. Rules (fighter.c) read the pack's steps,
  * boxes, moves and each character's resolved stats, keep the camera, the
- * spark pool and the sound events in the state and only emit draw commands;
+ * spark pool and the sound events in the state and only emit draw commands
+ * (the HUD, banners and command lists included);
  * render.c owns the pack decoder (which fills stats and class defaults from
  * the character's system and applies its damage scale), the render cache
  * (the fighters and stage the state shows, expanded to RGB565 lazily and in
@@ -113,10 +114,20 @@
 #define HISTORY 32
 /* Rounds a fighter must win to take a match (1 = single round). */
 #define ROUNDS_TO_WIN 1
-/* Ticks of the versus card before a ladder round: the rules hold still
- * (no input, no AI) while the core fills the render cache; ROUND_START
- * sounds when it ends. */
+/* A ladder round opens with the versus card (INTRO_TICKS, while the core
+ * fills the render cache), then READY over the frozen stage (READY_TICKS);
+ * the rules hold still through both (no input, no AI). The round runs from
+ * ROUND_TICKS on, when ROUND_START sounds, and FIGHT stays on screen for
+ * FIGHT_TICKS more (the timer stops at BANNER_END). */
 #define INTRO_TICKS 45
+#define READY_TICKS 36
+#define FIGHT_TICKS 24
+#define ROUND_TICKS (INTRO_TICKS + READY_TICKS)
+#define BANNER_END (ROUND_TICKS + FIGHT_TICKS)
+/* Combo counter: "N HITS" stays this many ticks after a combo of at least
+ * two hits ends; counts stop at MAX_COMBO. */
+#define COMBO_TICKS 60
+#define MAX_COMBO 99
 /* Cast frames a scene can report missing (see struct scene). */
 #define SCENE_MISSES 16
 enum action {
@@ -165,6 +176,8 @@ enum effect_key {
 	FX_SLASH_SPECIAL, FX_SLASH_GUARD, FX_BLOOD_LIGHT, FX_BLOOD_HEAVY, FX_BLOOD_SPECIAL,
 	FX_KEYS
 };
+/* CPU difficulty (struct fight_state level; see the AI in fighter.c). */
+enum level { LEVEL_EASY, LEVEL_NORMAL, LEVEL_HARD, LEVELS };
 /* Game flow: the arcade ladder (select, fights, loss result, clear). */
 enum mode { MODE_SELECT, MODE_FIGHT, MODE_RESULT, MODE_CLEAR, MODES };
 /* One fighter. x is in quarter pixels (x / 4 is the anchor column), y in
@@ -223,7 +236,8 @@ struct spark_slot {
  *   CLASH           two projectiles cancel out. side: the lower slot's owner.
  *   KO              a fighter's life reaches 0. side: the fighter knocked
  *                   out.
- *   ROUND_START     a round begins (fight_start). side 0, P1's character.
+ *   ROUND_START     a round begins: FIGHT after READY in the ladder, at once
+ *                   in fight_start. side 0, P1's character.
  * side is 0 or 1, chr the character index in the pack, system its system
  * profile index (struct assets sys[]), move a move index + 1 or 0. */
 enum sound_id {
@@ -241,10 +255,18 @@ struct sound_event {
  * side; in the select screen chr[0] is the cursor. beaten has a bit per
  * character beaten in this ladder run, stage counts from 1, wins counts
  * rounds in the current match, timer counts ticks in a select, result or
- * clear screen and, in the fight mode, the intro (the round runs once it
- * reaches INTRO_TICKS), run counts ladder runs (the Auto rotation). arena is the
+ * clear screen and, in the fight mode, the versus card and READY (the round
+ * runs once it reaches ROUND_TICKS) and the FIGHT banner (up to
+ * BANNER_END), run counts ladder runs (the Auto rotation). arena is the
  * pack stage of the fight (0 without stages), cam the camera column, shake
- * and flash the remaining screen shake and KO flash ticks. */
+ * and flash the remaining screen shake and KO flash ticks. Combos, per
+ * attacking side: combo counts the unguarded hits since the defender last
+ * left hitstun (0 = none running), shown the count on screen (at least 2,
+ * 0 = none) for show more ticks once the combo ended, best the longest
+ * combo of this round. list is set while the select screen shows the
+ * highlighted character's command list (START toggles it there). level is
+ * the CPU difficulty (enum level, LEVEL_NORMAL after fight_reset; the core
+ * sets it from its option while the select screen shows). */
 struct fight_state {
 	uint32_t tick, rng, previous, paused, stress, boxes, automatic, round;
 	uint32_t mode, timer, beaten, stage, run, wins[2], chr[2], pal[2];
@@ -256,6 +278,7 @@ struct fight_state {
 	/* This tick's sound events (see enum sound_id). */
 	uint32_t sounds;
 	struct sound_event sound[MAX_SOUND_EVENTS];
+	uint32_t combo[2], shown[2], show[2], best[2], list, level;
 };
 /* One opaque run in a frame row; pixels index the frame's data. */
 struct span {
@@ -523,6 +546,18 @@ uint32_t fight_prefetch(struct assets *a, uint32_t budget);
 uint32_t fight_demand(struct assets *a, const struct scene *scene);
 int fight_ready(const struct assets *a);
 int fight_cast(struct assets *a, const struct fight_state *s);
+/* The command list of the pause and select screens, from the pack: every
+ * special without a parent in pack order, then every normal that has
+ * follow-ups, each followed by its follow-ups one level deeper (depth, at
+ * most 3). A line is the motion as the HUD font's arrows for a fighter
+ * facing right (bytes 1..9 point like the numpad digit; [d] holds d), " + "
+ * and the buttons (P, K, or LP/HP/LK/HK; S, LS, HS for weapon punches),
+ * then the tags PROJECTILE, LOW, OVERHEAD and ON CONTACT (a follow-up that
+ * needs its parent to connect). Returns the line count. */
+#define LIST_LINES 16
+#define LIST_TEXT 48
+unsigned fight_move_list(const struct character *c, char text[LIST_LINES][LIST_TEXT],
+			 uint8_t depth[LIST_LINES]);
 void fight_encode(const struct fight_state *s, uint32_t words[STATE_WORDS]);
 int fight_decode(struct fight_state *s, const struct assets *a,
 		 const uint32_t words[STATE_WORDS]);
