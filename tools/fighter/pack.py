@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a FIGHTP07 content pack from ripped sprite sheets and their manifests.
+"""Build a FIGHTP08 content pack from ripped sprite sheets and their manifests.
 
 Each manifest (assets/fighter/<name>.json) describes one sheet and is the
 source of truth for it: every frame is a hand-checked sheet rectangle plus a
@@ -77,7 +77,10 @@ top-level keys such as "notes" are ignored):
               several). A move's vertical motion must never take it below the
               ground and must end back on it.
               Moves: the eight normals (stand/crouch lp/hp/lk/hk) are fixed by
-              name; any other name is a special and needs
+              name; any other name is a special. A special may have "name",
+              shown in the command lists (A-Z, a-z, 0-9, space and "-", at
+              most 16, upper-cased in the pack); without it the key is used
+              the way character names are. Every special needs
               "trigger": {"motion": M, "buttons": B} with M one of 236, 214,
               623, [4]6, [2]8 (directions relative to facing; [d] = charge)
               and B "P", "K" or a list of lp/hp/lk/hk. Specials are checked
@@ -186,7 +189,7 @@ hyper_hop, chip, meters, mechanics, scaling, stun and guard are accepted for
 later steps and not packed.
 
 Pack layout, all little endian (the C loader in app/fighter/render.c checks it):
-  header     "FIGHTP07", u32 size, u32 FNV-1a of bytes 16..size, u32 flags
+  header     "FIGHTP08", u32 size, u32 FNV-1a of bytes 16..size, u32 flags
              (bit 0 automatic), u32 palettes, frames, characters, effects,
              systems, sparks, stages
   palette    u16 sheet, u16 n (1..256), n x u16 RGB565
@@ -215,8 +218,9 @@ Pack layout, all little endian (the C loader in app/fighter/render.c checks it):
              guard, cancel bits, class 0 none or 1 + class, defaults: bit 0
              hitstun, 1 blockstun, 2 hitstop from the class, packed as 0;
              after = parent move index + 1 or 0, window open, close, contact
-             0 or 1, all 0 without a parent): the eight normals, then the
-             specials in priority order; projectiles x 18 u16 (first step,
+             0 or 1, all 0 without a parent), u8 name length and the
+             upper-case name (0 for normals, 1..16 for specials): the eight
+             normals, then the specials in priority order; projectiles x 18 u16 (first step,
              steps, speed, lifetime, i16 offset x, i16 offset y, damage, chip,
              hitstun, blockstun, hitstop, pushback, block_pushback, guard,
              blend, alpha, class, defaults); steps x (u16 frame, u16 ticks,
@@ -244,7 +248,7 @@ import struct
 import sys
 import zlib
 
-MAGIC = b'FIGHTP07'
+MAGIC = b'FIGHTP08'
 # Order matters: these are the C enums in app/fighter/fighter.h.
 ACTIONS = ['idle', 'walk_forward', 'walk_back', 'jump', 'guard', 'hurt', 'ko',
            'crouch', 'crouch_guard', 'crouch_hurt']
@@ -274,6 +278,7 @@ MAX_VELOCITY = 16
 MAX_HEIGHT = 300
 MAX_LIFETIME = 600
 MAX_NAME = 12
+MAX_MOVE_NAME = 16
 MAX_CHARACTERS = 32
 MAX_SYSTEMS = 8
 MAX_LIFE = 4000
@@ -840,6 +845,20 @@ def display_name(name):
     return text
 
 
+def move_name(name, key, what):
+    """The command-list name of a special: its "name", else its key."""
+    if name is None:
+        name = key.replace('_', ' ')
+    if not isinstance(name, str):
+        raise ValueError(f'{what}: name is a string')
+    text = name.upper()
+    if not 1 <= len(text) <= MAX_MOVE_NAME or not set(text) <= NAME_CHARS or \
+            text != text.strip():
+        raise ValueError(f'{what}: move names are 1..{MAX_MOVE_NAME} of A-Z, a-z, 0-9, '
+                         f'space and -')
+    return text
+
+
 MOVE_SRC_KEYS = set(HIT_FIELDS) | {'steps', 'class', 'guard', 'cancel', 'trigger', 'speed',
                                    'lifetime', 'offset', 'blend', 'alpha'}
 STAT_SRC_KEYS = {'life', 'defense', 'walk', 'walk_back', 'jump', 'prejump', 'weight', 'height'}
@@ -856,6 +875,8 @@ class Character:
         self.display = display_name(name)
         self.steps, self.boxes, self.actions = [], [], []
         self.moves, self.move_names, self.projectiles, self.projectile_names = [], [], [], []
+        # The upper-case command-list name of each move ('' for normals).
+        self.labels = []
         # Per move: None or (parent name, [open, close], contact).
         self.follow = []
         self.hits, self.projectile_hits = [], []
@@ -988,7 +1009,7 @@ class Character:
             what = f'{name} {move}'
             special = move not in MOVES
             known = {'steps', 'guard', 'cancel', 'class', 'src'} | set(HIT_FIELDS) | \
-                ({'trigger'} if special else set())
+                ({'trigger', 'name'} if special else set())
             if set(mv) - known or not {'steps', 'guard', 'cancel'} <= set(mv) or \
                     (special and 'trigger' not in mv):
                 raise ValueError(f'{what}: fields must be {sorted(known)} (hit fields optional '
@@ -1038,6 +1059,7 @@ class Character:
             self.moves.append((*head, first, count, *hit.packed, GUARDS.index(mv['guard']), cancel,
                                *hit.tail(), 0, 0, 0, 0))
             self.move_names.append(move)
+            self.labels.append(move_name(mv.get('name'), move, what) if special else '')
             self.follow.append(follow)
         # Follow-ups name their parent; the window lies inside its length.
         for k, follow in enumerate(self.follow):
@@ -1066,8 +1088,8 @@ class Character:
                            len(self.projectiles))
         for first, count in self.actions:
             out += struct.pack('<HH', first, count)
-        for mv in self.moves:
-            out += struct.pack('<20H', *mv)
+        for mv, label in zip(self.moves, self.labels):
+            out += struct.pack('<20HB', *mv, len(label)) + label.encode()
         for pr in self.projectiles:
             out += struct.pack('<4H2h12H', *pr)
         for s in self.steps:

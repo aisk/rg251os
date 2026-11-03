@@ -7,7 +7,7 @@ Terry's manifest as it was before convert-stats.py ran (no sheet decoding):
 the real files load, every malformed variant is refused with ValueError,
 stats resolve from the system plus overrides, class defaults and the damage
 scale give the expected numbers, follow-ups pack their parent, window and
-contact flag, and the conversion keeps every loaded
+contact flag, specials pack their names (every roster special has one), and the conversion keeps every loaded
 value and is idempotent. It also checks that every roster manifest is
 already converted."""
 import copy
@@ -130,6 +130,27 @@ def main():
     assert c.moves[k][16:] == (c.move_names.index('power_wave') + 1, 3, 9, 1)
     assert c.moves[k - 1][16:] == (0, 0, 0, 0)
     assert character(follow(after='stand_hp', window=[0, 0])).moves[k][16:19] == (2, 0, 0)
+
+    # Move names: a special's "name" upper-cased, else its key; normals none.
+    named = with_terry(lambda c, _: c['moves']['power_wave'].update(name='Power-Wave 2'))
+    c = character(named)
+    assert c.labels[c.move_names.index('power_wave')] == 'POWER-WAVE 2'
+    assert c.labels[c.move_names.index('burn_knuckle')] == 'BURN KNUCKLE'
+    assert not any(c.labels[:len(pack.MOVES)])
+    for bad in ['', 'A' * 17, 'Power.Wave', ' Wave', 3]:
+        refused(f'move name {bad!r}', lambda b=bad: character(
+            with_terry(lambda c, _: c['moves']['power_wave'].update(name=b))))
+    refused('a named normal', lambda: character(
+        with_terry(lambda c, _: c['moves']['stand_lp'].update(name='Jab'))))
+    refused('a key too long for a name', lambda: character(with_terry(
+        lambda c, _: c['moves'].update(power_wave_with_a_long_key=c['moves'].pop('power_wave')))))
+    # Every roster special has a name.
+    roster = json.loads((ASSETS / 'roster.json').read_text())
+    for path in roster['manifests']:
+        for cname, ch in json.loads((ASSETS / path).read_text())['characters'].items():
+            for k, mv in ch['moves'].items():
+                if k not in pack.MOVES and 'name' not in mv:
+                    sys.exit(f'pack-test: {cname} {k} has no name')
 
     # Malformed systems.json.
     bad_systems = [

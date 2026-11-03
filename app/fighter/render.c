@@ -1,8 +1,8 @@
-/* FIGHTP07 pack decoder, render cache and clipped RGB565 software
+/* FIGHTP08 pack decoder, render cache and clipped RGB565 software
  * draw-command backend. The decoder checks every count, offset and index
  * against the file length and the resident limits in fighter.h (palettes
  * and frames per sheet, system profiles with walls and effect sets, stats,
- * names, box bounds and counts, move, special, projectile and step motion
+ * character and move names, box bounds and counts, move, special, projectile and step motion
  * data, spark animations, stages with their layers, edge rules and anims),
  * keeps the whole roster's rule data and palette-index frames and every
  * stage's palette-index layers resident, resolves each character's stats
@@ -436,6 +436,16 @@ static int character(struct reader *r, struct assets *a, struct character *c, un
 			return 0;
 		unsigned guard = u16(r), cancel = u16(r), cls = u16(r), defaults = u16(r);
 		unsigned after = u16(r), open = u16(r), close = u16(r), contact = u16(r);
+		/* Specials have a name, normals none. */
+		unsigned name_len = u8(r);
+		if (!r->ok || name_len > MAX_MOVE_NAME || !name_len != !kind)
+			return 0;
+		memset(m->name, 0, sizeof(m->name));
+		for (unsigned i = 0; i < name_len; i++) {
+			m->name[i] = (char)u8(r);
+			if (!name_char((unsigned char)m->name[i]))
+				return 0;
+		}
 		/* Follow-ups are specials with another parent; only they may use
 		 * the held-direction commands. The window is checked once the
 		 * parent's length is known. */
@@ -827,7 +837,7 @@ static int read_stages(struct reader *r, struct assets *a, unsigned n)
 int fight_assets(struct assets *a, const void *data, size_t size, int *automatic)
 {
 	struct reader r = {data, 0, size, 1};
-	if (!data || size < 48 || memcmp(data, "FIGHTP07", 8))
+	if (!data || size < 48 || memcmp(data, "FIGHTP08", 8))
 		return 0;
 	r.at = 8;
 	uint32_t length = u32(&r), hash = u32(&r), flags = u32(&r);

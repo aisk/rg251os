@@ -7,7 +7,8 @@
  * the select, result and clear screens, the READY/FIGHT round start and the
  * stress scenes, plus the draw-command list (parallax stage or the flat
  * fallback, the attacking fighter drawn on top, sparks, L overlays the real
- * boxes, "N HITS", the pause and select command lists; a frame or stage
+ * boxes, "N HITS", the pause and select command lists with the specials'
+ * names; a frame or stage
  * the render cache has not expanded yet is left out and reported in the
  * scene). Rules pick an
  * action or move and its elapsed ticks; the pack's steps map that onto
@@ -1382,50 +1383,70 @@ static void list_line(const struct character *c, unsigned k, char *out)
 	if (m->after && m->contact)
 		append(out, "  ON CONTACT");
 }
-static void list_children(const struct character *c, unsigned parent, unsigned depth,
-			  char text[LIST_LINES][LIST_TEXT], uint8_t level[LIST_LINES], unsigned *n)
+struct list {
+	char name[LIST_LINES][MAX_MOVE_NAME + 1], text[LIST_LINES][LIST_TEXT];
+	uint8_t depth[LIST_LINES];
+	unsigned n;
+};
+/* Move k at depth, then its follow-ups one level deeper. */
+static void list_add(const struct character *c, unsigned k, unsigned depth, struct list *l)
 {
-	for (unsigned k = MOVES; depth <= 3 && k < c->moves && *n < LIST_LINES; k++)
-		if (c->move[k].after == parent + 1) {
-			list_line(c, k, text[*n]);
-			level[(*n)++] = (uint8_t)depth;
-			list_children(c, k, depth + 1, text, level, n);
-		}
+	if (depth > 3 || l->n >= LIST_LINES)
+		return;
+	memcpy(l->name[l->n], c->move[k].name, sizeof(l->name[0]));
+	list_line(c, k, l->text[l->n]);
+	l->depth[l->n++] = (uint8_t)depth;
+	for (unsigned j = MOVES; j < c->moves; j++)
+		if (c->move[j].after == k + 1)
+			list_add(c, j, depth + 1, l);
 }
-unsigned fight_move_list(const struct character *c, char text[LIST_LINES][LIST_TEXT],
-			 uint8_t depth[LIST_LINES])
+unsigned fight_move_list(const struct character *c, char name[LIST_LINES][MAX_MOVE_NAME + 1],
+			 char text[LIST_LINES][LIST_TEXT], uint8_t depth[LIST_LINES])
 {
-	unsigned n = 0;
-	for (unsigned k = MOVES; k < c->moves && n < LIST_LINES; k++)
-		if (!c->move[k].after) {
-			list_line(c, k, text[n]);
-			depth[n++] = 0;
-			list_children(c, k, 1, text, depth, &n);
-		}
-	for (unsigned k = 0; k < MOVES && n < LIST_LINES; k++) {
+	struct list l;
+	l.n = 0;
+	for (unsigned k = MOVES; k < c->moves; k++)
+		if (!c->move[k].after)
+			list_add(c, k, 0, &l);
+	for (unsigned k = 0; k < MOVES; k++) {
 		int parent = 0;
 		for (unsigned j = MOVES; j < c->moves; j++)
 			parent |= c->move[j].after == k + 1;
-		if (parent) {
-			list_line(c, k, text[n]);
-			depth[n++] = 0;
-			list_children(c, k, 1, text, depth, &n);
-		}
+		if (parent)
+			list_add(c, k, 0, &l);
 	}
-	return n;
+	memcpy(name, l.name, sizeof(l.name));
+	memcpy(text, l.text, sizeof(l.text));
+	memcpy(depth, l.depth, sizeof(l.depth));
+	return l.n;
 }
 /* The list at x, y in lines of step pixels (follow-ups indented under a
- * ">"), then the normals legend; returns the y below it. */
-static int move_list(struct scene *out, const struct character *c, int x, int y, int step)
+ * ">"), then the normals legend; returns the y below it. Each move shows
+ * its name (white) and its command (light green): in one row with the
+ * commands in a column after the longest name, or with two_rows the
+ * command in the row under the name (the narrow select panel). */
+static int move_list(struct scene *out, const struct character *c, int x, int y, int step,
+		     int two_rows)
 {
-	char lines[LIST_LINES][LIST_TEXT], legend[LIST_TEXT] = "";
+	char names[LIST_LINES][MAX_MOVE_NAME + 1], lines[LIST_LINES][LIST_TEXT];
+	char legend[LIST_TEXT] = "";
 	uint8_t depth[LIST_LINES];
-	unsigned n = fight_move_list(c, lines, depth);
+	unsigned n = fight_move_list(c, names, lines, depth);
+	int column = 0;
+	for (unsigned i = 0; i < n; i++) {
+		int w = depth[i] * 16 + text_width(names[i]) + (names[i][0] ? 16 : 0);
+		column = w > column ? w : column;
+	}
 	for (unsigned i = 0; i < n; i++, y += step) {
 		int dx = depth[i] * 16;
 		if (depth[i])
 			text(out, x + dx - 10, y, ">", 0x8410);
-		text(out, x + dx, y, lines[i], 0xffff);
+		if (names[i][0]) {
+			text(out, x + dx, y, names[i], 0xffff);
+			if (two_rows)
+				y += step;
+		}
+		text(out, x + (two_rows ? dx + (names[i][0] ? 16 : 0) : column), y, lines[i], 0xafe5);
 	}
 	if (!n) {
 		text(out, x, y, "NO SPECIALS", 0x8410);
@@ -1545,18 +1566,19 @@ static void idle_sprite(struct scene *out, const struct fight_state *s, const st
 }
 /* The difficulty at the top right of the select screen and on the versus
  * card. */
+static const char *const level_names[LEVELS] = {"CPU EASY", "CPU NORMAL", "CPU HARD"};
 static void difficulty(struct scene *out, const struct fight_state *s, int y)
 {
-	static const char *const names[LEVELS] = {"CPU EASY", "CPU NORMAL", "CPU HARD"};
 	static const uint16_t colors[LEVELS] = {0x07e0, 0xffff, 0xf800};
-	const char *name = names[s->level];
+	const char *name = level_names[s->level];
 	text(out, 464 - text_width(name), y, name, colors[s->level]);
 }
-/* The select screen's difficulty, with the key that changes it. */
+/* The select screen's difficulty, with the key that changes it in grey
+ * on its left. */
 static void select_difficulty(struct scene *out, const struct fight_state *s)
 {
 	difficulty(out, s, 12);
-	text(out, 464 - text_width("R CHANGE"), 26, "R CHANGE", 0x8410);
+	text(out, 464 - text_width(level_names[s->level]) - text_width("R "), 12, "R", 0x8410);
 }
 /* The select screen's command list: the highlighted fighter on the left,
  * its list in a panel on the right. */
@@ -1570,7 +1592,7 @@ static void select_list(const struct fight_state *s, const struct assets *a, str
 	text(out, 16, 304, "START BACK", 0x8410);
 	rect(out, 196, 32, 276, 280, 0x2124, OPAQUE, 255);
 	text(out, 206, 40, c->name, 0xffe0);
-	move_list(out, c, 206, 60, 14);
+	move_list(out, c, 206, 60, 14, 1);
 }
 static void select_scene(const struct fight_state *s, const struct assets *a, struct scene *out)
 {
@@ -1672,7 +1694,7 @@ static void pause_panel(struct scene *out, const struct fight_state *s, const st
 	rect(out, 44, 54, FW - 88, 250, 0x0841, ALPHA, 224);
 	text_cell(out, (FW - 19 * 4) / 2, 28, "PAUSE", 0xffff, 4);
 	text(out, 60, 62, c->name, 0xffe0);
-	int y = move_list(out, c, 60, 82, 14);
+	int y = move_list(out, c, 60, 82, 14, 0);
 	text(out, 60, y + 6, "START RESUME", 0x8410);
 }
 /* READY over the frozen round, then FIGHT as it begins: big glyphs (cell

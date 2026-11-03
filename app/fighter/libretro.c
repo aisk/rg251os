@@ -1,7 +1,8 @@
-/* Standard libretro fighter core: FIGHTP07 content, input, deterministic
+/* Standard libretro fighter core: FIGHTP08 content, input, deterministic
  * FGSTAT11 saves, audio and software frames. Timing below measures work only;
  * the frontend owns pacing. Logs the system profiles, the roster with each
  * character's system and resolved stats, every move's frame data and class
+ * (specials with their name)
  * (follow-ups with their parent and window) and the resident memory at
  * load, and the stages and spark sets. The render cache is filled a slice
  * at a time: each run names what the state shows, expands at most
@@ -349,7 +350,7 @@ bool retro_load_game(const struct retro_game_info *g)
 	if (!g || !fight_assets(&assets, g->data, g->size, &automatic)) {
 		if (logger)
 			logger(RETRO_LOG_ERROR,
-			       "fight: invalid FIGHTP07 package (magic, length, hash, "
+			       "fight: invalid FIGHTP08 package (magic, length, hash, "
 			       "limits, frame, palette, system, stats, character, move, "
 			       "projectile or step data)\n");
 		return false;
@@ -375,7 +376,7 @@ bool retro_load_game(const struct retro_game_info *g)
 	benchmark_runs = 0;
 	if (logger) {
 		logger(RETRO_LOG_INFO,
-		       "fight: FIGHTP07 package %08x, %u characters, %u frames, %u "
+		       "fight: FIGHTP08 package %08x, %u characters, %u frames, %u "
 		       "palettes, %u steps, %u boxes, 480x320 60Hz 48kHz, software %s, %s, "
 		       "difficulty %s; L boxes R stress START pause\n",
 		       assets.hash, assets.characters, assets.frames, assets.palettes,
@@ -444,9 +445,9 @@ bool retro_load_game(const struct retro_game_info *g)
 			       st->jump.prejump, st->jump.peak);
 			for (unsigned k = 0; k < ch->moves; k++) {
 				const struct move *m = &ch->move[k];
-				char special[32], window[64] = "";
+				char special[48], window[64] = "";
 				if (m->special)
-					snprintf(special, sizeof(special), "special %s+%x",
+					snprintf(special, sizeof(special), "special %s %s+%x", m->name,
 						 motions[m->motion], m->buttons);
 				/* A follow-up names its parent's move index. */
 				if (m->after)

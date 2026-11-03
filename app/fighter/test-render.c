@@ -1,5 +1,5 @@
 /* Renderer and pack-decoder regression for the fighter core, linked into the
- * callback harness (test.c). It writes its own FIGHTP07 packs from known
+ * callback harness (test.c). It writes its own FIGHTP08 packs from known
  * bitmaps, two system profiles, two spark anims and a three-layer stage,
  * checks that malformed or truncated packs (including bad systems, stats,
  * classes, class defaults, sparks, walls, effect sets, slash and home
@@ -255,6 +255,7 @@ enum field {
 	F_MOVE_BLOCK_PUSH, F_MOVE_GUARD, F_MOVE_CANCEL, F_MOVE_CLASS, F_MOVE_DEFAULTS,
 	F_SPECIAL_KIND, F_SPECIAL_MOTION,
 	F_SPECIAL_BUTTONS, F_MOVE_AFTER, F_SPECIAL_AFTER, F_SPECIAL_OPEN, F_FOLLOW_MOTION,
+	F_MOVE_NAME, F_SPECIAL_NAME, F_SPECIAL_NAME_CHAR,
 	F_FOLLOW_AFTER, F_FOLLOW_OPEN, F_FOLLOW_CLOSE, F_FOLLOW_CONTACT, F_PROJ_FIRST, F_PROJ_COUNT, F_PROJ_SPEED, F_PROJ_LIFETIME,
 	F_PROJ_X, F_PROJ_Y, F_PROJ_DAMAGE, F_PROJ_CHIP, F_PROJ_HITSTUN, F_PROJ_BLOCKSTUN,
 	F_PROJ_HITSTOP, F_PROJ_PUSHBACK, F_PROJ_BLOCK_PUSH, F_PROJ_GUARD, F_PROJ_BLEND,
@@ -501,7 +502,7 @@ static int syn_hurts(unsigned i) { return i < 14; }
 static void build(struct pack *p, int automatic)
 {
 	memset(p, 0, sizeof(*p));
-	memcpy(p->data, "FIGHTP07", 8);
+	memcpy(p->data, "FIGHTP08", 8);
 	p->len = 16;
 	MARK(F_FLAGS);
 	put(p, (unsigned)automatic, 4);
@@ -666,6 +667,17 @@ static void build(struct pack *p, int automatic)
 		}
 		for (int j = 0; j < 20; j++)
 			put(p, v[j], 2);
+		/* Names: none for normals, "SP-1" and "FU 2" for the specials. */
+		if (t == STAND_HK)
+			MARK(F_MOVE_NAME);
+		if (t == MOVES)
+			MARK(F_SPECIAL_NAME);
+		put(p, t >= MOVES ? 4 : 0, 1);
+		for (int j = 0; t >= MOVES && j < 4; j++) {
+			if (t == MOVES && j == 2)
+				MARK(F_SPECIAL_NAME_CHAR);
+			put(p, (unsigned char)(follow ? "FU 2" : "SP-1")[j], 1);
+		}
 	}
 	/* first, count, speed, lifetime, x, y, damage, chip, hitstun,
 	 * blockstun, hitstop (from class special), pushback, block pushback,
@@ -804,6 +816,9 @@ static void malformed(void)
 	    {F_MOVE_AFTER, MOVES + 1, 2},   {F_SPECIAL_AFTER, MOVES + 1, 2},
 	    {F_SPECIAL_OPEN, 1, 2},	    {F_SPECIAL_MOTION, MOTION_ANY, 2},
 	    {F_FOLLOW_MOTION, MOTIONS, 2},  {F_FOLLOW_AFTER, 0, 2},
+	    {F_MOVE_NAME, 1, 1},	    {F_SPECIAL_NAME, 0, 1},
+	    {F_SPECIAL_NAME, MAX_MOVE_NAME + 1, 1}, {F_SPECIAL_NAME_CHAR, 'a', 1},
+	    {F_SPECIAL_NAME_CHAR, '.', 1},
 	    {F_FOLLOW_AFTER, MOVES + 3, 2}, {F_FOLLOW_AFTER, MOVES + 2, 2},
 	    {F_FOLLOW_OPEN, 3, 2},	    {F_FOLLOW_CLOSE, 4, 2},
 	    {F_FOLLOW_CLOSE, MAX_MOVE_TICKS, 2}, {F_FOLLOW_CONTACT, 2, 2},
@@ -922,9 +937,9 @@ static void malformed(void)
 	bad.data[bad.len++] = 0;
 	seal(&bad);
 	assert(!load(&assets_a, &bad));
-	for (char v = '1'; v <= '6'; v++) {
+	for (char v = '1'; v <= '7'; v++) {
 		bad = good;
-		bad.data[7] = (uint8_t)v; /* FIGHTP01..06: retired formats */
+		bad.data[7] = (uint8_t)v; /* FIGHTP01..07: retired formats */
 		assert(!load(&assets_a, &bad));
 	}
 	bad = good;
@@ -1142,11 +1157,12 @@ static void synthetic_moves(struct assets *a)
 	       sp->buttons == (BUTTON_LP | BUTTON_HP) && sp->anim.total == 4 &&
 	       sp->startup == 2 && sp->active == 2 && !sp->recovery && sp->spawn == 1 &&
 	       rise->vx == 3 && rise->vy == -2 && rise->spawn == 1 && rise[1].vy == 2 &&
-	       !sp->after && !sp->open && !sp->close && !sp->contact);
+	       !sp->after && !sp->open && !sp->close && !sp->contact && !strcmp(sp->name, "SP-1") &&
+	       !ch->move[STAND_HK].name[0]);
 	const struct move *fu = &ch->move[MOVES + 1];
 	assert(fu->special && fu->motion == HOLD_6 && fu->buttons == BUTTON_HK &&
 	       fu->after == MOVES + 1 && fu->open == 1 && fu->close == 2 && fu->contact == 1 &&
-	       fu->anim.total == 4 && !ch->move[STAND_HK].after);
+	       fu->anim.total == 4 && !ch->move[STAND_HK].after && !strcmp(fu->name, "FU 2"));
 	const struct projectile *pr = &ch->projectile[0];
 	assert(pr->anim.count == 2 && pr->anim.total == 4 && pr->speed == 5 &&
 	       pr->lifetime == 50 && pr->x == 10 && pr->y == -5 && pr->hit.damage == 40 &&

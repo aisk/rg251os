@@ -1,6 +1,6 @@
-/* Portable fighter state, FIGHTP07 content (system profiles with walls and
+/* Portable fighter state, FIGHTP08 content (system profiles with walls and
  * effect sets, a roster of characters with stats, frames, per-step boxes and
- * motion, normals, specials and projectiles, spark animations and parallax
+ * motion, normals, named specials and projectiles, spark animations and parallax
  * stages), bounded draw commands, the per-tick sound events and the RGB565
  * software renderer interface. Rules (fighter.c) read the pack's steps,
  * boxes, moves and each character's resolved stats, keep the camera, the
@@ -48,6 +48,8 @@
 #define MAX_EFFECTS 64
 #define MAX_SIDE 1024
 #define MAX_NAME 12
+/* Special move names in the command lists. */
+#define MAX_MOVE_NAME 16
 #define MAX_SYSTEMS 8
 /* Spark animations (all systems' effect sets) and their steps. */
 #define MAX_SPARKS 32
@@ -330,13 +332,15 @@ struct hit {
  * slash mask). A follow-up (the next stage of a rekka) has after = its
  * parent move + 1: it never starts on its own, only from the parent once
  * that has shown an elapsed in open..close (and connected when contact is
- * set); see fighter.c. */
+ * set); see fighter.c. name is a special's command-list name (empty for
+ * normals). */
 struct move {
 	struct anim anim;
 	struct hit hit;
 	uint8_t cancel, groups, startup, active, recovery, special, motion, buttons,
 	    spawn, slash, after, open, close, contact;
 	int16_t reach; /* furthest hitbox edge in front of the anchor */
+	char name[MAX_MOVE_NAME + 1];
 };
 struct projectile {
 	struct anim anim;
@@ -550,15 +554,15 @@ int fight_cast(struct assets *a, const struct fight_state *s);
 /* The command list of the pause and select screens, from the pack: every
  * special without a parent in pack order, then every normal that has
  * follow-ups, each followed by its follow-ups one level deeper (depth, at
- * most 3). A line is the motion as the HUD font's arrows for a fighter
+ * most 3). name is the move's name (empty for a normal); a line is the motion as the HUD font's arrows for a fighter
  * facing right (bytes 1..9 point like the numpad digit; [d] holds d), " + "
  * and the buttons (P, K, or LP/HP/LK/HK; S, LS, HS for weapon punches),
  * then the tags PROJECTILE, LOW, OVERHEAD and ON CONTACT (a follow-up that
  * needs its parent to connect). Returns the line count. */
 #define LIST_LINES 16
 #define LIST_TEXT 48
-unsigned fight_move_list(const struct character *c, char text[LIST_LINES][LIST_TEXT],
-			 uint8_t depth[LIST_LINES]);
+unsigned fight_move_list(const struct character *c, char name[LIST_LINES][MAX_MOVE_NAME + 1],
+			 char text[LIST_LINES][LIST_TEXT], uint8_t depth[LIST_LINES]);
 void fight_encode(const struct fight_state *s, uint32_t words[STATE_WORDS]);
 int fight_decode(struct fight_state *s, const struct assets *a,
 		 const uint32_t words[STATE_WORDS]);

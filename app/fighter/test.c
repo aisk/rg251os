@@ -1080,26 +1080,30 @@ static void combos(void)
 static void move_lists(void)
 {
 	static struct scene sc;
-	char text[LIST_LINES][LIST_TEXT];
+	char name[LIST_LINES][MAX_MOVE_NAME + 1], text[LIST_LINES][LIST_TEXT];
 	uint8_t depth[LIST_LINES];
-	assert(fight_move_list(&pack.chr[terry], text, depth) == 3);
+	assert(fight_move_list(&pack.chr[terry], name, text, depth) == 3);
 	assert(!strcmp(text[0], "\2\3\6 + P  PROJECTILE") && !strcmp(text[1], "\2\1\4 + P") &&
 	       !strcmp(text[2], "[\2]\10 + P") && !depth[0] && !depth[1] && !depth[2]);
+	assert(!strcmp(name[0], "POWER WAVE") && !strcmp(name[1], "BURN KNUCKLE") &&
+	       !strcmp(name[2], "RISING TACKLE"));
 	unsigned iori = character("IORI");
-	assert(fight_move_list(&pack.chr[iori], text, depth) == 5);
+	assert(fight_move_list(&pack.chr[iori], name, text, depth) == 5);
 	assert(!strcmp(text[1], "\2\1\4 + P") && !depth[1] && !strcmp(text[2], "\2\1\4 + P") &&
 	       depth[2] == 1 && !strcmp(text[3], "\2\1\4 + P  OVERHEAD") && depth[3] == 2 &&
 	       !strcmp(text[4], "\6\2\3 + P") && !depth[4]);
-	unsigned n = fight_move_list(&pack.chr[haohmaru], text, depth);
+	assert(!strcmp(name[2], "AOI HANA 2") && !strcmp(name[3], "AOI HANA 3"));
+	unsigned n = fight_move_list(&pack.chr[haohmaru], name, text, depth);
 	assert(n >= 1 && strstr(text[0], " + S"));
 	static const char font[] = "0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ:-/+[]>.\1\2\3\4\6\7\10\11";
 	struct fight_state s;
 	for (unsigned c = 0; c < pack.characters; c++) {
 		const struct character *ch = &pack.chr[c];
-		n = fight_move_list(ch, text, depth);
+		n = fight_move_list(ch, name, text, depth);
 		unsigned listed = 0;
 		for (unsigned i = 0; i < n; i++) {
 			assert(text[i][0] && depth[i] <= 3 && strspn(text[i], font) == strlen(text[i]));
+			assert(strspn(name[i], font) == strlen(name[i]) && strlen(name[i]) <= MAX_MOVE_NAME);
 			assert(!i || depth[i] <= depth[i - 1] + 1);
 		}
 		for (unsigned k = MOVES; k < ch->moves; k++)
@@ -1123,12 +1127,27 @@ static void move_lists(void)
 		fight_cast(&pack, &s);
 		fight_scene(&s, &pack, &sc);
 		assert(sc.count < COMMANDS);
+		/* Every name, command and tag (glyph runs 2 px high, at most 10 wide) stays inside the
+		 * pause panel. */
+		for (unsigned i = 0; i < sc.count; i++)
+			if (sc.cmd[i].op == RECT && sc.cmd[i].y >= 54 && sc.cmd[i].h == 2 && sc.cmd[i].w <= 10 &&
+			    sc.cmd[i].x + sc.cmd[i].w > FW - 44) {
+				fprintf(stderr, "move list: %s past the pause panel (%d %d %d %d)\n", ch->name, sc.cmd[i].x, sc.cmd[i].y, sc.cmd[i].w, sc.cmd[i].h);
+				abort();
+			}
 		fight_reset(&s, 0);
 		s.chr[0] = s.chr[1] = c;
 		s.list = 1;
 		fight_cast(&pack, &s);
 		fight_scene(&s, &pack, &sc);
 		assert(sc.count < COMMANDS);
+		/* And inside the select screen's panel (196..472 x 32..312). */
+		for (unsigned i = 0; i < sc.count; i++)
+			if (sc.cmd[i].op == RECT && sc.cmd[i].x >= 196 && sc.cmd[i].h == 2 && sc.cmd[i].w <= 10 &&
+			    (sc.cmd[i].x + sc.cmd[i].w > 472 || sc.cmd[i].y + sc.cmd[i].h > 312)) {
+				fprintf(stderr, "move list: %s past the select panel\n", ch->name);
+				abort();
+			}
 	}
 	uint32_t w[STATE_WORDS];
 	struct fight_state t;
