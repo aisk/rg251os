@@ -176,7 +176,7 @@ attacker an advantage of hitstun - (active + recovery), blockstun likewise;
 hitstop freezes both fighters equally and does not change it.
 
 systems.json: {"systems": {name: profile}, "characters": {character:
-system}, "notes": ...}. Profile names are a-z, 0-9 and "_" (at most 12). A
+system}, "notes": ..., "sources": {id: {url, ...}} for the profiles' src}. Profile names are a-z, 0-9 and "_" (at most 12). A
 profile needs life, damage_scale (per mille, applied to its characters'
 damage and chip), walk, walk_back, jump {vy, gravity, vx, prejump, optional
 vx_back}, stun_table {class: [hitstun, blockstun]}, hitstop_table {class:
@@ -712,10 +712,12 @@ class Systems:
         if not path.exists():
             raise ValueError(f'{path}: no systems.json next to the roster or manifest')
         data = json.loads(path.read_text())
-        if not isinstance(data, dict) or set(data) - {'systems', 'characters', 'notes'} or \
+        if not isinstance(data, dict) or \
+                set(data) - {'systems', 'characters', 'notes', 'sources'} or \
                 not isinstance(data.get('systems'), dict) or not data['systems']:
             raise ValueError(f'{path}: needs "systems" (non-empty) and optional "characters", '
-                             f'"notes"')
+                             f'"notes", "sources"')
+        self.sources = check_sources(data, str(path))
         if len(data['systems']) > MAX_SYSTEMS:
             raise ValueError(f'{path}: at most {MAX_SYSTEMS} systems')
         self.names = list(data['systems'])
@@ -727,8 +729,7 @@ class Systems:
         if DEFAULT_SYSTEM not in self.profile:
             raise ValueError(f'{path}: the default system {DEFAULT_SYSTEM} is missing')
 
-    @staticmethod
-    def _profile(name, p, path):
+    def _profile(self, name, p, path):
         what = f'{path.name} {name}'
         if not (1 <= len(name) <= MAX_NAME and set(name) <= set('abcdefghijklmnopqrstuvwxyz0123456789_')):
             raise ValueError(f'{what}: names are 1..{MAX_NAME} of a-z, 0-9 and _')
@@ -766,7 +767,7 @@ class Systems:
                     classes.setdefault(cls, {})[k] = check_int(x, low, high,
                                                                f'{what}: {table} {cls}')
         if 'src' in p:
-            check_src(p['src'], what, set(p) - {'src', 'notes'}, {})
+            check_src(p['src'], what, set(p) - {'src', 'notes'}, self.sources)
         effects = p.get('effects', {})
         if not isinstance(effects, dict) or set(effects) - set(EFFECT_KEYS) or not all(
                 isinstance(v, str) and v.count('.') == 1 for v in effects.values()):

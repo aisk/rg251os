@@ -14,10 +14,11 @@ and for every move and projectile it
     default of the character's system (so the loaded numbers do not change);
   - adds "src": {"*": "estimate"} where there is no src yet (every number in
     today's manifests is an estimate).
-With --adopt-class it instead removes hitstun/blockstun/hitstop of the
-normals whenever the class gives a default, as the design asks ("普通技删掉
-hitstun/blockstun 改用 class"); that changes frame data and every change is
-printed. Without it the script checks, through pack.py's own loader, that
+With --adopt-class it instead removes hitstun/blockstun/hitstop of every
+move (normals and specials, not projectiles) whenever the class gives a
+default, as the design asks ("普通技删掉 hitstun/blockstun 改用 class"; KOF
+2002 also gives specials one universal 19/17); that changes frame data and
+every change is printed. Without it the script checks, through pack.py's own loader, that
 every character's stats and resolved hit values are identical before and
 after, and refuses to write otherwise.
 
@@ -177,7 +178,7 @@ def convert(text, m, systems, adopt, log):
                 cls = d.get('class') or ('special' if projectile else default_class(name))
                 row = system['classes'].get(cls, {})
                 drop = [k for k in STUN_FIELDS if k in d and k in row and (
-                    d[k] == row[k] or (adopt and not projectile and name in pack.MOVES))]
+                    d[k] == row[k] or (adopt and not projectile))]
                 if 'class' not in d:
                     edits.insert_first(node, f'"class": "{cls}"')
                 if drop:
