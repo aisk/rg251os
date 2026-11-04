@@ -2914,10 +2914,11 @@ static void ai_coverage(void)
 	struct fight_state twin;
 	fight_reset(&s, 1);
 	/* Charge specials are often cut short by a hit, so a roster that has
-	 * not started everything by then gets up to as many ticks again. */
+	 * not started everything by then gets up to twice as many ticks again
+	 * (with 24 characters a rare special can need the extra time). */
 	const int base = 30000 + 15000 * (int)pack.characters;
 	int missing = 1;
-	for (int t = 0; t < base || (missing && t < 2 * base); t++) {
+	for (int t = 0; t < base || (missing && t < 3 * base); t++) {
 		if (t >= base && t % 1000 == 0) {
 			missing = 0;
 			for (unsigned c = 0; c < pack.characters; c++)

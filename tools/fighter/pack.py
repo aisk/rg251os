@@ -375,8 +375,8 @@ MAX_GRACE = 60
 MAX_PUSH_DISTANCE = 200
 HISTORY = 32
 SCREEN_WIDTH = 480
-MAX_PALETTES = 64
-MAX_FRAMES = 4096
+MAX_PALETTES = 128
+MAX_FRAMES = 8192
 EFFECT_KEYS = ['hit_light', 'hit_heavy', 'hit_special', 'guard', 'slash_light', 'slash_heavy',
                'slash_special', 'slash_guard', 'blood_light', 'blood_heavy', 'blood_special']
 SLASH_KEYS = ['lp', 'hp', 'lk', 'hk', 'special']

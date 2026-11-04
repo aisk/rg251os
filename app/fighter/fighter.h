@@ -36,11 +36,11 @@
  * 30 characters); RGB565 pixels only for the two cast fighters and the
  * effects. */
 #define MAX_CHARACTERS 32
-#define MAX_PALETTES 64
-#define MAX_FRAMES 4096
-#define MAX_ROWS (1u << 19)
-#define MAX_SPANS (1u << 20)
-#define MAX_INDICES (1u << 24)
+#define MAX_PALETTES 128
+#define MAX_FRAMES 8192
+#define MAX_ROWS (1u << 20)
+#define MAX_SPANS (1u << 21)
+#define MAX_INDICES (1u << 25)
 #define MAX_IMAGES 1024
 #define MAX_PIXELS (1u << 22)
 #define MAX_STEPS 16384
