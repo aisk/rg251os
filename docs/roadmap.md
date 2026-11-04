@@ -50,6 +50,7 @@
 - 格斗加了 Fighter's History Dynamite 的 Karnov（Spriters Resource 旧版图集，Xinos 提取），帧数据按 SuperCombo。待上机看锚点（攻击、100-Kick 和投技之间有无跳动）、Balloon Attack 升空漂浮再下落是否顺、火焰喷吐的位置和长度、Fireball 改成直线后的手感；Fire Breath 指令从 66 改成了 623，伤害是估计，没有语音。
 - 格斗加了 Rage of the Dragons 的 Jimmy Lewis（Spriters Resource 图集，和 Sonia 同格式），帧数据按 SRK 镜像。待上机看锚点（站 B/D 单脚踢、跑动、Cannon Kick 前翻落地有无跳动）、Heat Hurricane 冲刺距离和追加下段的时机、Red Rage 速度，没有语音。
 - 格斗加了 SVC Chaos 的火引弾（kilburto 图集，ahuron 的 MUGEN 包提供锚点、判定和语音），我道拳、我道翔吼拳、晃龍拳、断空脚和前转挑衅。待上机看晃龍拳和断空脚 D 的跳起落地是否顺（位移从 MUGEN 速度换算）、断空脚 D 的滞空距离、两个气功的射程，以及受击时借用的短喊声是否合适。
+- 格斗加了 Kabuki Klash 的綱手（bernd 的 Sprite Database 图集，`pack.py` 新增 `components` 切相互接触的帧），主机 `fighter-test` 通过。待上机看长斧判定（站重斩约 100 px）是否太远、回転独楽的前进距离和四段命中、蛞蝓钻出的位置、蹴り上げ空翻落地，以及 The Drill 撑斧起跳时锚点有无跳动；数值都是估计，没有语音。
 
 - 电源键休眠：实机上两次休眠都进了深度睡眠（`result: suspended to RAM, mem (deep)`，唤醒中断是 IRQ 27，427 ms 恢复），唤醒的那一下按键被正确忽略，SD 卡和声音都恢复了。唤醒时声音等第一帧上屏再启动、前端马上打开重新枚举的手柄，这两处 2026-11 已经在真机上确认（见上面）。还要看：深睡 1.95 小时掉了 2%（约 35 mA，对 RK3326 来说偏高），这批日志里只有一次不到 1 秒的休眠，没有新数据；屏幕、pop 声和指示灯要用眼睛看，声音晚启动以后唤醒时的 pop 声还在不在；有用户说用电源键唤醒时偶尔亮一下又灭掉，要再按一次，还没在日志里看到过，要开着 Debug log 再看。
 - 首次开机扩展 GBA 分区：`sdgrow:` 日志，扩展后 Windows 和 macOS 能否读写。
