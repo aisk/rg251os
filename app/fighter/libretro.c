@@ -1,5 +1,5 @@
 /* Standard libretro fighter core: FIGHTP11 content, input, deterministic
- * FGSTAT16 saves, audio and software frames. Timing below measures work only;
+ * FGSTAT17 saves, audio and software frames. Timing below measures work only;
  * the frontend owns pacing. Logs the system profiles (wake-up, throw, run and
  * backdash rules), the roster with each
  * character's system and resolved stats (run speed included), every move's frame data and class
@@ -208,13 +208,13 @@ static void report(void)
 		       "fight: tick %u round %u hits %u guards %u specials %u clashes %u "
 		       "throws %u techs %u runs %u backdashes %u max combo %u/%u difficulty %s "
 		       "game %s wins %u best %u mode %u run %u stage %u "
-		       "beaten %08x %s vs %s; frontend perf measures rotate/present/audio output\n",
+		       "beaten %016llx %s vs %s; frontend perf measures rotate/present/audio output\n",
 		       state.tick, state.round, state.hits, state.guards, state.specials,
 		       state.clashes, state.throws, state.techs, state.runs, state.backdashes,
 		       state.best[0], state.best[1],
 		       level_names[state.level], game_names[state.game], state.streak, state.record,
 		       state.mode, state.run,
-		       state.stage, state.beaten, assets.chr[state.chr[0]].name,
+		       state.stage, (unsigned long long)state.beaten, assets.chr[state.chr[0]].name,
 		       assets.chr[state.chr[1]].name);
 	}
 	if (logger && sound.bank) {
@@ -540,8 +540,8 @@ void retro_run(void)
 					keys[p] |= 1u << k;
 	apply_level(0);
 	uint32_t old_tick = state.tick, old_ended = state.ended, old_level = state.level,
-		 old_game = state.game, old_dummy = state.dummy, old_mode = state.mode,
-		 old_beaten = state.beaten;
+		 old_game = state.game, old_dummy = state.dummy, old_mode = state.mode;
+	uint64_t old_beaten = state.beaten;
 	uint64_t t0 = tick_us();
 	fight_step(&state, &assets, keys[0], keys[1], two_players);
 	uint64_t t1 = tick_us();
@@ -560,7 +560,7 @@ void retro_run(void)
 						  : "quit",
 		       state.round - run_round,
 		       state.game == GAME_SURVIVAL ? state.streak
-						   : (unsigned)__builtin_popcount(state.beaten | old_beaten),
+						   : (unsigned)__builtin_popcountll(state.beaten | old_beaten),
 		       state.record);
 	if (state.level != old_level && logger)
 		logger(RETRO_LOG_INFO, "fight: difficulty %s (select screen R)\n",
@@ -577,7 +577,7 @@ void retro_run(void)
 		       state.best[1], state.throws, state.techs, state.runs, state.backdashes,
 		       level_names[state.level], game_names[state.game],
 		       state.game == GAME_SURVIVAL ? state.streak
-						   : (unsigned)__builtin_popcount(state.beaten),
+						   : (unsigned)__builtin_popcountll(state.beaten),
 		       state.tick);
 	if (state.automatic && state.tick != old_tick && ++benchmark_runs == 36000 &&
 	    logger)
@@ -657,7 +657,7 @@ bool retro_serialize(void *data, size_t size)
 	uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	fight_encode(&state, w);
-	memcpy(p, "FGSTAT16", 8);
+	memcpy(p, "FGSTAT17", 8);
 	put32(p + 8, assets.hash);
 	put32(p + 12, state.automatic);
 	for (int i = 0; i < STATE_WORDS; i++)
@@ -670,7 +670,7 @@ bool retro_unserialize(const void *data, size_t size)
 	const uint8_t *p = data;
 	uint32_t w[STATE_WORDS];
 	if (!loaded || !p || size != retro_serialize_size() ||
-	    memcmp(p, "FGSTAT16", 8) || get32(p + 8) != assets.hash ||
+	    memcmp(p, "FGSTAT17", 8) || get32(p + 8) != assets.hash ||
 	    get32(p + 12) != state.automatic)
 		return false;
 	for (int i = 0; i < STATE_WORDS; i++)

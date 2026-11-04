@@ -32,6 +32,10 @@
  * layout. */
 #include "fighter.h"
 #include <string.h>
+/* Frame, palette, step and box indices are stored in uint16_t fields. */
+_Static_assert(MAX_FRAMES < 0xffff && MAX_PALETTES < 0xffff, "frame index fields");
+_Static_assert(MAX_STEPS <= 65536 && MAX_BOXES <= 65536, "step and box index fields");
+_Static_assert(MAX_CHARACTERS <= 64, "the beaten mask");
 
 struct reader {
 	const uint8_t *p;

@@ -9,7 +9,8 @@
  * the buffer, expiry, contact, the move clock across a state load; May
  * Lee's Tatsuo Kyaku branches by held direction), the arcade ladder (the
  * versus card and READY freezing the rules, held buttons no press at FIGHT,
- * the banner, select, opponents, loss, clear, Auto rotation, replay), the
+ * the banner, select, opponents, loss, clear, Auto rotation, replay, a full
+ * MAX_CHARACTERS roster with its 64-bit beaten mask across a save), the
  * survival and practice modes (carried life, heal, streak and record; the
  * dummy picked and its four behaviours, refilled life, combo damage; B
  * quitting from a pause), the round clock, time over and best of three,
@@ -916,7 +917,7 @@ static void ladder(void)
 		assert(s.mode == MODE_FIGHT && s.stage == stage && s.chr[1] != 1 &&
 		       !((s.beaten >> s.chr[1]) & 1));
 		order = order * 4 + s.chr[1];
-		unsigned beaten = s.beaten | 1u << s.chr[1];
+		uint64_t beaten = s.beaten | 1ull << s.chr[1];
 		win_round(&s, 0);
 		assert(s.beaten == beaten && s.round == 2 * stage);
 	}
@@ -965,6 +966,43 @@ static void ladder(void)
 		win_round(&s, 0);
 		assert(s.mode == MODE_CLEAR);
 	}
+}
+/* A full roster of MAX_CHARACTERS Terry copies: the arcade ladder meets
+ * every other character once and the beaten mask, past bit 31, survives a
+ * save midway. */
+static void full_ladder(void)
+{
+	struct character *saved = malloc(sizeof(pack.chr));
+	assert(saved);
+	memcpy(saved, pack.chr, sizeof(pack.chr));
+	unsigned characters = pack.characters;
+	for (int k = 0; k < MAX_CHARACTERS; k++) {
+		pack.chr[k] = saved[terry];
+		pack.chr[k].name[0] = (char)('A' + k % 26);
+		pack.chr[k].name[1] = (char)('A' + k / 26);
+	}
+	pack.characters = MAX_CHARACTERS;
+	struct fight_state s, replay;
+	uint32_t w[STATE_WORDS], v[STATE_WORDS];
+	fight_reset(&s, 0);
+	step2(&s, K(B), 0);
+	assert(s.mode == MODE_FIGHT && s.chr[0] == 0 && s.stage == 1);
+	for (unsigned stage = 1; stage < MAX_CHARACTERS; stage++) {
+		assert(s.mode == MODE_FIGHT && s.stage == stage && s.chr[1] &&
+		       !((s.beaten >> s.chr[1]) & 1));
+		if (stage == 48) {
+			assert(s.beaten >> 32);
+			fight_encode(&s, w);
+			assert(fight_decode(&replay, &pack, w));
+			fight_encode(&replay, v);
+			assert(!memcmp(w, v, sizeof(w)) && replay.beaten == s.beaten);
+		}
+		win_round(&s, 0);
+	}
+	assert(s.mode == MODE_CLEAR && s.beaten == ~1ull);
+	memcpy(pack.chr, saved, sizeof(pack.chr));
+	pack.characters = characters;
+	free(saved);
 }
 /* Does scene a start with b's commands (the same draws, then more)? */
 static int extends(const struct scene *a, const struct scene *b)
@@ -1916,7 +1954,7 @@ static void round_clock(void)
 	time_over(&s);
 	assert(heard(&s, SOUND_KO, 1) == 1);
 	round_end(&s);
-	assert(s.mode == MODE_FIGHT && s.stage == 2 && s.beaten == 1u << first && s.bout == 1 &&
+	assert(s.mode == MODE_FIGHT && s.stage == 2 && s.beaten == 1ull << first && s.bout == 1 &&
 	       !s.wins[0] && !s.wins[1] && s.timer == 0 && s.clock == CLOCK_TICKS);
 	/* Stage 2: two draws, two points each at once, are a loss. */
 	intro(&s);
@@ -3198,6 +3236,7 @@ static void logic_tests(const uint8_t *data, size_t len)
 	rising_tackle();
 	follow_ups();
 	ladder();
+	full_ladder();
 	game_modes();
 	guard_dummy();
 	cpu_guard();
@@ -3332,6 +3371,9 @@ int main(int argc, char **argv)
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
 	memcpy(copy, "FGSTAT15", 8); /* before the clock and best of three */
+	assert(!retro_unserialize(copy, n));
+	memcpy(copy, end, n);
+	memcpy(copy, "FGSTAT16", 8); /* before the 64-bit beaten mask */
 	assert(!retro_unserialize(copy, n));
 	memcpy(copy, end, n);
 	memset(copy + 16 + 8 * 4, 0xff, 4);
