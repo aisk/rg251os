@@ -3,7 +3,9 @@
  * bitmaps, two system profiles, two spark anims and a three-layer stage,
  * checks that malformed or truncated packs (including bad systems, stats,
  * classes, class defaults, sparks, walls, effect sets, throw and dash
- * rules, slash and home fields and stages, layers and stage anims) are rejected, that stats
+ * rules, slash and home fields and stages, layers and stage anims) are
+ * rejected and leave nothing allocated, that the heap arrays are cut to
+ * the pack's size, that stats
  * resolve from the system plus overrides, that class defaults fill
  * hitstun/blockstun/hitstop and the damage scale applies, and compares
  * fight_render pixel for pixel with an independent per-pixel reference
@@ -988,9 +990,16 @@ static void malformed(void)
 	bad = good;
 	bad.data[good.at[F_INDEX] + 3] ^= 1;
 	assert(!load(&assets_a, &bad));
+	/* A failed load leaves nothing allocated; fight_free can repeat. */
+	assert(!assets_a.row && !assets_a.span && !assets_a.index && !assets_a.pixel &&
+	       !assets_a.characters && !assets_a.row_cap && !assets_a.pixel_cap);
+	fight_free(&assets_a);
 	build(&bad, 1);
 	int automatic = -1;
 	assert(fight_assets(&assets_a, bad.data, bad.len, &automatic) && automatic == 1);
+	/* The heap arrays are cut to what the pack and its cache need. */
+	assert(assets_a.index_cap == assets_a.indices && assets_a.pixel_cap == assets_a.pixels);
+	assert(assets_a.row_cap >= assets_a.pack_rows && assets_a.span_cap >= assets_a.pack_spans);
 }
 /* Resident images must reproduce the source bitmaps through the palettes
  * (stage layer images are checked against their layers instead). */

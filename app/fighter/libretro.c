@@ -5,7 +5,8 @@
  * character's system and resolved stats (run speed included), every move's frame data and class
  * (specials with their name)
  * (follow-ups with their parent and window) and the resident memory at
- * load, and the stages and spark sets. The render cache is filled a slice
+ * load (the pack-sized heap arrays and the static part), and the stages
+ * and spark sets. Unloading the game frees the heap arrays. The render cache is filled a slice
  * at a time: each run names what the state shows, expands at most
  * CACHE_BUDGET pixels ahead, builds the scene and expands only what it
  * still missed before building it again, so a select cursor move costs
@@ -264,6 +265,7 @@ void retro_deinit(void)
 {
 	report();
 	audio_close(&sound);
+	fight_free(&assets);
 	loaded = 0;
 }
 unsigned retro_api_version(void) { return RETRO_API_VERSION; }
@@ -403,17 +405,24 @@ bool retro_load_game(const struct retro_game_info *g)
 		       assets.steps, assets.boxes, format32 ? "XRGB8888" : "RGB565",
 		       automatic ? "automatic ladder, 4-scene cycle" : "arcade ladder vs CPU",
 		       level_names[level]);
-		/* Resident bytes in use (the static limits are larger). */
+		/* Resident bytes in use; the heap arrays (rows, spans, indices,
+		 * RGB565) are sized from the pack, the rest is static. */
 		unsigned rules = (unsigned)(assets.steps * sizeof(struct step) +
 					    assets.boxes * sizeof(struct box) +
 					    assets.characters * sizeof(struct character));
 		logger(RETRO_LOG_INFO,
 		       "fight: resident KiB frame indices %u spans %u rows %u rules %u "
-		       "effects RGB565 %u (%u effects); static limit %u KiB\n",
+		       "effects RGB565 %u (%u effects); heap %u KiB (cache RGB565 %u), "
+		       "static %u KiB\n",
 		       assets.indices / 1024,
 		       (unsigned)(assets.spans * sizeof(struct span) / 1024),
 		       (unsigned)(assets.rows * 4 / 1024), rules / 1024,
 		       assets.effect_pixels * 2 / 1024, assets.effects,
+		       (unsigned)(((size_t)assets.row_cap * 4 +
+				   (size_t)assets.span_cap * sizeof(struct span) +
+				   assets.index_cap + (size_t)assets.pixel_cap * 2) /
+				  1024),
+		       (unsigned)((assets.pixel_cap - assets.effect_pixels) * 2 / 1024),
 		       (unsigned)(sizeof(assets) / 1024));
 		logger(RETRO_LOG_INFO, "fight: %u spark anims (%u steps), %u stages%s\n",
 		       assets.sparks, assets.spark_steps, assets.stages,
@@ -510,6 +519,7 @@ void retro_unload_game(void)
 {
 	report();
 	audio_close(&sound);
+	fight_free(&assets);
 	loaded = 0;
 }
 void retro_reset(void)

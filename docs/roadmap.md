@@ -121,5 +121,6 @@
 - **串口控制台**会让开机多卡约 0.9 秒，所以去掉了 console，加了 quiet。
 - **换内核版本后 .config 没有重新合并**：kbuild 的 syncconfig 会悄悄给新符号取默认值，被改名或隐藏的符号也不报错。现在 `mk/linux.mk` 把内核版本记进 `.fragments`，版本一变就重跑 allnoconfig 加 merge_config。检查符号没生效的 grep 同时认新版 merge_config.sh 的 `WARNING:` 前缀和 `differs:` 写法。
 - **主线 U-Boot 在 RG351P 上没有任何输出**，所有组合都试过，见 hardware-research.md。
+- **静态链接的核心里放大块静态数组，会把 gpSP 的 JIT 缓存挤出跳转范围**：gpSP 要把翻译缓存 mmap 在 text 段 ±128 MB 以内，格斗核心的 `struct assets` 提高上限后静态 BSS 涨到约 116 MiB，前端 ELF 的 BSS 约 130 MB，`map_jit_block` 找不到位置，GBA 游戏会悄悄退回解释器（`make frontend-test` 的 `Failed to map the JIT` 检查会失败）。大数组要在加载时按实际用量放到堆上，改上限后看一眼 `size build/frontend/frontend.elf`。
 
 2026-11-03 格斗方案补充：明确采用标准 libretro core（本机静态、桌面动态），通过统一绘制指令保留软件/GPU 后端扩展空间；先实现软件路径并用真实规模素材测量。MUGEN 行为兼容不作为目标。详见 [方案补充](fighting-engine-research.md#补充决定标准-libretro-core-与可替换渲染器)。
