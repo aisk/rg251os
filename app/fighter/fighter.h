@@ -16,7 +16,9 @@
 #include <stdint.h>
 #define FW 480
 #define FH 320
-#define COMMANDS 2048
+/* Draw commands per scene: a full select grid of 12-letter names takes
+ * about 3500 (a glyph is up to 9 rects). */
+#define COMMANDS 4096
 #define STATE_WORDS 256
 /* Ground line in screen rows; fighters' foot anchors stand on it (a stage's
  * ground row is drawn on it). */
@@ -656,6 +658,14 @@ uint32_t fight_prefetch(struct assets *a, uint32_t budget);
 uint32_t fight_demand(struct assets *a, const struct scene *scene);
 int fight_ready(const struct assets *a);
 int fight_cast(struct assets *a, const struct fight_state *s);
+/* The select screen's roster grid: GRID_COLUMNS per row, GRID_ROWS rows in
+ * view. fight_grid_move moves a cursor over n entries by the pressed keys,
+ * fight_grid_top is the first row in view for a cursor (derived, never
+ * stored). */
+#define GRID_COLUMNS 4
+#define GRID_ROWS 8
+int fight_grid_move(int c, int n, uint32_t pressed);
+int fight_grid_top(int c, int n);
 /* The command list of the pause and select screens, from the pack: every
  * special without a parent in pack order, then every normal that has
  * follow-ups, each followed by its follow-ups one level deeper (depth, at
