@@ -1590,12 +1590,12 @@ static uint32_t dummy(struct fight_state *s, const struct assets *a)
 /* ---- ladder ---- */
 /* Characters P1 meets in a run: everyone else, or itself in a one-character
  * roster. */
-static uint32_t opponents(const struct assets *a, unsigned self)
+static uint64_t opponents(const struct assets *a, unsigned self)
 {
-	uint32_t all = a->characters >= 32 ? 0xffffffffu : (1u << a->characters) - 1u;
-	return a->characters == 1 ? 1u : all & ~(1u << self);
+	uint64_t all = a->characters >= 64 ? ~0ull : (1ull << a->characters) - 1u;
+	return a->characters == 1 ? 1u : all & ~(1ull << self);
 }
-static unsigned count(uint32_t m)
+static unsigned count(uint64_t m)
 {
 	unsigned n = 0;
 	for (; m; m &= m - 1)
@@ -1604,7 +1604,7 @@ static unsigned count(uint32_t m)
 }
 static void next_stage(struct fight_state *s, const struct assets *a)
 {
-	uint32_t left = opponents(a, s->chr[0]) & ~s->beaten;
+	uint64_t left = opponents(a, s->chr[0]) & ~s->beaten;
 	unsigned pick = random_next(s) % count(left), c = 0;
 	for (;; c++)
 		if ((left >> c) & 1 && !pick--)
@@ -1623,9 +1623,9 @@ static void begin_run(struct fight_state *s, const struct assets *a, unsigned c0
  * is a choice), P1 at its carried life. */
 static void survive(struct fight_state *s, const struct assets *a)
 {
-	uint32_t left = opponents(a, s->chr[0]);
+	uint64_t left = opponents(a, s->chr[0]);
 	if (count(left) > 1)
-		left &= ~(1u << s->chr[1]);
+		left &= ~(1ull << s->chr[1]);
 	unsigned pick = random_next(s) % count(left), c = 0;
 	for (;; c++)
 		if ((left >> c) & 1 && !pick--)
@@ -1666,7 +1666,8 @@ static void to_select(struct fight_state *s, const struct assets *a)
 {
 	place(s);
 	s->mode = MODE_SELECT;
-	s->timer = s->beaten = s->stage = s->wins[0] = s->wins[1] = 0;
+	s->timer = s->stage = s->wins[0] = s->wins[1] = 0;
+	s->beaten = 0;
 	s->clock = s->bout = 0;
 	s->run++;
 	s->chr[1] = s->chr[0];
@@ -1704,8 +1705,8 @@ static void round_over(struct fight_state *s, const struct assets *a)
 		if (s->wins[1] >= rounds(s)) {
 			match_over(s, MODE_RESULT);
 		} else if (s->wins[0] >= rounds(s)) {
-			s->beaten |= 1u << s->chr[1];
-			uint32_t all = opponents(a, s->chr[0]);
+			s->beaten |= 1ull << s->chr[1];
+			uint64_t all = opponents(a, s->chr[0]);
 			if ((s->beaten & all) == all)
 				match_over(s, MODE_CLEAR);
 			else
@@ -2595,7 +2596,9 @@ hud:
  * side, the clock and the bout. */
 #define GAME_AT (DASHES_AT + 2)
 #define GAME_WORDS 12
-#define USED_WORDS (GAME_AT + GAME_WORDS)
+/* Then the high word of the beaten mask. */
+#define BEATEN_AT (GAME_AT + GAME_WORDS)
+#define USED_WORDS (BEATEN_AT + 1)
 static void fighter_fields(struct fighter *p, int32_t *v[FIGHTER_WORDS])
 {
 	int32_t *f[] = {&p->x,	   &p->y,     &p->vy,	     &p->hp,	&p->face,  &p->walk,
@@ -2610,11 +2613,13 @@ static void fighter_fields(struct fighter *p, int32_t *v[FIGHTER_WORDS])
 		v[26 + k] = (int32_t *)(void *)&p->history[k];
 	v[26 + HISTORY / 8] = &p->dash;
 }
-static void global_fields(struct fight_state *s, uint32_t *v[GLOBAL_WORDS])
+/* beaten stands in for the low word of the beaten mask (the high word
+ * is at BEATEN_AT). */
+static void global_fields(struct fight_state *s, uint32_t *v[GLOBAL_WORDS], uint32_t *beaten)
 {
 	uint32_t *f[GLOBAL_WORDS] = {&s->tick,  &s->rng,    &s->previous, &s->paused, &s->stress,
 				     &s->boxes, &s->automatic, &s->round, &s->mode,	&s->timer,
-				     &s->beaten, &s->stage, &s->run,	  &s->wins[0], &s->wins[1],
+				     beaten,	&s->stage, &s->run,	  &s->wins[0], &s->wins[1],
 				     &s->chr[0], &s->chr[1], &s->pal[0],   &s->pal[1]};
 	memcpy(v, f, sizeof(f));
 }
@@ -2634,9 +2639,9 @@ static void game_fields(struct fight_state *s, uint32_t *v[GAME_WORDS])
 void fight_encode(const struct fight_state *s, uint32_t w[STATE_WORDS])
 {
 	struct fight_state t = *s;
-	uint32_t *g[GLOBAL_WORDS], *e[7];
+	uint32_t *g[GLOBAL_WORDS], *e[7], beaten = (uint32_t)t.beaten;
 	memset(w, 0, STATE_WORDS * sizeof(*w));
-	global_fields(&t, g);
+	global_fields(&t, g, &beaten);
 	for (int k = 0; k < GLOBAL_WORDS; k++)
 		w[k] = *g[k];
 	for (int i = 0; i < 2; i++) {
@@ -2686,6 +2691,7 @@ void fight_encode(const struct fight_state *s, uint32_t w[STATE_WORDS])
 	game_fields(&t, g2);
 	for (int k = 0; k < GAME_WORDS; k++)
 		w[GAME_AT + k] = *g2[k];
+	w[BEATEN_AT] = (uint32_t)(t.beaten >> 32);
 }
 /* Bounds come from the fighter's own character (life, jump velocities,
  * prejump, buffer, charge and grace) and the walls of the state's camera. */
@@ -2757,10 +2763,11 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 {
 	struct fight_state t;
 	memset(&t, 0, sizeof(t));
-	uint32_t *g[GLOBAL_WORDS], *e[7];
-	global_fields(&t, g);
+	uint32_t *g[GLOBAL_WORDS], *e[7], beaten = 0;
+	global_fields(&t, g, &beaten);
 	for (int k = 0; k < GLOBAL_WORDS; k++)
 		*g[k] = w[k];
+	t.beaten = beaten | (uint64_t)w[BEATEN_AT] << 32;
 	tail_fields(&t, e);
 	for (int k = 0; k < 7; k++)
 		*e[k] = w[TAIL_AT + k];
@@ -2852,7 +2859,7 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 	if (t.list > 1 || t.level >= LEVELS)
 		return 0;
 	unsigned n = a->characters;
-	uint32_t all = n >= 32 ? 0xffffffffu : (1u << n) - 1u;
+	uint64_t all = n >= 64 ? ~0ull : (1ull << n) - 1u;
 	if (t.paused > 1 || t.stress > 3 || t.boxes > 1 || t.automatic > 1 || t.mode >= MODES ||
 	    t.timer > 255 || (t.beaten & ~all) || t.stage > n || t.wins[0] >= rounds(&t) ||
 	    t.wins[1] >= rounds(&t) || t.chr[0] >= n || t.chr[1] >= n || t.pal[0] > 1 ||
@@ -2860,7 +2867,7 @@ int fight_decode(struct fight_state *s, const struct assets *a,
 	    (t.ended && t.mode != MODE_FIGHT))
 		return 0;
 	if (t.mode == MODE_FIGHT) {
-		uint32_t opp = opponents(a, t.chr[0]);
+		uint64_t opp = opponents(a, t.chr[0]);
 		if (t.timer > BANNER_END || (t.timer < ROUND_TICKS && (t.ended || t.shake || t.flash)))
 			return 0;
 		/* The clock: none in practice, full until FIGHT, out only once

@@ -32,6 +32,8 @@ Subcommands:
 
   build MANIFEST|ROSTER OUTPUT [--auto]  write the pack (Auto: AI vs AI,
                                          rotating characters, scene cycle)
+                                         and print its use of each pack-wide
+                                         limit of fighter.h (refused past one)
   detect MANIFEST                  print candidate frame boxes per sheet row
   preview MANIFEST OUTPUT.ppm      every action, move and projectile of the
                                    first character on its anchor, with
@@ -358,7 +360,7 @@ MAX_HEIGHT = 300
 MAX_LIFETIME = 600
 MAX_NAME = 12
 MAX_MOVE_NAME = 16
-MAX_CHARACTERS = 32
+MAX_CHARACTERS = 64
 MAX_SYSTEMS = 8
 MAX_LIFE = 4000
 MIN_DEFENSE = 100
@@ -375,8 +377,14 @@ MAX_GRACE = 60
 MAX_PUSH_DISTANCE = 200
 HISTORY = 32
 SCREEN_WIDTH = 480
-MAX_PALETTES = 64
-MAX_FRAMES = 4096
+# Pack-wide limits shared with app/fighter/fighter.h (struct assets sizes).
+MAX_PALETTES = 256
+MAX_FRAMES = 16384
+MAX_ROWS = 1 << 21
+MAX_SPANS = 1 << 22
+MAX_INDICES = 1 << 26
+MAX_STEPS = 32768
+MAX_BOXES = 65536
 EFFECT_KEYS = ['hit_light', 'hit_heavy', 'hit_special', 'guard', 'slash_light', 'slash_heavy',
                'slash_special', 'slash_guard', 'blood_light', 'blood_heavy', 'blood_special']
 SLASH_KEYS = ['lp', 'hp', 'lk', 'hk', 'special']
@@ -1611,8 +1619,8 @@ def load_roster(path):
 
 def build(sheets, effects_from, automatic, systems, sparks=None, stages=None):
     """The pack bytes, its hash, the colour count, per-frame (w, h, opaque)
-    stats and the characters. sparks {id: Sparks} and stages [Stage] are the
-    roster's (none for a single manifest)."""
+    stats, the characters and the limits' usage. sparks {id: Sparks} and
+    stages [Stage] are the roster's (none for a single manifest)."""
     sparks, stages = sparks or {}, stages or []
     out = bytearray()
     palette_count, frame_base, chars, char_palettes, all_frames = 0, 0, [], [], []
@@ -1697,9 +1705,10 @@ def build(sheets, effects_from, automatic, systems, sparks=None, stages=None):
                 for pix, ticks, dx, dy in steps:
                     stage_out += struct.pack('<H2hH', 0xffff if pix is None else f, dx, dy, ticks)
                     f += pix is not None
-    if palette_count > MAX_PALETTES or frame_base > MAX_FRAMES:
-        raise ValueError(f'{palette_count} palettes and {frame_base} frames, at most '
-                         f'{MAX_PALETTES} and {MAX_FRAMES}')
+    usage = limits(all_frames, chars, palette_count)
+    over = [f'{k} {n}/{top}' for k, (n, top) in usage.items() if n > top]
+    if over:
+        raise ValueError('pack limits exceeded: ' + ', '.join(over))
     names = [st.name for st in stages]
     for c in chars:
         if c.home_stage is not None:
@@ -1724,7 +1733,25 @@ def build(sheets, effects_from, automatic, systems, sparks=None, stages=None):
     for b in body:
         checksum = ((checksum ^ b) * 16777619) & 0xffffffff
     size = 16 + len(body)
-    return MAGIC + struct.pack('<II', size, checksum) + body, checksum, ncolors, stats, chars
+    return (MAGIC + struct.pack('<II', size, checksum) + body, checksum, ncolors, stats, chars,
+            usage)
+
+
+def limits(frames, chars, palettes):
+    """{name: (used, limit)} of the pack-wide limits the C loader checks
+    (rows and spans before a stage's expanded layers, which the loader adds
+    on top)."""
+    rows = spans = indices = 0
+    for f in frames:
+        h, n = struct.unpack_from('<H', f, 4)[0], struct.unpack_from('<I', f, 10)[0]
+        rows += h + 1
+        spans += n
+        indices += len(f) - 14 - 2 * h - 4 * n
+    return {'characters': (len(chars), MAX_CHARACTERS), 'palettes': (palettes, MAX_PALETTES),
+            'frames': (len(frames), MAX_FRAMES), 'rows': (rows, MAX_ROWS + 1),
+            'spans': (spans, MAX_SPANS), 'indices': (indices, MAX_INDICES),
+            'steps': (sum(len(c.steps) for c in chars), MAX_STEPS),
+            'boxes': (sum(len(c.boxes) for c in chars), MAX_BOXES)}
 
 
 def describe_stats(c):
@@ -1911,8 +1938,8 @@ def main():
     else:
         sheets, effects_from = load_roster(args.roster)
         sparks, stages = load_extras(args.roster)
-        data, checksum, ncolors, stats, chars = build(sheets, effects_from, args.auto,
-                                                      load_systems(args.roster), sparks, stages)
+        data, checksum, ncolors, stats, chars, usage = build(
+            sheets, effects_from, args.auto, load_systems(args.roster), sparks, stages)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_bytes(data)
         opaque = sum(s[2] for s in stats.values())
@@ -1924,6 +1951,8 @@ def main():
                   f'{st.pixels()} layer pixels, '
                   f'{sum(len(a) for ly in st.layers for a in ly["anims"])} anim steps')
         print(f'  {sum(len(sp.anims) for sp in sparks.values())} spark anims')
+        print('  limits: ' + ', '.join(f'{k} {n}/{top} ({n * 100 // top}%)'
+                                       for k, (n, top) in usage.items()))
 
 
 if __name__ == '__main__':

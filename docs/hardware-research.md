@@ -245,7 +245,7 @@ GBA 分区（下面写作 `<data>`）里的文件
 | `roms/*.mpg` | 视频（MPEG-PS，MPEG-1 视频加 MP2 音频），和 ROM 混在一起列出，见下面的默认行为 |
 | `saves/<rom>.sav` | 存档，两个核心通用，只按文件名（不含文件夹）；没有 `.sav` 时会读同名的 RetroArch `.srm`，之后写回 `.sav` |
 | `saves/<rom>.<core>.state` | 即时存档，退出游戏时自动写，下次启动同一个 ROM 用同一个核心时恢复（见下面的默认行为）。和 `.sav` 一样只按文件名，按核心分开（`gpsp`、`mgba`），因为两个核心的格式不通用。mGBA 约 420 到 520KiB（随存档类型变），gpSP 固定约 416KiB |
-| `saves/Fighter.fight.fighter.state` | 格斗 POC 的即时存档，目前为 FGSTAT16 加 FGAUDIO1 声音块，含宿主校验头共 1344 字节；不写 `.sav`，与 GBA 状态独立 |
+| `saves/Fighter.fight.fighter.state` | 格斗 POC 的即时存档，目前为 FGSTAT17 加 FGAUDIO1 声音块，含宿主校验头共 1344 字节；不写 `.sav`，与 GBA 状态独立 |
 | `bios/gba_bios.bin` | 可选的 GBA BIOS。没有的话 gpSP 用内置 BIOS，mGBA 用 HLE |
 | `config/settings.txt` | 全局设置：音量、亮度、LCD 网格、CPU 模式、音频模式、调试日志、开机恢复（`resume`）、视频画面（`video_scale`，fit 或 crop） |
 | `config/resume.txt` | 开机恢复的记录：游戏中关机时写，下次开机用掉就删（见下面的默认行为）。`rom=` 是相对 `roms/` 的路径，`core=` 是写即时存档的核心，`why=` 是怎么关的机，开机开始恢复前加一行 `attempted=1` |

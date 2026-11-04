@@ -33,18 +33,23 @@
 #define MAX_MARGIN 48
 /* Pack limits; packs that need more are rejected. Rule data and the
  * palette-index frames of the whole roster stay resident (sized for about
- * 30 characters); RGB565 pixels only for the two cast fighters and the
- * effects. */
-#define MAX_CHARACTERS 32
-#define MAX_PALETTES 64
-#define MAX_FRAMES 4096
-#define MAX_ROWS (1u << 19)
-#define MAX_SPANS (1u << 20)
-#define MAX_INDICES (1u << 24)
+ * 48 characters of the 2026 average with margin; only the pages a pack
+ * fills become resident); RGB565 pixels only for the two cast fighters and
+ * the effects. Frame, palette, global step and box indices are uint16_t
+ * fields (0xffff is the stage anim's empty frame), so MAX_FRAMES and
+ * MAX_PALETTES stay below 0xffff and MAX_STEPS and MAX_BOXES at most
+ * 65536; the ladder's beaten mask has a bit per character (64). The
+ * packer (tools/fighter/pack.py) mirrors these. */
+#define MAX_CHARACTERS 64
+#define MAX_PALETTES 256
+#define MAX_FRAMES 16384
+#define MAX_ROWS (1u << 21)
+#define MAX_SPANS (1u << 22)
+#define MAX_INDICES (1u << 26)
 #define MAX_IMAGES 1024
 #define MAX_PIXELS (1u << 22)
-#define MAX_STEPS 16384
-#define MAX_BOXES 32768
+#define MAX_STEPS 32768
+#define MAX_BOXES 65536
 #define MAX_EFFECTS 64
 #define MAX_SIDE 1024
 #define MAX_NAME 12
@@ -335,7 +340,8 @@ struct sound_event {
  * round of the current match (from 1, 0 outside a fight). */
 struct fight_state {
 	uint32_t tick, rng, previous, paused, stress, boxes, automatic, round;
-	uint32_t mode, timer, beaten, stage, run, wins[2], chr[2], pal[2];
+	uint32_t mode, timer, stage, run, wins[2], chr[2], pal[2];
+	uint64_t beaten;
 	struct fighter p[2];
 	struct shot shot[MAX_PROJECTILES];
 	uint32_t tone, phase, ended, hits, guards, specials, clashes;
