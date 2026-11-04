@@ -227,6 +227,8 @@ DDR blob 在两边是同一个文件，legacy 能启动，说明 DDR 初始化�
 
 格斗阵容现为 18 人（新增 Waku Waku 7 的 Arina、Politank-Z 和 Rage of the Dragons 的 Sonia，待上机）。舞台现为 7 张（新增 KOF 2002 China、KOF 2003 Hong Kong、SVC 两张、月华剑士一张，各有主场角色和音乐，待上机）。2026-11-04 按原作资料修正了 KOF 通用硬直、hitstop、走速、跳跃和 11 个角色的指令与帧数据，指令加了半圈和 421，待上机看手感。除 Politank-Z 和 Sonia 外每人都有语音，每个必杀技按招式名配了语音或通用挥空音，声音包约 13.1 MiB，待上机试听。倒地起身和投技换成了图集里的真帧（May Lee、舞、Politank-Z 的投技仍是通用抓取），Terry、霸王丸、Arina、May Lee 加了或改了必杀技，待上机。
 
+格斗阵容又加了月华剑士 2 的枫（图集的刀是单独精灵，帧由身体框加刀框拼成），待上机。
+
 ### SD 卡布局
 
 | 位置 | 内容 |
