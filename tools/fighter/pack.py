@@ -44,7 +44,15 @@ Subcommands:
 
 Manifest schema (assets/fighter/terry.json is the reference; unknown
 top-level keys such as "notes" are ignored):
-  frames      name -> [x, y, w, h, anchor x, anchor y] in sheet pixels
+  frames      name -> [x, y, w, h, anchor x, anchor y] in sheet pixels, or
+              with a seventh element, a list of parts [x, y, w, h, dx, dy]
+              (optionally ending in "under"): further sheet rectangles drawn
+              over (under) the main one at (dx, dy) from its top-left in
+              sheet orientation, for sheets that keep a sprite's pieces
+              apart (LB2_Kaede.png's sword); each part is checked like a
+              frame rectangle and the anchor stays relative to the main one;
+              a seventh element "unmirrored" reads that frame as drawn on a
+              "mirror" sheet (effects the ripper left facing the other way)
   hurtboxes   frame -> [[x, y, w, h], ...] or the name of another frame whose
               boxes it shares. Boxes are frame pixels relative to the anchor
               (x forward for a right-facing sprite, y down, so heights above
@@ -570,7 +578,64 @@ class Sheet:
         return out
 
     def frame(self, name):
-        x, y, w, h, ax, ay = self.m['frames'][name]
+        entry = self.m['frames'][name]
+        if len(entry) not in (6, 7) or len(entry) == 7 and not (
+                entry[6] == 'unmirrored' or isinstance(entry[6], list)):
+            raise ValueError(f'{name}: a frame is [x, y, w, h, ax, ay] and optionally '
+                             'a parts list or "unmirrored"')
+        if len(entry) == 7 and entry[6] != 'unmirrored':
+            return self._composite(name, entry)
+        x, y, w, h, ax, ay = entry[:6]
+        pixels = self._rect(name, x, y, w, h)
+        if self.mirror and len(entry) == 6:
+            pixels = [row[::-1] for row in pixels]
+        return self._trimmed(name, pixels, ax, ay)
+
+    def _composite(self, name, entry):
+        """A frame drawn from several sheet rectangles, for sheets that keep a
+        sprite's pieces (a weapon held in the hand) in separate boxes, as the
+        hardware draws them. Each part [x, y, w, h, dx, dy] sits at (dx, dy)
+        from the main rectangle's top-left in sheet orientation and is drawn
+        over it, or under it with a trailing "under"; the anchor stays
+        relative to the (mirrored) main rectangle."""
+        x, y, w, h, ax, ay, parts = entry
+        layers = [(0, 0, self._rect(name, x, y, w, h))]
+        for p in parts:
+            if not (len(p) == 6 or len(p) == 7 and p[6] == 'under'):
+                raise ValueError(f'{name}: a part is [x, y, w, h, dx, dy] with an optional "under"')
+            block = (p[4], p[5], self._rect(name, *p[:4]))
+            if len(p) == 7:
+                layers.insert(0, block)
+            else:
+                layers.append(block)
+        x0 = min(dx for dx, _, _ in layers)
+        y0 = min(dy for _, dy, _ in layers)
+        cw = max(dx + len(px[0]) for dx, _, px in layers) - x0
+        ch = max(dy + len(px) for _, dy, px in layers) - y0
+        pixels = [[None] * cw for _ in range(ch)]
+        for dx, dy, px in layers:
+            for j, row in enumerate(px):
+                for i, c in enumerate(row):
+                    if c is not None:
+                        pixels[dy - y0 + j][dx - x0 + i] = c
+        if self.mirror:
+            pixels = [row[::-1] for row in pixels]
+            ax += cw - (-x0 + w)
+        else:
+            ax -= x0
+        return self._trimmed(name, pixels, ax, ay - y0)
+
+    def _trimmed(self, name, pixels, ax, ay):
+        h, w = len(pixels), len(pixels[0])
+        used_rows = [j for j in range(h) if any(p is not None for p in pixels[j])]
+        used_cols = [i for i in range(w) if any(pixels[j][i] is not None for j in range(h))]
+        if not used_rows:
+            raise ValueError(f'{name}: empty frame')
+        t, b, l, r = used_rows[0], used_rows[-1] + 1, used_cols[0], used_cols[-1] + 1
+        return [row[l:r] for row in pixels[t:b]], ax - l, ay - t
+
+    def _rect(self, name, x, y, w, h):
+        """The checked pixels of one sheet rectangle (None is background)."""
         if x < 1 or y < 1 or x + w >= self.w or y + h >= self.h or w < 1 or h < 1:
             raise ValueError(f'{name}: rectangle outside the sheet')
         ct, cb = self.credit
@@ -604,16 +669,8 @@ class Sheet:
             for xx in (x - 1, x + w):
                 if inbox(xx, yy) and self.px(xx, yy) != self.bg:
                     raise ValueError(f'{name}: no background border left/right')
-        pixels = [[None if self.px(x + i, y + j) == self.bg else self.px(x + i, y + j)
-                   for i in range(w)] for j in range(h)]
-        if self.mirror:
-            pixels = [row[::-1] for row in pixels]
-        used_rows = [j for j in range(h) if any(p is not None for p in pixels[j])]
-        used_cols = [i for i in range(w) if any(pixels[j][i] is not None for j in range(h))]
-        if not used_rows:
-            raise ValueError(f'{name}: empty frame')
-        t, b, l, r = used_rows[0], used_rows[-1] + 1, used_cols[0], used_cols[-1] + 1
-        return [row[l:r] for row in pixels[t:b]], ax - l, ay - t
+        return [[None if self.px(x + i, y + j) == self.bg else self.px(x + i, y + j)
+                 for i in range(w)] for j in range(h)]
 
 
 def rgb565(c):

@@ -12,7 +12,9 @@ refused, specials pack their names (every roster special has one),
 knockdown and OTG flags, the derived knockdown, throw, run and backdash
 actions, wakeup, the throw rules and the run and backdash rules, and the conversion keeps every loaded
 value and is idempotent. It also checks that every roster manifest is
-already converted."""
+already converted, and reads a small boxed 4-bit sheet, including composite
+frames (parts drawn over or under the main box, mirrored) and an
+"unmirrored" frame."""
 import copy
 import importlib.util
 import json
@@ -348,7 +350,7 @@ def main():
         assert convert.convert(text, json.loads(text), real, False, lambda _: None) == text, name
     low_depth_boxed_sheet()
     print('pack-test: systems.json, stats, class defaults, damage scale, follow-ups, '
-          'src/sources validation, conversion and 4-bit boxed sheets passed')
+          'src/sources validation, conversion, 4-bit boxed sheets and composite frames passed')
 
 
 def low_depth_boxed_sheet():
@@ -384,12 +386,30 @@ def low_depth_boxed_sheet():
         man.write_text(json.dumps({
             'sheet': 'boxed.png', 'sha256': hashlib.sha256(png).hexdigest(), 'background': 'ff00ff',
             'boxed': '181010',
-            'frames': {'a': [1, 1, 5, 5, 2, 5], 'b': [7, 1, 5, 5, 2, 5], 'cut': [1, 1, 3, 5, 1, 5]}}))
+            'frames': {'a': [1, 1, 5, 5, 2, 5], 'b': [7, 1, 5, 5, 2, 5], 'cut': [1, 1, 3, 5, 1, 5],
+                       'over': [1, 1, 5, 5, 2, 5, [[7, 1, 5, 5, -1, -2]]],
+                       'under': [1, 1, 5, 5, 2, 5, [[7, 1, 5, 5, -1, -2, 'under']]],
+                       'apart': [1, 1, 5, 5, 2, 5, [[7, 1, 5, 5, 3, 1]]],
+                       'cutpart': [1, 1, 5, 5, 2, 5, [[7, 1, 3, 5, 0, 0]]]}}))
         s = pack.Sheet(man)
         pix, ax, ay = s.frame('a')
-        assert pix == [[b'\x18\x10\x10', b'\xc8\x64\x32', b'\xc8\x64\x32']] and (ax, ay) == (1, 3)
-        assert s.frame('b')[0] == [[b'\xc8\x64\x32']]
+        o, c = b'\x18\x10\x10', b'\xc8\x64\x32'
+        assert pix == [[o, c, c]] and (ax, ay) == (1, 3)
+        assert s.frame('b')[0] == [[c]]
         refused('a rectangle cutting a sprite', lambda: s.frame('cut'))
+        # Composite frames: a part drawn over or under the main rectangle,
+        # the anchor following the main rectangle.
+        assert s.frame('over') == ([[c, c, c]], 1, 3)
+        assert s.frame('under') == ([[o, c, c]], 1, 3)
+        assert s.frame('apart') == ([[o, c, c, None, None]] + [[None] * 5] * 2 +
+                                    [[None] * 4 + [c]], 1, 3)
+        refused('a part cutting a sprite', lambda: s.frame('cutpart'))
+        s.mirror = True
+        assert s.frame('a') == ([[c, c, o]], 1, 3)
+        s.m['frames']['a'].append('unmirrored')
+        assert s.frame('a') == ([[o, c, c]], 1, 3)
+        assert s.frame('apart') == ([[None, None, c, c, o]] + [[None] * 5] * 2 +
+                                    [[c] + [None] * 4], 3, 3)
 
 
 if __name__ == '__main__':
