@@ -47,6 +47,7 @@
 - 格斗数值按原作调查（本机 `build/fighter/source/MECHANICS.md`）做了一轮修正：指令匹配加了半圈 41236/63214 和 421；KOF 体系的硬直、hitstop、走速和跳跃改用 KOF 2002 的通用值；Chin、Vice、Mature、Shermie、Chris、八神庵、舞、Zero、霸王丸、莉姆露露、真之介的指令和帧数据按 SRK、Dream Cancel、Mizuumi 改正，Mature 加了 Death Row 三段，Vice 加了真正的 Outrage。主机 `fighter-test` 通过，待上机看手感（整体比以前慢、出招后破绽更大）。明细见[格斗文档](fighter.md)第 6 项。
 - 格斗加了 KOF 2003 的 Ralf 和 Clark（Heatpark 图集），普通技帧数按 KOF 2002 UM 表，必杀技用 2002 指令；Ralf 的 Vulcan Punch 换成 236+P，Clark 的指令投改成打击技或不导入。待上机看锚点（跑、受击、必杀技动作间有无跳动）、Clark 的防御/蹲受击帧是否认对，以及两人的手感。
 - 格斗包上限按约 48 人放大：64 个角色、256 个调色板、16384 帧、帧索引 64 MiB 等（23 人时 4309 帧已超过原来的 4096），已打败集合改为 64 位（FGSTAT17），包格式不变；`pack.py build` 会打印各项用量。静态 BSS 从约 35 MiB 变成约 114 MiB，但只有用到的页面常驻。选人网格每行 4 人，超过约 28 人会压到下方的人物立绘，之后要改布局。
+- 格斗加了 Fighter's History Dynamite 的 Karnov（Spriters Resource 旧版图集，Xinos 提取），帧数据按 SuperCombo。待上机看锚点（攻击、100-Kick 和投技之间有无跳动）、Balloon Attack 升空漂浮再下落是否顺、火焰喷吐的位置和长度、Fireball 改成直线后的手感；Fire Breath 指令从 66 改成了 623，伤害是估计，没有语音。
 
 - 电源键休眠：实机上两次休眠都进了深度睡眠（`result: suspended to RAM, mem (deep)`，唤醒中断是 IRQ 27，427 ms 恢复），唤醒的那一下按键被正确忽略，SD 卡和声音都恢复了。唤醒时声音等第一帧上屏再启动、前端马上打开重新枚举的手柄，这两处 2026-11 已经在真机上确认（见上面）。还要看：深睡 1.95 小时掉了 2%（约 35 mA，对 RK3326 来说偏高），这批日志里只有一次不到 1 秒的休眠，没有新数据；屏幕、pop 声和指示灯要用眼睛看，声音晚启动以后唤醒时的 pop 声还在不在；有用户说用电源键唤醒时偶尔亮一下又灭掉，要再按一次，还没在日志里看到过，要开着 Debug log 再看。
 - 首次开机扩展 GBA 分区：`sdgrow:` 日志，扩展后 Windows 和 macOS 能否读写。
