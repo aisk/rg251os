@@ -10,7 +10,8 @@
  * Lee's Tatsuo Kyaku branches by held direction), the arcade ladder (the
  * versus card and READY freezing the rules, held buttons no press at FIGHT,
  * the banner, select, opponents, loss, clear, Auto rotation, replay, a full
- * MAX_CHARACTERS roster with its 64-bit beaten mask across a save), the
+ * MAX_CHARACTERS roster with its 64-bit beaten mask across a save, and
+ * the select grid's moves, scrolling and bounds on rosters up to it), the
  * survival and practice modes (carried life, heal, streak and record; the
  * dummy picked and its four behaviours, refilled life, combo damage; B
  * quitting from a pause), the round clock, time over and best of three,
@@ -35,7 +36,8 @@
  * haohmaru.json and systems.json. Fighter x is in quarter pixels (QX). It
  * also writes preview PPMs of the select, Power Wave (boxes on), result and
  * clear screens, a hit on each stage, ROUND 2 and the clock, the survival
- * select, the dummy pick and the practice HUD. test-render.c adds the pack
+ * select, the dummy pick, the practice HUD and a scrolled 64-character
+ * select and dummy pick. test-render.c adds the pack
  * decoder, box, stage and pixel-exact renderer checks. ASan/UBSan run this
  * without a window or device. */
 #include "audio.h"
@@ -3075,6 +3077,126 @@ static void snapshot(const struct fight_state *s, const char *suffix)
 	fight_render(&pack, &scene, fb);
 	write_ppm(path, fb);
 }
+/* The select grid on rosters up to MAX_CHARACTERS of Terry copies with
+ * MAX_NAME-letter names: up and down keep the column and wrap, a column the
+ * partial last row lacks lands on the last entry, RIGHT and DOWN reach
+ * every entry, and on every cursor (P1 and the practice dummy) the grid
+ * stays in its band (y 28..170, inside the screen) with the cursor's cell
+ * and up to GRID_ROWS rows in view, clear of the poses and the names
+ * below. Writes roster previews of a scrolled grid and a dummy pick. */
+static void grid_frame(struct fight_state *s, unsigned n)
+{
+	static struct scene sc;
+	int cur = (int)s->chr[s->picking], top = fight_grid_top(cur, (int)n);
+	int rows = (int)(n + GRID_COLUMNS - 1) / GRID_COLUMNS, cells = 0, cursor = 0;
+	assert(top >= 0 && cur / GRID_COLUMNS >= top && cur / GRID_COLUMNS < top + GRID_ROWS &&
+	       (rows <= GRID_ROWS ? top == 0 : top + GRID_ROWS <= rows));
+	fight_cast(&pack, s);
+	fight_scene(s, &pack, &sc);
+	assert(sc.count < COMMANDS);
+	for (unsigned k = 0; k < sc.count; k++) {
+		const struct command *c = &sc.cmd[k];
+		assert(c->x >= 0 && c->y >= 0 && c->x + c->w <= FW && c->y + c->h <= FH);
+		if (c->op != RECT || (c->w == FW && c->h == FH) || c->y >= 300)
+			continue;
+		/* The title row, the grid band or the names and hints from y 240. */
+		assert(c->y + c->h <= 24 || c->y >= 240 || (c->y >= 28 && c->y + c->h <= 170));
+		cells += c->color == 0x2124 && c->w == 108;
+		cursor += c->color == (s->picking ? 0x07ff : 0x07e0) && c->y >= 28 && c->y < 170 &&
+			  c->h <= 2;
+		if (c->y >= 240 || c->y + c->h <= 24)
+			continue;
+		for (unsigned j = 0; j < sc.count; j++) {
+			const struct command *p = &sc.cmd[j];
+			if (p->op == SPRITE)
+				assert(p->y >= c->y + c->h || p->y + p->h <= c->y ||
+				       p->x >= c->x + c->w || p->x + p->w <= c->x);
+		}
+	}
+	int shown = (int)n - top * GRID_COLUMNS;
+	assert(cells == (shown < GRID_ROWS * GRID_COLUMNS ? shown : GRID_ROWS * GRID_COLUMNS));
+	if (cursor != 2 || sc.misses) {
+		fprintf(stderr, "grid: %d of %u at %d (picking %u): %d cursor rects, %u misses\n",
+			cur, n, top, (unsigned)s->picking, cursor, (unsigned)sc.misses);
+		abort();
+	}
+}
+static void roster_grid(void)
+{
+	struct character *saved = malloc(sizeof(pack.chr));
+	assert(saved);
+	memcpy(saved, pack.chr, sizeof(pack.chr));
+	unsigned characters = pack.characters;
+	for (int k = 0; k < MAX_CHARACTERS; k++) {
+		pack.chr[k] = saved[terry];
+		memset(pack.chr[k].name, 'W', MAX_NAME);
+		pack.chr[k].name[0] = (char)('A' + k % 26);
+		pack.chr[k].name[1] = (char)('A' + k / 26);
+		pack.chr[k].name[MAX_NAME] = 0;
+	}
+	/* Moves on a partial last row (29: row 7 holds only entry 28). */
+	assert(fight_grid_move(1, 29, K(DOWN)) == 5 && fight_grid_move(25, 29, K(DOWN)) == 28 &&
+	       fight_grid_move(28, 29, K(DOWN)) == 0 && fight_grid_move(2, 29, K(UP)) == 28 &&
+	       fight_grid_move(0, 29, K(UP)) == 28 && fight_grid_move(28, 29, K(UP)) == 24 &&
+	       fight_grid_move(28, 29, K(RIGHT)) == 0 && fight_grid_move(0, 29, K(LEFT)) == 28 &&
+	       fight_grid_move(3, 64, K(UP)) == 63 && fight_grid_move(2, 3, K(DOWN)) == 2 &&
+	       fight_grid_move(0, 1, K(UP) | K(LEFT)) == 0);
+	static const unsigned sizes[] = {1, 5, 24, 29, 33, 41, MAX_CHARACTERS};
+	for (unsigned z = 0; z < sizeof(sizes) / sizeof(sizes[0]); z++) {
+		unsigned n = sizes[z], rows = (n + GRID_COLUMNS - 1) / GRID_COLUMNS;
+		pack.characters = n;
+		struct fight_state s;
+		uint64_t seen = 0;
+		/* DOWN visits every row's first column, then wraps to the top. */
+		fight_reset(&s, 0);
+		for (unsigned r = 0; r <= rows; r++) {
+			assert(s.mode == MODE_SELECT && s.chr[0] == r % rows * GRID_COLUMNS);
+			grid_frame(&s, n);
+			step2(&s, K(DOWN), 0);
+			step2(&s, 0, 0);
+		}
+		/* RIGHT reaches every entry and wraps. */
+		fight_reset(&s, 0);
+		for (unsigned k = 0; k <= n; k++) {
+			assert(s.mode == MODE_SELECT && s.chr[0] == k % n);
+			seen |= 1ull << s.chr[0];
+			grid_frame(&s, n);
+			step2(&s, K(RIGHT), 0);
+			step2(&s, 0, 0);
+		}
+		assert(seen == (n == 64 ? ~0ull : (1ull << n) - 1));
+		/* A practice dummy picked away from P1. */
+		fight_reset(&s, 0);
+		for (int k = 0; k < 2; k++) {
+			step2(&s, K(L), 0);
+			step2(&s, 0, 0);
+		}
+		for (unsigned k = 0; k < n * 3 / 5; k++) {
+			step2(&s, K(RIGHT), 0);
+			step2(&s, 0, 0);
+		}
+		step2(&s, K(Y), 0);
+		step2(&s, 0, 0);
+		assert(s.game == GAME_PRACTICE && s.picking);
+		for (int k = 0; k < 3; k++) {
+			grid_frame(&s, n);
+			step2(&s, K(UP), 0);
+			step2(&s, 0, 0);
+		}
+		if (n == MAX_CHARACTERS) {
+			snapshot(&s, "roster-dummy");
+			s.picking = 0;
+			s.chr[1] = s.chr[0] = 37;
+			s.pal[1] = 0;
+			s.game = GAME_ARCADE;
+			grid_frame(&s, n);
+			snapshot(&s, "roster");
+		}
+	}
+	memcpy(pack.chr, saved, sizeof(pack.chr));
+	pack.characters = characters;
+	free(saved);
+}
 /* Select, a command list on the select screen, READY, FIGHT, a Power Wave
  * in flight with the box overlay, a lost run, a cleared one, a hit on each
  * stage, a combo count and a pause with its command list, for human
@@ -3237,6 +3359,7 @@ static void logic_tests(const uint8_t *data, size_t len)
 	follow_ups();
 	ladder();
 	full_ladder();
+	roster_grid();
 	game_modes();
 	guard_dummy();
 	cpu_guard();

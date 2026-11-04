@@ -46,7 +46,7 @@
 - 格斗加了月华剑士 2 的枫（kilburto 图集，`kaede.json`）。图集把刀单独拆成精灵，所以清单的帧可以由身体框加刀框拼成（`pack.py` 新加的 parts），拼法、锚点、判定和帧序取自 ohgaki 的 MUGEN 包；普通技按 Dream Cancel 的帧数据，四个必杀技 Squall、Wind Fang、Fillet Flash、East Wind Wallop。主机 `fighter-test` 通过，待上机看刀的前后遮挡、Wind Fang 的弧线和 Fillet Flash 后几刀能不能连上。没有语音。
 - 格斗数值按原作调查（本机 `build/fighter/source/MECHANICS.md`）做了一轮修正：指令匹配加了半圈 41236/63214 和 421；KOF 体系的硬直、hitstop、走速和跳跃改用 KOF 2002 的通用值；Chin、Vice、Mature、Shermie、Chris、八神庵、舞、Zero、霸王丸、莉姆露露、真之介的指令和帧数据按 SRK、Dream Cancel、Mizuumi 改正，Mature 加了 Death Row 三段，Vice 加了真正的 Outrage。主机 `fighter-test` 通过，待上机看手感（整体比以前慢、出招后破绽更大）。明细见[格斗文档](fighter.md)第 6 项。
 - 格斗加了 KOF 2003 的 Ralf 和 Clark（Heatpark 图集），普通技帧数按 KOF 2002 UM 表，必杀技用 2002 指令；Ralf 的 Vulcan Punch 换成 236+P，Clark 的指令投改成打击技或不导入。待上机看锚点（跑、受击、必杀技动作间有无跳动）、Clark 的防御/蹲受击帧是否认对，以及两人的手感。
-- 格斗包上限按约 48 人放大：64 个角色、256 个调色板、16384 帧、帧索引 64 MiB 等（23 人时 4309 帧已超过原来的 4096），已打败集合改为 64 位（FGSTAT17），包格式不变；`pack.py build` 会打印各项用量。静态 BSS 从约 35 MiB 变成约 114 MiB，但只有用到的页面常驻。选人网格每行 4 人，超过约 28 人会压到下方的人物立绘，之后要改布局。
+- 格斗包上限按约 48 人放大：64 个角色、256 个调色板、16384 帧、帧索引 64 MiB 等（23 人时 4309 帧已超过原来的 4096），已打败集合改为 64 位（FGSTAT17），包格式不变；`pack.py build` 会打印各项用量。静态 BSS 从约 35 MiB 变成约 114 MiB，但只有用到的页面常驻。选人网格改成可滚动的窗口：每行 4 人、同时显示 8 行（32 人），光标所在行尽量保持在第 4 行，上下有更多时右侧显示灰色箭头；上下键按列循环，最后一行不满时落到最后一人。滚动位置由光标推出，状态格式不变，64 人的主机测试检查每个人都能选到、网格不碰立绘和文字。
 - 格斗加了 Fighter's History Dynamite 的 Karnov（Spriters Resource 旧版图集，Xinos 提取），帧数据按 SuperCombo。待上机看锚点（攻击、100-Kick 和投技之间有无跳动）、Balloon Attack 升空漂浮再下落是否顺、火焰喷吐的位置和长度、Fireball 改成直线后的手感；Fire Breath 指令从 66 改成了 623，伤害是估计，没有语音。
 - 格斗加了 Rage of the Dragons 的 Jimmy Lewis（Spriters Resource 图集，和 Sonia 同格式），帧数据按 SRK 镜像。待上机看锚点（站 B/D 单脚踢、跑动、Cannon Kick 前翻落地有无跳动）、Heat Hurricane 冲刺距离和追加下段的时机、Red Rage 速度，没有语音。
 

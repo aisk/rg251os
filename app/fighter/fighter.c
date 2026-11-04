@@ -166,9 +166,10 @@
  * the first unfrozen tick, so a cancel from hitstop starts on
  * C + hitstop + 1.
  *
- * Ladder: the select screen picks P1 (d-pad, any attack confirms; R
- * cycles the CPU level, shown top right, since the handheld has no core
- * option rows); each
+ * Ladder: the select screen picks P1 (d-pad over a roster grid of
+ * GRID_COLUMNS per row and GRID_ROWS rows in view that scrolls with the
+ * cursor, derived from it each frame; any attack confirms; R cycles the CPU
+ * level, shown top right, since the handheld has no core option rows); each
  * stage is a match of ROUNDS_TO_WIN won rounds (best of three; a draw
  * scores for both, two at once is a loss; Auto keeps single rounds) against
  * a random character
@@ -1721,6 +1722,35 @@ static void round_over(struct fight_state *s, const struct assets *a)
 		}
 	}
 }
+/* The roster grid's cursor: left and right step through the whole roster
+ * and wrap, up and down keep the column and wrap between the first and
+ * last rows; a column the partial last row lacks lands on the last entry. */
+int fight_grid_move(int c, int n, uint32_t pressed)
+{
+	int rows = (n + GRID_COLUMNS - 1) / GRID_COLUMNS;
+	if (pressed & KEY(LEFT))
+		c = (c + n - 1) % n;
+	if (pressed & KEY(RIGHT))
+		c = (c + 1) % n;
+	for (int k = 0; k < 2; k++) {
+		if (!(pressed & (k ? KEY(DOWN) : KEY(UP))))
+			continue;
+		int r = (c / GRID_COLUMNS + (k ? 1 : rows - 1)) % rows;
+		c = r * GRID_COLUMNS + c % GRID_COLUMNS;
+		c = c < n ? c : n - 1;
+	}
+	return c;
+}
+/* The first grid row on screen, derived from the cursor alone (nothing is
+ * stored): the cursor row sits fourth from the top where the roster
+ * allows, so the rows around it stay in view while it moves. */
+int fight_grid_top(int c, int n)
+{
+	int rows = (n + GRID_COLUMNS - 1) / GRID_COLUMNS, top = c / GRID_COLUMNS - 3;
+	if (top > rows - GRID_ROWS)
+		top = rows - GRID_ROWS;
+	return top > 0 ? top : 0;
+}
 /* The select screen: the cursor is P1 (chr[0], chr[1] follows it), or the
  * dummy (chr[1]) once a practice P1 is picked. An attack button picks:
  * the arcade ladder, a survival run or, in practice, P1 and then the
@@ -1734,14 +1764,7 @@ static void select_screen(struct fight_state *s, const struct assets *a, uint32_
 	}
 	if (s->timer < 255)
 		s->timer++;
-	if (pressed & KEY(LEFT))
-		c = (c + n - 1) % n;
-	if (pressed & KEY(RIGHT))
-		c = (c + 1) % n;
-	if ((pressed & KEY(UP)) && c >= 4)
-		c -= 4;
-	if ((pressed & KEY(DOWN)) && c + 4 < n)
-		c += 4;
+	c = fight_grid_move(c, n, pressed);
 	if (s->picking) {
 		s->chr[1] = (uint32_t)c;
 		s->pal[1] = s->chr[1] == s->chr[0];
@@ -2237,6 +2260,42 @@ static void select_list(const struct fight_state *s, const struct assets *a, str
 	text(out, 206, 40, c->name, 0xffe0);
 	move_list(out, c, 206, 60, 14, 1);
 }
+/* The roster grid: GRID_ROWS rows of GRID_COLUMNS cells in GRID_X..
+ * GRID_RIGHT x GRID_Y..GRID_BOTTOM, above the poses (whose heads stay below
+ * about y 170) and the names at y 240. Only the rows in view are drawn,
+ * scrolled to keep the cursor's row in view (fight_grid_top); a grey arrow
+ * right of the first or last row in view marks more rows above or below.
+ * Cells are wide enough for MAX_NAME letters. */
+#define GRID_X 16
+#define GRID_Y 32
+#define GRID_CELL_W 108
+#define GRID_CELL_H 16
+#define GRID_PITCH_X 114
+#define GRID_PITCH_Y 17
+#define GRID_RIGHT (GRID_X + (GRID_COLUMNS - 1) * GRID_PITCH_X + GRID_CELL_W)
+#define GRID_BOTTOM (GRID_Y + (GRID_ROWS - 1) * GRID_PITCH_Y + GRID_CELL_H)
+static void select_grid(const struct fight_state *s, const struct assets *a,
+			struct scene *out)
+{
+	int n = (int)a->characters, cur = (int)s->chr[s->picking], top = fight_grid_top(cur, n);
+	int rows = (n + GRID_COLUMNS - 1) / GRID_COLUMNS;
+	for (int k = top * GRID_COLUMNS; k < n && k < (top + GRID_ROWS) * GRID_COLUMNS; k++) {
+		int x = GRID_X + k % GRID_COLUMNS * GRID_PITCH_X,
+		    y = GRID_Y + (k / GRID_COLUMNS - top) * GRID_PITCH_Y, in = s->picking ? 2 : 0;
+		rect(out, x, y, GRID_CELL_W, GRID_CELL_H, 0x2124, OPAQUE, 255);
+		if (s->picking && k == (int)s->chr[0])
+			outline(out, (struct area){x, y, GRID_CELL_W, GRID_CELL_H}, 0x07e0, 0, 2);
+		if (k == cur)
+			outline(out,
+				(struct area){x + in, y + in, GRID_CELL_W - 2 * in, GRID_CELL_H - 2 * in},
+				s->picking ? 0x07ff : 0x07e0, 0, s->picking ? 1 : 2);
+		text(out, x + 6, y + 3, a->chr[k].name, k == cur ? 0xffe0 : 0xffff);
+	}
+	if (top > 0)
+		text(out, GRID_RIGHT + 2, GRID_Y + 2, "\10", 0x8410);
+	if (top + GRID_ROWS < rows)
+		text(out, GRID_RIGHT + 2, GRID_BOTTOM - 12, "\2", 0x8410);
+}
 /* The select screen: the game mode (top left), the difficulty (top
  * right), the roster grid with the cursor and P1's pose. Picking a
  * practice dummy keeps P1 outlined in green, outlines the dummy cursor in
@@ -2252,18 +2311,7 @@ static void select_scene(const struct fight_state *s, const struct assets *a, st
 		select_list(s, a, out);
 		return;
 	}
-	for (unsigned k = 0; k < a->characters; k++) {
-		int x = 16 + (int)(k % 4) * 114, y = 40 + (int)(k / 4) * 20;
-		int cursor = k == s->chr[s->picking];
-		rect(out, x, y, 108, 18, 0x2124, OPAQUE, 255);
-		if (s->picking && k == s->chr[0])
-			outline(out, (struct area){x, y, 108, 18}, 0x07e0, 0, 2);
-		if (cursor)
-			outline(out, (struct area){x + (s->picking ? 3 : 0), y + (s->picking ? 3 : 0),
-						   108 - (s->picking ? 6 : 0), 18 - (s->picking ? 6 : 0)},
-				s->picking ? 0x07ff : 0x07e0, 0, 2);
-		text(out, x + 6, y + 4, a->chr[k].name, cursor ? 0xffe0 : 0xffff);
-	}
+	select_grid(s, a, out);
 	rect(out, 0, 300, FW, 2, 0x8c50, OPAQUE, 255);
 	if (s->picking) {
 		idle_sprite(out, s, a, 0, 100, 300, 0);
