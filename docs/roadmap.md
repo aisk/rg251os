@@ -45,6 +45,7 @@
 - 格斗舞台从 2 张增加到 7 张（KOF 2002 China、KOF 2003 Hong Kong、SVC 的守护犬寺和 Power Generation Room、月华剑士庭院，都取自 KOF EXUM 的 MUGEN 移植），多数角色有了主场，舞台可以指定自己的战斗音乐。每张展开后都不超过 Korea，常驻 RGB565 不变，包大了约 1.9 MB。待上机看画面、地面位置和换舞台时的展开耗时。
 - 格斗数值按原作调查（本机 `build/fighter/source/MECHANICS.md`）做了一轮修正：指令匹配加了半圈 41236/63214 和 421；KOF 体系的硬直、hitstop、走速和跳跃改用 KOF 2002 的通用值；Chin、Vice、Mature、Shermie、Chris、八神庵、舞、Zero、霸王丸、莉姆露露、真之介的指令和帧数据按 SRK、Dream Cancel、Mizuumi 改正，Mature 加了 Death Row 三段，Vice 加了真正的 Outrage。主机 `fighter-test` 通过，待上机看手感（整体比以前慢、出招后破绽更大）。明细见[格斗文档](fighter.md)第 6 项。
 - 格斗加了 KOF 2003 的 Ralf 和 Clark（Heatpark 图集），普通技帧数按 KOF 2002 UM 表，必杀技用 2002 指令；Ralf 的 Vulcan Punch 换成 236+P，Clark 的指令投改成打击技或不导入。待上机看锚点（跑、受击、必杀技动作间有无跳动）、Clark 的防御/蹲受击帧是否认对，以及两人的手感。
+- 格斗加了 Rage of the Dragons 的 Jimmy Lewis（Spriters Resource 图集，和 Sonia 同格式），帧数据按 SRK 镜像。待上机看锚点（站 B/D 单脚踢、跑动、Cannon Kick 前翻落地有无跳动）、Heat Hurricane 冲刺距离和追加下段的时机、Red Rage 速度，没有语音。
 
 - 电源键休眠：实机上两次休眠都进了深度睡眠（`result: suspended to RAM, mem (deep)`，唤醒中断是 IRQ 27，427 ms 恢复），唤醒的那一下按键被正确忽略，SD 卡和声音都恢复了。唤醒时声音等第一帧上屏再启动、前端马上打开重新枚举的手柄，这两处 2026-11 已经在真机上确认（见上面）。还要看：深睡 1.95 小时掉了 2%（约 35 mA，对 RK3326 来说偏高），这批日志里只有一次不到 1 秒的休眠，没有新数据；屏幕、pop 声和指示灯要用眼睛看，声音晚启动以后唤醒时的 pop 声还在不在；有用户说用电源键唤醒时偶尔亮一下又灭掉，要再按一次，还没在日志里看到过，要开着 Debug log 再看。
 - 首次开机扩展 GBA 分区：`sdgrow:` 日志，扩展后 Windows 和 macOS 能否读写。
