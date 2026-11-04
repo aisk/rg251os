@@ -37,7 +37,7 @@
  * effects. */
 #define MAX_CHARACTERS 32
 #define MAX_PALETTES 64
-#define MAX_FRAMES 4096
+#define MAX_FRAMES 8192
 #define MAX_ROWS (1u << 19)
 #define MAX_SPANS (1u << 20)
 #define MAX_INDICES (1u << 24)

@@ -6,7 +6,10 @@ source of truth for it: every frame is a hand-checked sheet rectangle plus a
 foot anchor, every action a list of (frame, ticks) steps. Pixels stay 1:1;
 the sheet background is transparent and each frame is trimmed and stored as
 per-row opaque spans of palette indices. Frames must have a background border
-and may not touch the sheet's credit box or its white animation underlines.
+(on a plain sheet the sheet's edge counts as one) and may not touch the
+sheet's credit box or its white animation underlines. The credit box is the
+sheet's first band of non-background rows; a sheet whose credits sit
+elsewhere names their rows with "credit": [top, bottom).
 Boxed sheets (kilburto's Spriters Resource exports: every frame in its own
 background box, boxes separated by lines of a "separator" colour, which the
 sprites may use too) have neither; a frame must lie inside one box, with
@@ -376,7 +379,7 @@ MAX_PUSH_DISTANCE = 200
 HISTORY = 32
 SCREEN_WIDTH = 480
 MAX_PALETTES = 64
-MAX_FRAMES = 4096
+MAX_FRAMES = 8192
 EFFECT_KEYS = ['hit_light', 'hit_heavy', 'hit_special', 'guard', 'slash_light', 'slash_heavy',
                'slash_special', 'slash_guard', 'blood_light', 'blood_heavy', 'blood_special']
 SLASH_KEYS = ['lp', 'hp', 'lk', 'hk', 'special']
@@ -512,8 +515,17 @@ class Sheet:
             self.boxes = box_rects(self)
         else:
             self.bands = self._bands()
-            # The credit text box is the sheet's first band; nothing may come from it.
-            self.credit = self.bands[0]
+            # The credit text box is the sheet's first band unless "credit"
+            # names its rows [top, bottom); nothing may come from it.
+            credit = self.m.get('credit')
+            if credit is not None:
+                if (not isinstance(credit, list) or len(credit) != 2 or
+                        not all(isinstance(v, int) for v in credit) or
+                        not 0 <= credit[0] < credit[1] <= self.h):
+                    raise ValueError(f'{path}: credit must be [top, bottom] rows')
+                self.credit = tuple(credit)
+            else:
+                self.credit = self.bands[0]
             self.underlines = self._underlines()
 
     def px(self, x, y):
@@ -563,7 +575,11 @@ class Sheet:
 
     def frame(self, name):
         x, y, w, h, ax, ay = self.m['frames'][name]
-        if x < 1 or y < 1 or x + w >= self.w or y + h >= self.h or w < 1 or h < 1:
+        # On a plain sheet the sheet's edge counts as background border, so a
+        # sprite drawn against it can still be sliced.
+        edge = 0 if not (self.boxed or self.sep) else 1
+        if (x < edge or y < edge or x + w > self.w - edge or y + h > self.h - edge or
+                w < 1 or h < 1):
             raise ValueError(f'{name}: rectangle outside the sheet')
         ct, cb = self.credit
         if y < cb and y + h > ct:
@@ -574,7 +590,7 @@ class Sheet:
         # A background border proves the rectangle neither cuts a sprite nor
         # reaches into its neighbour. On a boxed sheet the rectangle must lie
         # in one box and the border is background or that box's edge.
-        inbox = lambda xx, yy: True
+        inbox = lambda xx, yy: 0 <= xx < self.w and 0 <= yy < self.h
         if self.boxed:
             ring = {self.px(xx, yy) for xx in range(x - 1, x + w + 1) for yy in (y - 1, y + h)}
             ring |= {self.px(xx, yy) for xx in (x - 1, x + w) for yy in range(y - 1, y + h + 1)}
@@ -1833,7 +1849,10 @@ def detect(sheet):
     print(f'background {sheet.m["background"]}, credit box rows {sheet.credit}')
     for x0, y, x1 in sheet.underlines:
         print(f'underline y={y} x={x0}..{x1}')
-    for top, bottom in sheet.bands[1:]:
+    ct, cb = sheet.credit
+    for top, bottom in sheet.bands:
+        if top < cb and bottom > ct:
+            continue
         print(f'rows {top}..{bottom}: ' + ' '.join(f'{a}..{b}' for a, b in sheet.segments(top, bottom)))
 
 
