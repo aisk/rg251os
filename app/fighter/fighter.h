@@ -7,7 +7,8 @@
  * spark pool and the sound events in the state and only emit draw commands
  * (the HUD, banners and command lists included);
  * render.c owns the pack decoder (which fills stats and class defaults from
- * the character's system and applies its damage scale), the render cache
+ * the character's system, applies its damage scale and sizes the heap
+ * arrays for the frames and the cache from the pack), the render cache
  * (the fighters and stage the state shows, expanded to RGB565 lazily and in
  * bounded slices) and the pixel loops. */
 #ifndef FIGHTER_H
@@ -35,9 +36,13 @@
 #define MAX_MARGIN 48
 /* Pack limits; packs that need more are rejected. Rule data and the
  * palette-index frames of the whole roster stay resident (sized for about
- * 48 characters of the 2026 average with margin; only the pages a pack
- * fills become resident); RGB565 pixels only for the two cast fighters and
- * the effects. Frame, palette, global step and box indices are uint16_t
+ * 48 characters of the 2026 average with margin); RGB565 pixels only for
+ * the two cast fighters, one stage and the effects. The rows, spans,
+ * palette indices and RGB565 pixels are heap arrays sized at load from the
+ * pack's counts (MAX_ROWS, MAX_SPANS, MAX_INDICES and MAX_PIXELS bound
+ * them), the rest of struct assets is fixed: a static struct this size
+ * would push gpSP's JIT cache, which a frontend linking both must map
+ * within branch range of the text, out of reach. Frame, palette, global step and box indices are uint16_t
  * fields (0xffff is the stage anim's empty frame), so MAX_FRAMES and
  * MAX_PALETTES stay below 0xffff and MAX_STEPS and MAX_BOXES at most
  * 65536; the ladder's beaten mask has a bit per character (64). The
@@ -591,10 +596,15 @@ struct assets {
 	struct step step[MAX_STEPS];
 	struct box box[MAX_BOXES];
 	uint16_t effect[MAX_EFFECTS];
-	uint32_t row[MAX_ROWS + 1];
-	struct span span[MAX_SPANS];
-	uint8_t index[MAX_INDICES];
-	uint16_t pixel[MAX_PIXELS];
+	/* Heap arrays owned by fight_assets and released by fight_free (NULL
+	 * when nothing is loaded); *_cap is each one's length in elements:
+	 * rows and spans of the pack plus those of the largest stage, its
+	 * indices and the effect and region pixels. */
+	uint32_t *row;
+	struct span *span;
+	uint8_t *index;
+	uint16_t *pixel;
+	uint32_t row_cap, span_cap, index_cap, pixel_cap;
 };
 enum operation { RECT, SPRITE };
 /* RECT fills x,y,w,h with color. SPRITE draws image with its top-left at x,y
@@ -637,7 +647,12 @@ unsigned fight_pose(const struct fight_state *s, const struct assets *a, int i);
 struct area fight_box(const struct box *b, int x, int y, int face);
 void fight_scene(const struct fight_state *s, const struct assets *a, struct scene *scene);
 void fight_render(const struct assets *a, const struct scene *scene, uint16_t *fb);
+/* Decode a pack into a, releasing what a held before (a must be zeroed or
+ * have been through fight_assets or fight_free). On failure a is empty
+ * (no characters, nothing allocated); returns 0. */
 int fight_assets(struct assets *a, const void *data, size_t size, int *automatic);
+/* Release a's heap arrays and empty it; safe to repeat. */
+void fight_free(struct assets *a);
 /* Screen x of a stage layer's left edge with the camera at cam. */
 int fight_layer_x(const struct layer *l, int cam);
 /* The render cache (render.c). fight_want points it at what state s draws:

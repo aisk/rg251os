@@ -12,7 +12,12 @@
  * from its class and scales damage and chip by the system's damage scale,
  * derives hit groups, startup/active/recovery, reach and the weapon flag per
  * move, checks follow-up links and windows, and expands the effects and
- * sparks once. The render cache holds three regions after the effects: the
+ * sparks once. The rows, spans, palette indices and RGB565 pixels live in
+ * heap arrays that grow while the frames are read and are cut to their
+ * exact size at the end (the pack's plus the largest stage's rows and
+ * spans, the effects plus the cache regions' pixels); fight_assets frees
+ * the previous pack's first and everything on failure, fight_free at
+ * unload. The render cache holds three regions after the effects: the
  * stage (sized for the largest stage) and one per side (sized for the
  * largest character), so only two characters' and one stage's RGB565 pixels
  * are ever resident and the loader proves any pair plus any stage fits.
@@ -31,6 +36,7 @@
  * canvas; the host presents it. tools/fighter/pack.py documents the file
  * layout. */
 #include "fighter.h"
+#include <stdlib.h>
 #include <string.h>
 /* Frame, palette, step and box indices are stored in uint16_t fields. */
 _Static_assert(MAX_FRAMES < 0xffff && MAX_PALETTES < 0xffff, "frame index fields");
@@ -67,6 +73,27 @@ static uint32_t u32(struct reader *r)
 	uint32_t lo = u16(r);
 	return lo | (uint32_t)u16(r) << 16;
 }
+/* p with room for need elements of size bytes (*cap of them now, at most
+ * max): doubles when it grows. NULL when out of memory (p stays valid). */
+static void *room(void *p, uint32_t *cap, uint32_t need, size_t size, uint32_t max)
+{
+	if (need <= *cap)
+		return p;
+	uint32_t n = *cap < max / 2 ? *cap * 2 : max;
+	n = n < need ? need : n;
+	void *q = realloc(p, (size_t)n * size);
+	if (q)
+		*cap = n;
+	return q;
+}
+/* p resized to exactly n elements of size bytes (one when n is 0). */
+static void *fit(void *p, uint32_t *cap, uint32_t n, size_t size)
+{
+	void *q = realloc(p, (size_t)(n ? n : 1) * size);
+	if (q)
+		*cap = n;
+	return q;
+}
 static int frame(struct reader *r, struct assets *a, struct frame *f)
 {
 	f->sheet = (uint16_t)u16(r);
@@ -78,8 +105,17 @@ static int frame(struct reader *r, struct assets *a, struct frame *f)
 	if (!r->ok || f->w < 1 || f->h < 1 || f->w > MAX_SIDE || f->h > MAX_SIDE ||
 	    f->ax < -MAX_SIDE || f->ax > MAX_SIDE || f->ay < -MAX_SIDE ||
 	    f->ay > MAX_SIDE || a->rows + (unsigned)f->h + 1 > MAX_ROWS + 1 ||
-	    spans > MAX_SPANS - a->spans)
+	    spans > MAX_SPANS - a->spans || spans > (r->size - r->at) / 4)
 		return 0;
+	uint32_t *row = room(a->row, &a->row_cap, a->rows + (unsigned)f->h + 1,
+			     sizeof(*row), MAX_ROWS + 1);
+	if (!row)
+		return 0;
+	a->row = row;
+	struct span *span = room(a->span, &a->span_cap, a->spans + spans, sizeof(*span), MAX_SPANS);
+	if (!span)
+		return 0;
+	a->span = span;
 	f->first_row = a->rows;
 	uint32_t at = a->spans;
 	for (int y = 0; y < f->h; y++) {
@@ -110,6 +146,10 @@ static int frame(struct reader *r, struct assets *a, struct frame *f)
 	f->index = a->indices;
 	if (pixels > MAX_INDICES - a->indices || r->size - r->at < pixels)
 		return 0;
+	uint8_t *index = room(a->index, &a->index_cap, a->indices + pixels, 1, MAX_INDICES);
+	if (!index)
+		return 0;
+	a->index = index;
 	memcpy(a->index + a->indices, r->p + r->at, pixels);
 	r->at += pixels;
 	a->indices += pixels;
@@ -145,6 +185,11 @@ static int image(struct assets *a, unsigned f, unsigned c)
 {
 	if (a->images >= MAX_IMAGES || a->frame[f].count > MAX_PIXELS - a->pixels)
 		return -1;
+	uint16_t *pixel = room(a->pixel, &a->pixel_cap, a->pixels + a->frame[f].count,
+			       sizeof(*pixel), MAX_PIXELS);
+	if (!pixel)
+		return -1;
+	a->pixel = pixel;
 	a->pixels += expand_frame(a, f, c, a->images, a->pixels);
 	return (int)a->images++;
 }
@@ -884,7 +929,7 @@ static int read_stages(struct reader *r, struct assets *a, unsigned n)
 	a->stages = n;
 	return 1;
 }
-int fight_assets(struct assets *a, const void *data, size_t size, int *automatic)
+static int decode(struct assets *a, const void *data, size_t size, int *automatic)
 {
 	struct reader r = {data, 0, size, 1};
 	if (!data || size < 48 || memcmp(data, "FIGHTP11", 8))
@@ -903,7 +948,6 @@ int fight_assets(struct assets *a, const void *data, size_t size, int *automatic
 		check = (check ^ r.p[i]) * 16777619u;
 	if (check != hash)
 		return 0;
-	memset(a, 0, offsetof(struct assets, palette_sheet));
 	a->hash = hash;
 	a->palettes = palettes;
 	for (unsigned i = 0; i < palettes; i++) {
@@ -960,6 +1004,24 @@ int fight_assets(struct assets *a, const void *data, size_t size, int *automatic
 	    stage_images > MAX_IMAGES - a->images - 2 * char_images ||
 	    rows > MAX_ROWS + 1 - a->rows || spans > MAX_SPANS - a->spans)
 		return 0;
+	/* Exact sizes: the stage region's rows and spans follow the pack's. */
+	uint32_t *row = fit(a->row, &a->row_cap, a->rows + rows, sizeof(*row));
+	if (!row)
+		return 0;
+	a->row = row;
+	struct span *span = fit(a->span, &a->span_cap, a->spans + spans, sizeof(*span));
+	if (!span)
+		return 0;
+	a->span = span;
+	uint8_t *index = fit(a->index, &a->index_cap, a->indices, 1);
+	if (!index)
+		return 0;
+	a->index = index;
+	uint16_t *pixel = fit(a->pixel, &a->pixel_cap,
+			      a->pixels + stage_pixels + 2 * char_pixels, sizeof(*pixel));
+	if (!pixel)
+		return 0;
+	a->pixel = pixel;
 	a->effect_images = a->images;
 	a->effect_pixels = a->pixels;
 	a->pack_rows = a->rows;
@@ -983,6 +1045,27 @@ int fight_assets(struct assets *a, const void *data, size_t size, int *automatic
 	a->wanted = 0;
 	*automatic = (int)flags;
 	return 1;
+}
+void fight_free(struct assets *a)
+{
+	free(a->row);
+	free(a->span);
+	free(a->index);
+	free(a->pixel);
+	a->row = NULL;
+	a->span = NULL;
+	a->index = NULL;
+	a->pixel = NULL;
+	a->row_cap = a->span_cap = a->index_cap = a->pixel_cap = 0;
+	memset(a, 0, offsetof(struct assets, palette_sheet));
+}
+int fight_assets(struct assets *a, const void *data, size_t size, int *automatic)
+{
+	fight_free(a);
+	if (decode(a, data, size, automatic))
+		return 1;
+	fight_free(a);
+	return 0;
 }
 /* ---- the render cache ---- */
 /* Empty side i's region for character chr with palette pal. */
