@@ -19,7 +19,7 @@ ffmpeg -i in.mp4 -vf scale=480:-2 -r 30 -c:v mpeg1video -q:v 2 -mbd rd -trellis 
 
 While a video plays, A pauses, Left/Right seek 10 s and Down/Up 60 s (hold to keep seeking), L/R go to the previous/next video in the same folder, and B toggles the on-screen display with the name, time and progress. When a video ends the next one in the folder starts by itself. SELECT+START opens the menu as in games, and each video resumes where it was left.
 
-An experimental 480×320 fighting libretro core is also included, with original Neo Geo characters, stages, sparks, sound effects and music imported 1:1 from ripped sources, arcade, survival and practice modes against the CPU, and automatic software-rendering stress scenes. On hardware normal fights run at 60 fps with a few ms of work per frame; see [the fighter notes](docs/fighter.md).
+An optional 480×320 fighting game, [rg251fighter](external/fighter), can be built in: a libretro core of its own with original Neo Geo characters, stages, sparks, sound effects and music imported 1:1 from ripped sources, arcade, survival and practice modes against the CPU, and automatic software-rendering stress scenes. On hardware normal fights run at 60 fps with a few ms of work per frame. It is left out by default; `make image FIGHTER=1` builds it from the `external/fighter` submodule, links it into the frontend and ships its pack as `roms/Fighter.fight`. See [the engine's own docs](external/fighter/docs/design.md).
 
 ## Build
 
@@ -31,6 +31,7 @@ cd rg251os
 git submodule update --init --depth 1
 make image          # build/sdcard.img
 make frontend-test
+make image FIGHTER=1   # with the fighting game (also runs its tests in frontend-test)
 ```
 
 Or take an image from the releases. Write it to an SD card, boot once, then copy ROMs into `roms/` on the `GBA` partition.

@@ -3,7 +3,8 @@
  * file has startup, the main loop and the game's lifecycle; the work is
  * in the modules (sys.c mounts and system helpers, display.c KMS, input.c
  * evdev and the power key timing, audio.c ALSA, core.c the libretro
- * cores (including the native *.fight POC), video_core.c the player for
+ * cores (and the optional *.fight fighter, external/fighter, when built
+ * with FIGHTER=1), video_core.c the player for
  * *.mpg videos, ui.c the page stack,
  * menu.c the ROM list and menus, settings.c, sleep.c, cpuctl.c, sdgrow.c,
  * clock.c, sysinfo.c).

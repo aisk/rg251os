@@ -6,8 +6,9 @@
 # forces the stub, FRONTEND_CORE=mgba or gpsp links only that core. The
 # stub build (every core id runs the stub) is also available as
 # frontend-stub for tests. The video player (video_core.c, pl_mpeg from
-# external/pl_mpeg compiled once in plm.c) and the native fighter core
-# (mk/fighter.mk) are in every build.
+# external/pl_mpeg compiled once in plm.c) is in every build; the fighting
+# game core (external/fighter, mk/fighter.mk) only with FIGHTER=1, which
+# adds -DHAVE_CORE_FIGHTER (cores.c, romlist.c) and links its archive.
 #
 #   make frontend          build/frontend/frontend (stripped, installed)
 #   make frontend-test     selftest and headless runs under qemu-aarch64,
@@ -37,7 +38,7 @@ FRONTEND_STUB_CORES_OBJ := $(FRONTEND_BUILD)/obj/cores-stub.o
 
 FRONTEND_CFLAGS := -std=c11 -O2 -Wall -Wextra -Wshadow -D_GNU_SOURCE \
 	-mcpu=cortex-a35 -isystem $(LIBRETRO_INCLUDE) -isystem $(TINYALSA_INCLUDE) \
-	-isystem $(EXTERNAL)/pl_mpeg -pthread -MMD -MP
+	-isystem $(EXTERNAL)/pl_mpeg -pthread -MMD -MP $(FIGHTER_CFLAGS)
 FRONTEND_LDFLAGS := -static -pthread
 
 ifeq ($(FRONTEND_CORE),stub)
@@ -49,14 +50,20 @@ FRONTEND_CORE_LIBS := $(if $(filter mgba,$(subst -, ,$(FRONTEND_CORE))),$(MGBA_L
 FRONTEND_CORE_LDLIBS := $(sort $(MGBA_LDLIBS) $(GPSP_LDLIBS))
 endif
 
-# The selected core is recorded so switching it relinks
+# The selected core is recorded so switching it relinks; the fighter
+# switch (FIGHTER, a compile flag) is recorded so flipping it recompiles.
 FRONTEND_CORE_STAMP := $(FRONTEND_BUILD)/.core-$(FRONTEND_CORE)
 $(FRONTEND_BUILD)/.core-%:
 	mkdir -p $(@D)
 	rm -f $(FRONTEND_BUILD)/.core-*
 	touch $@
+FRONTEND_FIGHTER_STAMP := $(FRONTEND_BUILD)/.fighter-$(FIGHTER)
+$(FRONTEND_BUILD)/.fighter-%:
+	mkdir -p $(@D)
+	rm -f $(FRONTEND_BUILD)/.fighter-*
+	touch $@
 
-$(FRONTEND_BUILD)/obj/%.o: $(FRONTEND_DIR)/%.c $(TOP)/mk/frontend.mk | $(TOOLCHAIN_STAMP)
+$(FRONTEND_BUILD)/obj/%.o: $(FRONTEND_DIR)/%.c $(TOP)/mk/frontend.mk $(FRONTEND_FIGHTER_STAMP) | $(TOOLCHAIN_STAMP)
 	mkdir -p $(@D)
 	$(CROSS_COMPILE)gcc $(FRONTEND_CFLAGS) $(FRONTEND_OBJ_CFLAGS) -c -o $@ $<
 
@@ -66,7 +73,7 @@ $(FRONTEND_BUILD)/obj/plm.o: FRONTEND_OBJ_CFLAGS := -O3
 
 # The core tables, built per core set: -DHAVE_CORE_MGBA etc.
 $(FRONTEND_CORES_OBJ) $(FRONTEND_STUB_CORES_OBJ): $(FRONTEND_BUILD)/obj/cores-%.o: \
-		$(FRONTEND_DIR)/cores.c $(TOP)/mk/frontend.mk | $(TOOLCHAIN_STAMP)
+		$(FRONTEND_DIR)/cores.c $(TOP)/mk/frontend.mk $(FRONTEND_FIGHTER_STAMP) | $(TOOLCHAIN_STAMP)
 	mkdir -p $(@D)
 	$(CROSS_COMPILE)gcc $(FRONTEND_CFLAGS) \
 		$(if $(filter mgba,$(subst -, ,$*)),-DHAVE_CORE_MGBA) \
@@ -107,9 +114,9 @@ frontend-stub: $(FRONTEND_STUB_ELF)
 frontend-test: fighter-test $(FRONTEND_ELF) $(FRONTEND_STUB_ELF)
 	rm -rf $(FRONTEND_TEST_DIR)
 	mkdir -p $(FRONTEND_TEST_DIR)/stub $(FRONTEND_TEST_DIR)/core
-	sh $(TOP)/tools/fighter/frontend-test.sh $(QEMU_AARCH64) $(FRONTEND_ELF) \
-		$(FIGHTER_BUILD)/Fighter-POC.fight $(FIGHTER_BUILD)/Fighter-Auto.fight \
-		$(FRONTEND_TEST_DIR)/fighter
+	$(if $(FIGHTER_LIB),sh $(TOP)/tools/fighter/frontend-test.sh $(QEMU_AARCH64) $(FRONTEND_ELF) \
+		$(FIGHTER_ENGINE)/Fighter.fight $(FIGHTER_ENGINE)/Fighter-Auto.fight \
+		$(FRONTEND_TEST_DIR)/fighter,@echo "fighter frontend test: skipped (FIGHTER=0)")
 	# Test clips for the video player, made from ffmpeg's generators:
 	# 480x270 30 fps stereo 44.1 kHz 30 s, 640x360 25 fps mono 32 kHz
 	# 3 s, 240x160 30 fps without audio 2 s.

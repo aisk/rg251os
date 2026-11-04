@@ -1,8 +1,9 @@
 /*
  * ROM list: one folder of <data>/roms at a time (the menu scans a folder
  * when it is entered, nothing deeper), its subfolders first by name, then
- * its *.gba files, *.fight native games and *.mpg videos (video_core.c),
- * nothing else (a pack's .fightsnd sound bank next to it stays hidden),
+ * its *.gba files, *.mpg videos (video_core.c) and, when the fighter
+ * core is linked in (HAVE_CORE_FIGHTER), *.fight native games, nothing
+ * else (a pack's .fightsnd sound bank next to it stays hidden),
  * identified (romdb.c;
  * a video by its file name) and sorted by the name shown, mixed.
  * Identification reads each file's header; ROMs that need their CRC and
@@ -47,8 +48,13 @@ static int cmp_roms(const void *a, const void *b)
 
 static int is_rom(const char *name)
 {
+#ifdef HAVE_CORE_FIGHTER
+	int fighter = romdb_is_fighter(name);
+#else
+	int fighter = 0;
+#endif
 	return name[0] != '.' && ((size_t)romdb_stem_len(name) < strlen(name) ||
-				  romdb_is_video(name) || romdb_is_fighter(name));
+				  romdb_is_video(name) || fighter);
 }
 
 static void log_summary(const struct romlist *rl, const char *what,

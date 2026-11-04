@@ -2,10 +2,12 @@
  * The core tables. Built once per binary (see mk/frontend.mk) with
  * HAVE_CORE_MGBA / HAVE_CORE_GPSP for the cores linked in, or with
  * neither for the stub build, where every GBA core id runs the stub core.
- * The fighter (app/fighter, CORE_FIGHTER) is in every build, with renamed
- * libretro entry points. The video player (video_core.c, CORE_VIDEO) is
- * also in every build; its
- * entry points are named video_retro_* in the source, no renaming.
+ * The fighter (external/fighter, CORE_FIGHTER) is linked only when the
+ * build sets HAVE_CORE_FIGHTER (FIGHTER=1, mk/fighter.mk), with renamed
+ * libretro entry points; without it core_api_get(CORE_FIGHTER) is NULL and
+ * the ROM list hides *.fight. The video player (video_core.c, CORE_VIDEO)
+ * is in every build; its entry points are named video_retro_* in the
+ * source, no renaming.
  */
 #include <stdbool.h>
 #include <stdint.h>
@@ -59,8 +61,10 @@
 	.save_size = save, \
 }
 
+#ifdef HAVE_CORE_FIGHTER
 CORE_PROTOS(fighter)
 static const struct core_api fighter = CORE_TABLE(fighter, "fighter", NULL);
+#endif
 
 CORE_PROTOS(video)
 static const struct core_api video = CORE_TABLE(video, "video", NULL);
@@ -114,8 +118,10 @@ const struct core_api *core_api_get(int id)
 #endif
 	case CORE_VIDEO:
 		return &video;
+#ifdef HAVE_CORE_FIGHTER
 	case CORE_FIGHTER:
 		return &fighter;
+#endif
 	default:
 		return NULL;
 	}
@@ -130,8 +136,10 @@ const struct core_api *core_api_get(int id)
 {
 	if (id == CORE_VIDEO)
 		return &video;
+#ifdef HAVE_CORE_FIGHTER
 	if (id == CORE_FIGHTER)
 		return &fighter;
+#endif
 	return id >= 0 && id < CORE_GBA_COUNT ? &stub : NULL;
 }
 

@@ -1,12 +1,10 @@
 # SD card image assembled with genimage from the kernel, dtb, bootloader
-# blob and rootfs. The GBA partition is filled from the genimage root path,
-# which holds the fighter pack as roms/Fighter.fight (the assets/fighter
-# roster built as Fighter-POC, see mk/fighter.mk) with its sound bank
-# renamed to match, roms/Fighter.fightsnd (the core finds the bank by the
-# pack's name; the Auto pack is for host tests only and not shipped)
-# and an empty saves/ directory (the frontend creates
-# the rest on first boot). Needs genimage, mtools and dosfstools on the
-# host.
+# blob and rootfs. The GBA partition is filled from the genimage root path:
+# an empty saves/ directory (the frontend creates the rest on first boot)
+# and, with FIGHTER=1 (mk/fighter.mk), the fighter pack as
+# roms/Fighter.fight with its sound bank roms/Fighter.fightsnd (the core
+# finds the bank by the pack's name; the Auto pack is for host tests only
+# and not shipped). Needs genimage, mtools and dosfstools on the host.
 
 IMAGES_DIR := $(BUILD)/images
 SDCARD_IMG := $(BUILD)/sdcard.img
@@ -21,7 +19,7 @@ GENIMAGE ?= genimage
 IMAGE_PATH := /usr/sbin:/sbin:$(PATH)
 
 $(SDCARD_IMG): $(LINUX_IMAGE) $(LINUX_DTB) $(BOOT_BLOB) $(BOOT_BLOB_STAMP) $(ROOTFS_IMG) \
-		$(GENIMAGE_CFG) $(EXTLINUX_CONF) $(BOOT_INI) $(TOP)/mk/image.mk $(FIGHTER_BUILD)/Fighter-POC.fight $(FIGHTER_BUILD)/Fighter-POC.fightsnd
+		$(GENIMAGE_CFG) $(EXTLINUX_CONF) $(BOOT_INI) $(TOP)/mk/image.mk $(FIGHTER_CONTENT) $(FIGHTER_SOUND)
 	@missing=; \
 	for t in $(GENIMAGE):genimage mcopy:mtools mmd:mtools mkdosfs:dosfstools; do \
 		PATH=$(IMAGE_PATH) command -v $${t%%:*} >/dev/null 2>&1 || missing="$$missing $${t#*:}"; \
@@ -33,8 +31,8 @@ $(SDCARD_IMG): $(LINUX_IMAGE) $(LINUX_DTB) $(BOOT_BLOB) $(BOOT_BLOB_STAMP) $(ROO
 	fi
 	rm -rf $(IMAGES_DIR) $(GENIMAGE_TMP)
 	mkdir -p $(IMAGES_DIR)/extlinux $(GENIMAGE_TMP)/root/roms $(GENIMAGE_TMP)/root/saves
-	cp $(FIGHTER_BUILD)/Fighter-POC.fight $(GENIMAGE_TMP)/root/roms/Fighter.fight
-	cp $(FIGHTER_BUILD)/Fighter-POC.fightsnd $(GENIMAGE_TMP)/root/roms/Fighter.fightsnd
+	$(if $(FIGHTER_LIB),cp $(FIGHTER_ENGINE)/Fighter.fight $(GENIMAGE_TMP)/root/roms/Fighter.fight)
+	$(if $(FIGHTER_LIB),cp $(FIGHTER_ENGINE)/Fighter.fightsnd $(GENIMAGE_TMP)/root/roms/Fighter.fightsnd)
 	cp $(LINUX_IMAGE) $(IMAGES_DIR)/Image
 	cp $(LINUX_DTB) $(IMAGES_DIR)/rk3326-anbernic-rg351p.dtb
 	cp $(EXTLINUX_CONF) $(IMAGES_DIR)/extlinux/extlinux.conf
