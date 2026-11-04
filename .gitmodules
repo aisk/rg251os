@@ -40,3 +40,6 @@
 	url = https://github.com/phoboslab/pl_mpeg.git
 	branch = master
 	shallow = true
+[submodule "external/fighter"]
+	path = external/fighter
+	url = /home/asaka/rg251fighter

@@ -219,11 +219,11 @@ DDR blob 在两边是同一个文件，legacy 能启动，说明 DDR 初始化�
 
 ## 当前状态
 
-2026-11-03 更新。legacy U-Boot 加主线 6.18 内核，前端（`app/frontend`）作为 PID 1 直接启动，内置 gpSP 和 mGBA 两个核心，另外有播放 `.mpg` 视频和运行 `.fight` 格斗 POC 的核心。
+2026-11-04 更新。legacy U-Boot 加主线 6.18 内核，前端（`app/frontend`）作为 PID 1 直接启动，内置 gpSP 和 mGBA 两个核心，另外有播放 `.mpg` 视频的核心；格斗核心改成可选：引擎、素材、打包工具和它自己的测试都搬进了独立仓库 rg251fighter，以子模块 `external/fighter` 接入（现在的 URL 是本机路径 `/home/asaka/rg251fighter`，托管后要改 `.gitmodules`），`make image FIGHTER=1` 才编进前端并把 `roms/Fighter.fight` 放进镜像，默认 `FIGHTER=0` 不编也不列出 `.fight` 文件。引擎这边所有按包变化的表都改成加载时按包里的数量分配（角色、招式、帧、调色板、步骤、判定框、舞台等都没有编译期上限，只剩 16 位下标和存档里 128 位的已打败集合），ARM64 静态核心的 BSS 从约 3.0 MiB 降到 61 KiB；前端 ELF 不带格斗时 text 2.65 MB、BSS 10.3 MiB（带时 BSS 只多 61 KiB，以前多 3.0 MiB），gpSP 的 JIT 缓存不再受影响。新布局（2026-11-04 之后）还没上机。引擎同时加了连段系统（取消窗口、确反、浮空追打、气槽和超必杀、指令投、连打输入，包 FIGHTP12、状态 FGSTAT19）和一个 SDL2 桌面播放器，明细见 [引擎文档](../external/fighter/docs/fighter.md) 和 roadmap。
 
 2026-10-30 到 11-03 的 14 次开机：视频解码挪进工作线程以后播放不再卡（没有丢帧和 underrun），但功耗没有比玩游戏低。开机恢复、退出时的即时存档、Date & time 写 RTC、从设置关机都在真机上确认了。充电的问题定位到 PMIC 没认到输入（PLUG_IN_STS 一直是 0，CHRG_IN 没被复位），电池其实在慢慢充，只是系统报 Not charging。唤醒后手柄约 2.2 s 不能用是内核 dwc2 重新枚举的问题。细节见 [roadmap.md](roadmap.md)。
 
-原生格斗引擎已接入标准 libretro 软件渲染 POC（原生与 qemu 集成回归通过，已有首轮合成负载真机结果，见 [格斗文档](fighter.md)）；[方案调研](fighting-engine-research.md)：目标是 480×320 的拳皇式传统 1 对 1 跨作品对战，只需背景和共同地面，暂不考虑四人。已接入当前软件显示和音频宿主。2026-11-03 boot-0015：Max 下正常两人核心合成均值 5.49ms，额外 8/24/48 混合精灵分别 9.46/18.74/32.91ms，旋转约 3ms；前两档可约 60fps，后两档约 30/20fps 并有大量音频欠载。峰值 RSS 约 21.4MiB，最高采样温度 47.7°C。保留软件路线。之后已换成 FIGHTP 格式（现为 FIGHTP11）并导入 KOF 2002 Terry（原像素 1:1），渲染改为 span 复制，前端旋转改为分块转置，加了判定框、Hitstop/硬直、普通技、Terry 的必杀技、选人闯关、11 个角色、数值体系第一步，以及舞台、打击效果和声音，boot-0016 真机验证：正常对战核心渲染约 1.4 ms（原 5.49 ms）、旋转 blit 约 1.5 ms（原约 3 ms），零 missed vblank 和 underrun；boot-0017 加上舞台和音乐后对战中仍然没有掉帧，run 均值约 2.5 ms，只有选人移光标和开打时重建缓存会卡 20 到 55 ms（已改为按需分片展开，加了开局对阵卡和追加输入；boot-0018 到 0021 约 20 分钟格斗全程零 missed vblank 和 underrun，单次 run 的展开最多约 4 ms）。之后又加了 READY/FIGHT、连段计数、出招表、CPU 难度、倒地起身、通常投、跑动和后撤步，以及生存和练习模式、回合计时和三局两胜；完整十分钟验收仍待完成。
+原生格斗引擎已接入标准 libretro 软件渲染 POC（原生与 qemu 集成回归通过，已有首轮合成负载真机结果，见 [格斗文档](../external/fighter/docs/fighter.md)）；[方案调研](../external/fighter/docs/fighting-engine-research.md)：目标是 480×320 的拳皇式传统 1 对 1 跨作品对战，只需背景和共同地面，暂不考虑四人。已接入当前软件显示和音频宿主。2026-11-03 boot-0015：Max 下正常两人核心合成均值 5.49ms，额外 8/24/48 混合精灵分别 9.46/18.74/32.91ms，旋转约 3ms；前两档可约 60fps，后两档约 30/20fps 并有大量音频欠载。峰值 RSS 约 21.4MiB，最高采样温度 47.7°C。保留软件路线。之后已换成 FIGHTP 格式（现为 FIGHTP11）并导入 KOF 2002 Terry（原像素 1:1），渲染改为 span 复制，前端旋转改为分块转置，加了判定框、Hitstop/硬直、普通技、Terry 的必杀技、选人闯关、11 个角色、数值体系第一步，以及舞台、打击效果和声音，boot-0016 真机验证：正常对战核心渲染约 1.4 ms（原 5.49 ms）、旋转 blit 约 1.5 ms（原约 3 ms），零 missed vblank 和 underrun；boot-0017 加上舞台和音乐后对战中仍然没有掉帧，run 均值约 2.5 ms，只有选人移光标和开打时重建缓存会卡 20 到 55 ms（已改为按需分片展开，加了开局对阵卡和追加输入；boot-0018 到 0021 约 20 分钟格斗全程零 missed vblank 和 underrun，单次 run 的展开最多约 4 ms）。之后又加了 READY/FIGHT、连段计数、出招表、CPU 难度、倒地起身、通常投、跑动和后撤步，以及生存和练习模式、回合计时和三局两胜；完整十分钟验收仍待完成。
 
 格斗阵容现为 29 人（新增 Waku Waku 7 的 Arina、Politank-Z、Rage of the Dragons 的 Sonia、KOF 2002 的 Kula、侍魂 V Special 的 Gaira、SVC Chaos 的 Red Arremer 和 KOF 2003 的 Ralf、Clark、月华剑士 2 的枫、Fighter's History Dynamite 的 Karnov、Rage of the Dragons 的 Jimmy、SVC Chaos 的 Dan、Kabuki Klash 的綱手、SVC Chaos 的 Earthquake，待上机）。舞台现为 7 张（新增 KOF 2002 China、KOF 2003 Hong Kong、SVC 两张、月华剑士一张，各有主场角色和音乐，待上机）。2026-11-04 按原作资料修正了 KOF 通用硬直、hitstop、走速、跳跃和 11 个角色的指令与帧数据，指令加了半圈和 421，待上机看手感。除 Politank-Z、Sonia、Kula 和 Gaira 外每人都有语音，每个必杀技按招式名配了语音或通用挥空音，声音包约 13.1 MiB，待上机试听。倒地起身和投技换成了图集里的真帧（May Lee、舞、Politank-Z 的投技仍是通用抓取），Terry、霸王丸、Arina、May Lee 加了或改了必杀技，待上机。
 
@@ -241,11 +241,11 @@ GBA 分区（下面写作 `<data>`）里的文件
 | 路径 | 用途 |
 |---|---|
 | `roms/*.gba` | ROM，可以放在任意深度的子文件夹里 |
-| `roms/Fighter.fight`、`roms/Fighter.fightsnd` | 格斗内容包（按后缀自动选择 fighter 核心）和同名的声音文件（前端列表不显示）；实现和测试见 [格斗文档](fighter.md) |
+| `roms/Fighter.fight`、`roms/Fighter.fightsnd` | 格斗内容包（按后缀自动选择 fighter 核心）和同名的声音文件（前端列表不显示）；实现和测试见 [格斗文档](../external/fighter/docs/fighter.md) |
 | `roms/*.mpg` | 视频（MPEG-PS，MPEG-1 视频加 MP2 音频），和 ROM 混在一起列出，见下面的默认行为 |
 | `saves/<rom>.sav` | 存档，两个核心通用，只按文件名（不含文件夹）；没有 `.sav` 时会读同名的 RetroArch `.srm`，之后写回 `.sav` |
 | `saves/<rom>.<core>.state` | 即时存档，退出游戏时自动写，下次启动同一个 ROM 用同一个核心时恢复（见下面的默认行为）。和 `.sav` 一样只按文件名，按核心分开（`gpsp`、`mgba`），因为两个核心的格式不通用。mGBA 约 420 到 520KiB（随存档类型变），gpSP 固定约 416KiB |
-| `saves/Fighter.fight.fighter.state` | 格斗 POC 的即时存档，目前为 FGSTAT17 加 FGAUDIO1 声音块，含宿主校验头共 1344 字节；不写 `.sav`，与 GBA 状态独立 |
+| `saves/Fighter.fight.fighter.state` | 格斗的即时存档（只在 `FIGHTER=1` 的镜像里有），状态魔数随引擎版本变（2026-11-04 起已打败集合扩成 128 位，旧状态直接拒绝），含 FGAUDIO1 声音块和宿主校验头；不写 `.sav`，与 GBA 状态独立 |
 | `bios/gba_bios.bin` | 可选的 GBA BIOS。没有的话 gpSP 用内置 BIOS，mGBA 用 HLE |
 | `config/settings.txt` | 全局设置：音量、亮度、LCD 网格、CPU 模式、音频模式、调试日志、开机恢复（`resume`）、视频画面（`video_scale`，fit 或 crop） |
 | `config/resume.txt` | 开机恢复的记录：游戏中关机时写，下次开机用掉就删（见下面的默认行为）。`rom=` 是相对 `roms/` 的路径，`core=` 是写即时存档的核心，`why=` 是怎么关的机，开机开始恢复前加一行 `attempted=1` |
@@ -305,4 +305,4 @@ GBA 分区（下面写作 `<data>`）里的文件
 - [RetroGameCorps：RG351P 加装 WiFi 指南](https://retrogamecorps.com/2020/11/16/guide-install-your-own-wi-fi-chip-inside-the-rg351p/)
 - [CNX Software：RK3326 datasheet](https://www.cnx-software.com/2018/07/23/rockchip-rk3308-rk3326-datasheet/)
 
-2026-11-03 格斗方案补充：明确采用标准 libretro core（本机静态、桌面动态），通过统一绘制指令保留软件/GPU 后端扩展空间；先实现软件路径并用真实规模素材测量。MUGEN 行为兼容不作为目标。详见 [方案补充](fighting-engine-research.md#补充决定标准-libretro-core-与可替换渲染器)。
+2026-11-03 格斗方案补充：明确采用标准 libretro core（本机静态、桌面动态），通过统一绘制指令保留软件/GPU 后端扩展空间；先实现软件路径并用真实规模素材测量。MUGEN 行为兼容不作为目标。详见 [方案补充](../external/fighter/docs/fighting-engine-research.md#补充决定标准-libretro-core-与可替换渲染器)。
