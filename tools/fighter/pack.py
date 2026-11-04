@@ -7,6 +7,10 @@ foot anchor, every action a list of (frame, ticks) steps. Pixels stay 1:1;
 the sheet background is transparent and each frame is trimmed and stored as
 per-row opaque spans of palette indices. Frames must have a background border
 and may not touch the sheet's credit box or its white animation underlines.
+A sheet with "components": true has neither credit box nor underlines and
+its sprites may touch their neighbours: a frame is the 8-connected pieces
+lying wholly inside its rectangle, a piece crossing the edge is left out
+(and must lie mostly outside, so the rectangle cuts no sprite of its own).
 Boxed sheets (kilburto's Spriters Resource exports: every frame in its own
 background box, boxes separated by lines of a "separator" colour, which the
 sprites may use too) have neither; a frame must lie inside one box, with
@@ -516,12 +520,18 @@ class Sheet:
         # "boxed" is the stricter form: every frame is one whole box, so its
         # border is all separator (or all background).
         self.boxed = bytes.fromhex(self.m['boxed']) if 'boxed' in self.m else None
-        if self.sep and self.boxed:
-            raise ValueError(f'{path}: use either separator or boxed')
+        # "components": a sheet without credit box or underlines whose sprites
+        # may touch their neighbours (bernd's Sprite Database sheets).
+        self.components = self.m.get('components', False) is True
+        self.piece_of, self.pieces = {}, []
+        if sum(map(bool, (self.sep, self.boxed, self.components))) > 1:
+            raise ValueError(f'{path}: use only one of separator, boxed and components')
         if self.boxed == self.bg:
             raise ValueError(f'{path}: the box separator is the background colour')
-        if self.boxed:
+        if self.boxed or self.components:
             self.credit, self.underlines = (0, 0), []
+            if self.components:
+                self.bands = self._bands()
         elif self.sep:
             # Boxed sheet: no credit box and no underlines.
             self.credit, self.underlines = (0, 0), []
@@ -636,7 +646,10 @@ class Sheet:
 
     def _rect(self, name, x, y, w, h):
         """The checked pixels of one sheet rectangle (None is background)."""
-        if x < 1 or y < 1 or x + w >= self.w or y + h >= self.h or w < 1 or h < 1:
+        # Every rectangle needs a border inside the sheet, except on a
+        # components sheet, which never looks at one.
+        edge = 0 if self.components else 1
+        if x < edge or y < edge or x + w > self.w - edge or y + h > self.h - edge or w < 1 or h < 1:
             raise ValueError(f'{name}: rectangle outside the sheet')
         ct, cb = self.credit
         if y < cb and y + h > ct:
@@ -648,6 +661,8 @@ class Sheet:
         # reaches into its neighbour. On a boxed sheet the rectangle must lie
         # in one box and the border is background or that box's edge.
         inbox = lambda xx, yy: True
+        if self.components:
+            return self._component_pixels(name, x, y, w, h)
         if self.boxed:
             ring = {self.px(xx, yy) for xx in range(x - 1, x + w + 1) for yy in (y - 1, y + h)}
             ring |= {self.px(xx, yy) for xx in (x - 1, x + w) for yy in range(y - 1, y + h + 1)}
@@ -670,6 +685,49 @@ class Sheet:
                 if inbox(xx, yy) and self.px(xx, yy) != self.bg:
                     raise ValueError(f'{name}: no background border left/right')
         return [[None if self.px(x + i, y + j) == self.bg else self.px(x + i, y + j)
+                 for i in range(w)] for j in range(h)]
+
+    def _piece(self, x, y):
+        """The 8-connected piece of non-background pixels at (x, y), as an
+        index into self.pieces (lists of pixels), found once and cached."""
+        p = self.piece_of.get((x, y))
+        if p is not None:
+            return p
+        p = len(self.pieces)
+        found, todo = [(x, y)], [(x, y)]
+        self.piece_of[x, y] = p
+        while todo:
+            cx, cy = todo.pop()
+            for nx in (cx - 1, cx, cx + 1):
+                for ny in (cy - 1, cy, cy + 1):
+                    if (0 <= nx < self.w and 0 <= ny < self.h and (nx, ny) not in self.piece_of and
+                            self.px(nx, ny) != self.bg):
+                        self.piece_of[nx, ny] = p
+                        found.append((nx, ny))
+                        todo.append((nx, ny))
+        self.pieces.append(found)
+        return p
+
+    def _component_pixels(self, name, x, y, w, h):
+        """A frame of a "components" sheet: the pieces lying wholly inside the
+        rectangle. A piece that crosses its edge belongs to a neighbour and is
+        left out, but only if most of it lies outside; otherwise the
+        rectangle cuts its own sprite."""
+        keep, seen = set(), set()
+        for j in range(y, y + h):
+            for i in range(x, x + w):
+                if self.px(i, j) == self.bg:
+                    continue
+                p = self._piece(i, j)
+                if p in seen:
+                    continue
+                seen.add(p)
+                inside = sum(x <= u < x + w and y <= v < y + h for u, v in self.pieces[p])
+                if inside == len(self.pieces[p]):
+                    keep.add(p)
+                elif inside * 2 >= len(self.pieces[p]):
+                    raise ValueError(f'{name}: cuts the sprite piece at {i},{j}')
+        return [[self.px(x + i, y + j) if self.piece_of.get((x + i, y + j)) in keep else None
                  for i in range(w)] for j in range(h)]
 
 
@@ -1917,7 +1975,7 @@ def detect(sheet):
     print(f'background {sheet.m["background"]}, credit box rows {sheet.credit}')
     for x0, y, x1 in sheet.underlines:
         print(f'underline y={y} x={x0}..{x1}')
-    for top, bottom in sheet.bands[1:]:
+    for top, bottom in (sheet.bands if sheet.components else sheet.bands[1:]):
         print(f'rows {top}..{bottom}: ' + ' '.join(f'{a}..{b}' for a, b in sheet.segments(top, bottom)))
 
 

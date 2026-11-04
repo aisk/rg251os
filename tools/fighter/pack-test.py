@@ -14,7 +14,7 @@ actions, wakeup, the throw rules and the run and backdash rules, and the convers
 value and is idempotent. It also checks that every roster manifest is
 already converted, and reads a small boxed 4-bit sheet, including composite
 frames (parts drawn over or under the main box, mirrored) and an
-"unmirrored" frame."""
+"unmirrored" frame, and a "components" sheet whose sprites touch."""
 import copy
 import importlib.util
 import json
@@ -349,8 +349,10 @@ def main():
         text = path.read_text()
         assert convert.convert(text, json.loads(text), real, False, lambda _: None) == text, name
     low_depth_boxed_sheet()
+    touching_components_sheet()
     print('pack-test: systems.json, stats, class defaults, damage scale, follow-ups, '
-          'src/sources validation, conversion, 4-bit boxed sheets and composite frames passed')
+          'src/sources validation, conversion, 4-bit boxed sheets, composite frames and '
+          'components sheets passed')
 
 
 def low_depth_boxed_sheet():
@@ -410,6 +412,41 @@ def low_depth_boxed_sheet():
         assert s.frame('a') == ([[o, c, c]], 1, 3)
         assert s.frame('apart') == ([[None, None, c, c, o]] + [[None] * 5] * 2 +
                                     [[c] + [None] * 4], 3, 3)
+
+
+def touching_components_sheet():
+    """On a "components" sheet a frame keeps the pieces wholly inside its
+    rectangle: a neighbour's piece reaching in is dropped, a detached piece
+    of its own is kept, the rectangle may touch the sheet's edge, and one
+    cutting most of a piece is refused."""
+    import hashlib
+    import struct
+    import zlib
+    bg, a, b = b'\x00\x00\xff', b'\xc8\x64\x32', b'\x10\xa0\x10'
+    rows = [[bg] * 8 for _ in range(4)]
+    for y in range(4):
+        rows[y][0] = rows[y][1] = a      # sprite A, two columns wide
+    rows[3][3] = a                       # A's detached spark
+    for y in range(1, 4):
+        rows[y][5] = rows[y][6] = b      # sprite B
+    rows[1][4] = b                       # B's arm reaching into A's columns
+    raw = b''.join(b'\0' + b''.join(r) for r in rows)
+
+    def chunk(k, c):
+        return struct.pack('>I', len(c)) + k + c + struct.pack('>I', zlib.crc32(k + c))
+    png = (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 8, 4, 8, 2, 0, 0, 0)) +
+           chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
+    with tempfile.TemporaryDirectory() as d:
+        (pathlib.Path(d) / 'touch.png').write_bytes(png)
+        man = pathlib.Path(d) / 'touch.json'
+        man.write_text(json.dumps({
+            'sheet': 'touch.png', 'sha256': hashlib.sha256(png).hexdigest(), 'background': '0000ff',
+            'components': True,
+            'frames': {'a': [0, 0, 5, 4, 1, 4], 'b': [4, 1, 3, 3, 1, 3], 'cut': [0, 0, 1, 4, 0, 4]}}))
+        s = pack.Sheet(man)
+        assert s.frame('a') == ([[a, a, None, None]] * 3 + [[a, a, None, a]], 1, 4)
+        assert s.frame('b') == ([[b, b, b], [None, b, b], [None, b, b]], 1, 3)
+        refused('a rectangle cutting its own sprite', lambda: s.frame('cut'))
 
 
 if __name__ == '__main__':

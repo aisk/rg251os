@@ -877,12 +877,17 @@ static void win_round(struct fight_state *s, int winner)
 again:
 	if (s->timer < ROUND_TICKS)
 		intro(s);
-	/* Stand LP into a 10 hp loser: KO within a few calls, round over 180 later. */
-	s->p[0].x = QX(200);
-	s->p[1].x = QX(260);
-	s->p[1 - winner].hp = 10;
-	for (int n = 1; n <= 184; n++)
-		step2(s, winner == 0 && n == 1 ? K(Y) : 0, winner == 1 && n == 1 ? K(Y) : 0);
+	/* Stand LP into a 10 hp loser: KO within a few calls, round over 180
+	 * later. A CPU loser may guard the jab (its life still 10); then the
+	 * jab is thrown again. */
+	for (int tries = 0; tries < 8 && (tries == 0 || (s->mode == MODE_FIGHT &&
+	     s->p[1 - winner].hp == 10)); tries++) {
+		s->p[0].x = QX(200);
+		s->p[1].x = QX(260);
+		s->p[1 - winner].hp = 10;
+		for (int n = 1; n <= 184; n++)
+			step2(s, winner == 0 && n == 1 ? K(Y) : 0, winner == 1 && n == 1 ? K(Y) : 0);
+	}
 	/* Slower jabs (a sword LP) KO a few ticks later. */
 	for (int n = 0; n < 60 && s->mode == MODE_FIGHT && s->p[1 - winner].hp <= 0; n++)
 		step2(s, 0, 0);
