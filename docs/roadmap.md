@@ -36,7 +36,8 @@
 
 ## 待实机验证
 
-- 格斗核心拆成独立仓库和可选构建（2026-11-04）：`make image FIGHTER=1` 的镜像要上机确认 `Fighter.fight` 照常加载、开机日志有 `fight: resident KiB ...`（现在各表都在堆上，`static` 一项应只有几十 KiB）、选人和对战和以前一样，并且 GBA 游戏在 gpSP 下没有 `Failed to map the JIT`；默认 `FIGHTER=0` 的镜像要确认 ROM 列表不再列出 `.fight`，卡上残留的 `config/resume.txt` 指向 fighter 时能回到列表。存档魔数变了，卡上旧的 `Fighter.fight.fighter.state` 会被拒绝并重新开始，日志里会有一行拒绝记录。
+- 格斗舞台上下留黑（2026-11-05，引擎的 letterbox 提交）：舞台比屏幕矮时不再拉伸或镜像背景，而是上下画黑条，HUD 布局不变；China 上 32 下 40 行，Korea 上 44 下 24，Hong Kong 下 40，Power 下 43，Temple 下 39，Courtyard 下 25，Mizuki 下 2。待上机看黑条是否干净（震屏时跟着动、没有残影）、血条压在 China/Korea 的上黑条上是否合适、下黑条和气槽的关系；开机日志每张舞台一行 `letterbox T/B rows`，每局一行 `fight: round N on STAGE: letterbox T/B rows`。
+- 格斗核心拆成独立仓库和可选构建（2026-11-04）：`make image FIGHTER=1` 的镜像要上机确认 `Fighter.fight` 照常加载、开机日志有 `fight: resident KiB ...`（现在各表都在堆上，`static` 一项应只有几十 KiB）、选人和对战和以前一样，并且 GBA 游戏在 gpSP 下没有 `Failed to map the JIT`；默认 `FIGHTER=0` 的镜像要确认 ROM 列表不再列出 `.fight`，卡上残留的 `config/resume.txt` 指向 fighter 时能回到列表。存档魔数变了，卡上旧的 `Fighter.fight.fighter.state` 会被拒绝并重新开始，日志里会有一行拒绝记录。2026-11-05：`deb458d`（引擎 `1082831`）的 `FIGHTER=1` 镜像已经烧到卡上（rootfs sha256 77249e34，Fighter.fight 3ab27706，Fighter.fightsnd f35773e5），还没开机；它不含上面的留黑改动。
 - 格斗连段系统（引擎 `728d820` 到 `58989ac`，包 FIGHTP12、状态 FGSTAT19）：取消窗口、确反（COUNTER 横幅和音效）、浮空追打（发射技和追打点数）、超必杀气槽（HUD 底部的格数和进度条，KOF 体系 3 格）、超必杀（Terry Power Geyser 2141236+P、Chin 236236+P、火星人 214214+P）、指令投（Clark 的 623+P/623+K/41236+K、Shermie 41236+P、Arina 41236+K、真之介 63214+P、枫 41236+HP）、连打输入（Ralf Vulcan Punch 连按 P）、反击缓冲和指令宽容（26/326 算 236）。待上机看：气槽和 COUNTER 的位置是否挡人，浮空后落地是否跳动，指令投落空动画，连按是否好出，Hard 的 AI 是否会接超必杀，KO 冻结（12 tick）手感；开机日志的加载段会列出每个体系的连段参数，600 帧汇总和 KO 行带 counters/supers/juggles 和双方气槽。
 - 独立桌面播放器（引擎 `host/sdl.c`，`make host` 后 `build/fighter-sdl`，只需 SDL2 运行库）在主机上只用 dummy 驱动验证过，真窗口和键盘还没人试。
 
