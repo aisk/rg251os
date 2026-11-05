@@ -42,4 +42,4 @@
 	shallow = true
 [submodule "external/fighter"]
 	path = external/fighter
-	url = /home/asaka/rg251fighter
+	url = https://github.com/aisk/rg251fighter.git
